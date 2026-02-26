@@ -210,11 +210,129 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
 }
 .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); animation: blink 1s infinite; }
 
+/* ═══════════════════════════════════════════════════════
+   SCREEN 3: LLM Configuration
+══════════════════════════════════════════════════════ */
+#screen-config { padding: 24px 20px; overflow-y: auto; }
+
+.config-header {
+  max-width: 900px; margin: 0 auto 24px;
+}
+.config-header h2 {
+  font-size: 1.25em; font-weight: 700; color: var(--text); margin-bottom: 6px;
+}
+.config-header p {
+  font-size: 0.88em; color: var(--muted); margin-bottom: 12px;
+}
+.config-mode-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #1f6feb22; border: 1px solid #58a6ff44;
+  color: var(--blue); font-size: 0.75em; font-weight: 600;
+  padding: 3px 10px; border-radius: 12px;
+}
+.config-mode-badge.auto { background: #23833022; border-color: #3fb95044; color: var(--green); }
+
+/* LLM Grid */
+.llm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  max-width: 900px;
+  margin: 0 auto 28px;
+}
+
+.llm-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  transition: border-color 0.2s, transform 0.15s, opacity 0.2s;
+  animation: fadeSlideIn 0.3s ease both;
+  cursor: pointer; user-select: none;
+}
+.llm-card:hover { border-color: var(--border-h); transform: translateY(-1px); }
+.llm-card.enabled { border-color: var(--green); background: #23833010; }
+.llm-card.disabled { opacity: 0.55; }
+
+.llm-card-name {
+  font-size: 0.9em; font-weight: 600; color: var(--text); text-align: center;
+}
+.llm-card-cmd {
+  font-size: 0.75em; color: var(--muted); font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Toggle switch */
+.toggle-wrap { display: flex; align-items: center; gap: 8px; }
+.toggle {
+  position: relative; display: inline-block; width: 36px; height: 20px;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  position: absolute; inset: 0;
+  background: var(--border); border-radius: 20px;
+  transition: background 0.2s;
+  cursor: pointer;
+}
+.toggle input:checked + .toggle-track { background: var(--green); }
+.toggle-thumb {
+  position: absolute; top: 3px; left: 3px;
+  width: 14px; height: 14px;
+  background: white; border-radius: 50%;
+  transition: transform 0.2s;
+  pointer-events: none;
+}
+.toggle input:checked ~ .toggle-thumb { transform: translateX(16px); }
+
+/* Config actions */
+.config-actions {
+  display: flex; gap: 10px; align-items: center;
+  max-width: 900px; margin: 0 auto;
+  flex-wrap: wrap;
+}
+.btn-primary {
+  background: var(--blue); border: 1px solid #79b8ff44;
+  color: #0d1117; font-weight: 700;
+  padding: 7px 18px; border-radius: 6px; cursor: pointer; font-size: 0.85em;
+  transition: background 0.15s, transform 0.1s;
+}
+.btn-primary:hover { background: #79b8ff; transform: translateY(-1px); }
+.btn-secondary {
+  background: #21262d; border: 1px solid var(--border);
+  color: var(--text); font-weight: 500;
+  padding: 7px 18px; border-radius: 6px; cursor: pointer; font-size: 0.85em;
+  transition: border-color 0.15s, background 0.15s;
+}
+.btn-secondary:hover { border-color: var(--muted); background: #1c2128; }
+
+/* Gear button */
+.btn-gear {
+  background: #21262d; border: 1px solid var(--border); color: var(--muted);
+  width: 30px; height: 30px; border-radius: 6px; cursor: pointer; font-size: 1em;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.btn-gear:hover { border-color: var(--blue); color: var(--blue); background: #1c2128; }
+.btn-gear.active { border-color: var(--blue); color: var(--blue); background: #1f6feb22; }
+
+/* Toast */
+.toast {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 200; padding: 10px 20px; border-radius: 8px; font-size: 0.85em; font-weight: 600;
+  white-space: nowrap; pointer-events: none;
+  animation: toastIn 0.25s ease;
+  box-shadow: 0 4px 16px #00000066;
+}
+.toast.success { background: #238330cc; border: 1px solid var(--green); color: #fff; }
+.toast.error   { background: #b91c1c99; border: 1px solid var(--red);   color: #fff; }
+@keyframes toastIn { from { opacity: 0; top: 50px; } to { opacity: 1; top: 64px; } }
+@keyframes toastOut { from { opacity: 1; } to { opacity: 0; } }
+.toast.hiding { animation: toastOut 0.35s ease forwards; }
+
 /* ── Responsive ───────────────────────────────────────── */
 @media (max-width: 640px) {
   #sidebar { display: none; }
   .grid { grid-template-columns: 1fr; }
   .bubble { max-width: 140px; }
+  .llm-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
 </style>
 </head>
@@ -224,10 +342,11 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
   <header>
     <h1 id="header-title">🔭 Deliberation Observer</h1>
     <div class="header-actions">
-      <button class="btn back" id="btn-back" onclick="showList()" style="display:none">
+      <button class="btn back" id="btn-back" style="display:none">
         ← Back
       </button>
       <div id="conn-status"></div>
+      <button class="btn-gear" id="btn-gear" title="LLM Configuration" onclick="showConfig()">⚙</button>
       <button class="btn" id="btn-refresh" onclick="loadSessions()">↻ Refresh</button>
     </div>
   </header>
@@ -293,6 +412,24 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
       </div>
     </div>
   </div>
+
+  <!-- ── Screen 3: LLM Configuration ────────────────── -->
+  <div id="screen-config" class="screen">
+    <div class="config-header">
+      <h2>LLM Configuration</h2>
+      <p>토론에 참여할 LLM을 선택하세요 / Select LLMs for deliberation</p>
+      <span class="config-mode-badge auto" id="config-mode-badge">Auto-detect</span>
+    </div>
+
+    <div class="llm-grid" id="llm-grid">
+      <!-- Cards injected by renderLlmGrid() -->
+    </div>
+
+    <div class="config-actions">
+      <button class="btn-primary" onclick="saveConfig()">Save</button>
+      <button class="btn-secondary" onclick="resetConfig()">Reset to Auto-detect</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -302,6 +439,7 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
 let sessions       = [];
 let currentSession = null;
 let currentStream  = null;
+let previousScreen = 'list'; // tracks where to go Back from config
 
 /* ══════════════════════════════════════════════════════
    MASCOT SYSTEM
@@ -657,20 +795,26 @@ function showList() {
 
   document.getElementById('screen-list').classList.add('active');
   document.getElementById('screen-detail').classList.remove('active');
+  document.getElementById('screen-config').classList.remove('active');
   document.getElementById('btn-back').style.display = 'none';
   document.getElementById('btn-refresh').style.display = '';
+  document.getElementById('btn-gear').classList.remove('active');
   document.getElementById('header-title').textContent = '🔭 Deliberation Observer';
   document.getElementById('conn-status').innerHTML = '';
+  previousScreen = 'list';
   loadSessions();
 }
 
 function showDetail(sessionId) {
   document.getElementById('screen-list').classList.remove('active');
   document.getElementById('screen-detail').classList.add('active');
+  document.getElementById('screen-config').classList.remove('active');
   document.getElementById('btn-back').style.display = '';
   document.getElementById('btn-refresh').style.display = 'none';
+  document.getElementById('btn-gear').classList.remove('active');
   document.getElementById('chat-log').innerHTML = '';
   document.getElementById('speaker-bar').innerHTML = '';
+  previousScreen = 'detail';
 
   // Find session data for initial render while SSE loads
   const found = sessions.find(s => (s.id || s.session_id) === sessionId);
@@ -682,11 +826,226 @@ function showDetail(sessionId) {
   connectSSE(sessionId);
 }
 
+function showConfig() {
+  // Toggle: if already on config, go back
+  if (document.getElementById('screen-config').classList.contains('active')) {
+    if (previousScreen === 'detail' && currentSession) {
+      const id = currentSession.id || currentSession.session_id;
+      showDetail(id);
+    } else {
+      showList();
+    }
+    return;
+  }
+
+  // Remember where we came from
+  if (document.getElementById('screen-detail').classList.contains('active')) {
+    previousScreen = 'detail';
+  } else {
+    previousScreen = 'list';
+  }
+
+  document.getElementById('screen-list').classList.remove('active');
+  document.getElementById('screen-detail').classList.remove('active');
+  document.getElementById('screen-config').classList.add('active');
+  document.getElementById('btn-back').style.display = '';
+  document.getElementById('btn-refresh').style.display = 'none';
+  document.getElementById('btn-gear').classList.add('active');
+  document.getElementById('header-title').textContent = '⚙ LLM Configuration';
+  document.getElementById('conn-status').innerHTML = '';
+
+  loadConfig();
+}
+
+// Override Back button behavior to respect config screen
+document.getElementById('btn-back').addEventListener('click', function(e) {
+  e.stopPropagation();
+  if (document.getElementById('screen-config').classList.contains('active')) {
+    if (previousScreen === 'detail' && currentSession) {
+      const id = currentSession.id || currentSession.session_id;
+      showDetail(id);
+    } else {
+      showList();
+    }
+  } else {
+    showList();
+  }
+});
+
 /* ══════════════════════════════════════════════════════
    UTILITIES
 ══════════════════════════════════════════════════════ */
 function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ══════════════════════════════════════════════════════
+   LLM CONFIG — Master list
+══════════════════════════════════════════════════════ */
+const LLM_LIST = [
+  { key: 'claude',    name: 'Claude',       cmd: 'claude'    },
+  { key: 'codex',     name: 'Codex',        cmd: 'codex'     },
+  { key: 'gemini',    name: 'Gemini',       cmd: 'gemini'    },
+  { key: 'qwen',      name: 'Qwen',         cmd: 'qwen'      },
+  { key: 'chatgpt',   name: 'ChatGPT',      cmd: 'chatgpt'   },
+  { key: 'aider',     name: 'Aider',        cmd: 'aider'     },
+  { key: 'llm',       name: 'LLM (Simon)',  cmd: 'llm'       },
+  { key: 'opencode',  name: 'OpenCode',     cmd: 'opencode'  },
+  { key: 'cursor',    name: 'Cursor',       cmd: 'cursor'    },
+  { key: 'continue',  name: 'Continue',     cmd: 'continue'  },
+];
+
+// Extend MASCOTS with any missing entries
+Object.assign(MASCOTS, {
+  aider:    { initial: 'Ai', color: '#E44D26', shape: 'circle'  },
+  llm:      { initial: 'L',  color: '#5B6EAE', shape: 'square'  },
+  opencode: { initial: 'Oc', color: '#00C7B7', shape: 'hexagon' },
+  cursor:   { initial: 'Cr', color: '#6E6E8A', shape: 'circle'  },
+  continue: { initial: 'Co', color: '#7C3AED', shape: 'diamond' },
+});
+
+let configState = []; // array of enabled LLM keys
+
+/* ══════════════════════════════════════════════════════
+   LLM CONFIG — API
+══════════════════════════════════════════════════════ */
+async function loadConfig() {
+  try {
+    const res  = await fetch('/api/config');
+    const data = await res.json();
+    configState = Array.isArray(data.enabled_clis) ? data.enabled_clis : [];
+  } catch (e) {
+    configState = [];
+  }
+  renderLlmGrid();
+  updateModeBadge();
+}
+
+async function saveConfig() {
+  const enabled = LLM_LIST
+    .filter(llm => {
+      const el = document.getElementById(`toggle-${llm.key}`);
+      return el && el.checked;
+    })
+    .map(llm => llm.key);
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled_clis: enabled }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    configState = enabled;
+    updateModeBadge();
+    showToast('Configuration saved', 'success');
+  } catch (e) {
+    showToast('Save failed: ' + e.message, 'error');
+  }
+}
+
+async function resetConfig() {
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled_clis: [] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    configState = [];
+    renderLlmGrid();
+    updateModeBadge();
+    showToast('Reset to Auto-detect', 'success');
+  } catch (e) {
+    showToast('Reset failed: ' + e.message, 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   LLM CONFIG — Rendering
+══════════════════════════════════════════════════════ */
+function renderLlmGrid() {
+  const grid = document.getElementById('llm-grid');
+  if (!grid) return;
+
+  grid.innerHTML = LLM_LIST.map((llm, i) => {
+    const isEnabled = configState.includes(llm.key);
+    const cardCls   = isEnabled ? 'enabled' : 'disabled';
+    const delay     = i * 40;
+    const avatar    = renderAvatar(llm.key, 'done', 48);
+
+    return `<div class="llm-card ${cardCls}" id="card-${llm.key}"
+              style="animation-delay:${delay}ms"
+              onclick="toggleLlmCard('${llm.key}')">
+      ${avatar}
+      <span class="llm-card-name">${escHtml(llm.name)}</span>
+      <span class="llm-card-cmd">${escHtml(llm.cmd)}</span>
+      <div class="toggle-wrap">
+        <label class="toggle" onclick="event.stopPropagation()">
+          <input type="checkbox" id="toggle-${llm.key}"
+            ${isEnabled ? 'checked' : ''}
+            onchange="syncCardState('${llm.key}')">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleLlmCard(key) {
+  const checkbox = document.getElementById(`toggle-${key}`);
+  if (!checkbox) return;
+  checkbox.checked = !checkbox.checked;
+  syncCardState(key);
+}
+
+function syncCardState(key) {
+  const checkbox = document.getElementById(`toggle-${key}`);
+  const card     = document.getElementById(`card-${key}`);
+  if (!checkbox || !card) return;
+  if (checkbox.checked) {
+    card.classList.add('enabled');
+    card.classList.remove('disabled');
+  } else {
+    card.classList.remove('enabled');
+    card.classList.add('disabled');
+  }
+  updateModeBadge();
+}
+
+function updateModeBadge() {
+  const badge   = document.getElementById('config-mode-badge');
+  if (!badge) return;
+  const checked = LLM_LIST.filter(llm => {
+    const el = document.getElementById(`toggle-${llm.key}`);
+    return el && el.checked;
+  });
+  const isAuto = checked.length === 0;
+  badge.textContent = isAuto ? 'Auto-detect' : `Custom (${checked.length} selected)`;
+  badge.classList.toggle('auto', isAuto);
+}
+
+/* ══════════════════════════════════════════════════════
+   TOAST
+══════════════════════════════════════════════════════ */
+let toastTimer = null;
+function showToast(message, type = 'success') {
+  // Remove any existing toast
+  const existing = document.getElementById('toast-el');
+  if (existing) existing.remove();
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+
+  const toast = document.createElement('div');
+  toast.id        = 'toast-el';
+  toast.className = `toast ${type}`;
+  toast.textContent = (type === 'success' ? '✓ ' : '✕ ') + message;
+  document.body.appendChild(toast);
+
+  toastTimer = setTimeout(() => {
+    toast.classList.add('hiding');
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 380);
+  }, 3000);
 }
 
 /* ══════════════════════════════════════════════════════

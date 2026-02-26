@@ -21,6 +21,8 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "state");
+const CONFIG_PATH = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "config.json");
+const DEFAULT_CLI_CANDIDATES = ["claude", "codex", "gemini", "qwen", "chatgpt", "aider", "llm", "opencode", "cursor", "continue"];
 const DEFAULT_PORT = 3847;
 
 function getProjectSlug() {
@@ -127,6 +129,20 @@ function getDashboardHtml() {
   }
 }
 
+function loadConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveConfig(config) {
+  const dir = path.dirname(CONFIG_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+}
+
 // HTTP Server
 function createServer(port) {
   const server = http.createServer((req, res) => {
@@ -135,7 +151,15 @@ function createServer(port) {
 
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // OPTIONS preflight
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
     // Routes
     if (pathname === "/" || pathname === "/index.html") {
@@ -214,6 +238,48 @@ function createServer(port) {
       req.on("close", () => {
         const clients = sseClients.get(sessionId) || [];
         sseClients.set(sessionId, clients.filter(c => c !== res));
+      });
+      return;
+    }
+
+    if (pathname === "/api/config" && req.method === "GET") {
+      const config = loadConfig();
+      const enabledClis = Array.isArray(config.enabled_clis) ? config.enabled_clis : [];
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        mode: enabledClis.length === 0 ? "auto-detect" : "config",
+        enabled_clis: enabledClis,
+        all_clis: DEFAULT_CLI_CANDIDATES,
+        updated: config.updated || null,
+      }));
+      return;
+    }
+
+    if (pathname === "/api/config" && req.method === "POST") {
+      let body = "";
+      req.on("data", chunk => { body += chunk; });
+      req.on("end", () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          return;
+        }
+        const enabledClis = Array.isArray(parsed.enabled_clis) ? parsed.enabled_clis : [];
+        const config = {
+          enabled_clis: enabledClis,
+          updated: new Date().toISOString(),
+        };
+        saveConfig(config);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          mode: enabledClis.length === 0 ? "auto-detect" : "config",
+          enabled_clis: enabledClis,
+          all_clis: DEFAULT_CLI_CANDIDATES,
+          updated: config.updated,
+        }));
       });
       return;
     }
