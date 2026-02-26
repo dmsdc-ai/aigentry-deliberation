@@ -1,0 +1,20 @@
+{
+  "provider": "chatgpt",
+  "version": "1.0.0",
+  "domains": ["chat.openai.com", "chatgpt.com"],
+  "selectors": {
+    "inputSelector": "#prompt-textarea",
+    "sendButton": "button[data-testid='send-button']",
+    "responseSelector": ".markdown.prose",
+    "responseContainer": "[data-message-author-role='assistant']",
+    "streamingIndicator": ".result-streaming",
+    "conversationList": "nav[aria-label='Chat history']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 200,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "ChatGPT DOM selectors - update version when selectors change"
+}

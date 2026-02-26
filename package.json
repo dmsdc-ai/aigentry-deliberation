@@ -1,0 +1,55 @@
+{
+  "name": "@dmsdc-ai/aigentry-deliberation",
+  "version": "2.5.0",
+  "description": "MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmsdc-ai/aigentry-deliberation.git"
+  },
+  "homepage": "https://github.com/dmsdc-ai/aigentry-deliberation#readme",
+  "bugs": {
+    "url": "https://github.com/dmsdc-ai/aigentry-deliberation/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "main": "index.js",
+  "bin": {
+    "mcp-deliberation": "./index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "browser-control-port.js",
+    "degradation-state-machine.js",
+    "session-monitor.sh",
+    "session-monitor-win.js",
+    "selectors/**",
+    "skills/**",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "mcp",
+    "deliberation",
+    "ai",
+    "multi-agent",
+    "debate",
+    "claude",
+    "chatgpt",
+    "gemini",
+    "codex"
+  ]
+}

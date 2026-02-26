@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "description": "Maps Chrome extension side panel titles to LLM providers for deliberation tab detection",
+  "providers": [
+    {
+      "provider": "claude-extension",
+      "selectorConfig": "claude-extension",
+      "titlePatterns": ["Claude"],
+      "notes": "Anthropic Claude Chrome extension side panel"
+    },
+    {
+      "provider": "chatgpt-extension",
+      "selectorConfig": "chatgpt-extension",
+      "titlePatterns": ["ChatGPT"],
+      "notes": "OpenAI ChatGPT Chrome extension side panel"
+    },
+    {
+      "provider": "gemini-extension",
+      "selectorConfig": "gemini-extension",
+      "titlePatterns": ["Gemini"],
+      "notes": "Google Gemini Chrome extension side panel"
+    }
+  ]
+}

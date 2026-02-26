@@ -1,0 +1,8 @@
+node_modules/
+state/
+*.log
+.env
+.env.local
+*.bak
+.DS_Store
+.omc/

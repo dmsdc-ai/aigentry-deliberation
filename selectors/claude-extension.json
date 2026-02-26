@@ -1,0 +1,21 @@
+{
+  "provider": "claude-extension",
+  "version": "1.0.0",
+  "domains": [],
+  "titlePatterns": ["Claude"],
+  "isExtension": true,
+  "selectors": {
+    "inputSelector": "[contenteditable='true']",
+    "sendButton": "button[aria-label='Send']",
+    "responseSelector": ".prose",
+    "responseContainer": "[data-is-streaming]",
+    "streamingIndicator": "[data-is-streaming='true']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Claude extension side panel - placeholder selectors, update after DOM inspection"
+}

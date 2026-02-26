@@ -1,0 +1,21 @@
+{
+  "provider": "gemini-extension",
+  "version": "1.0.0",
+  "domains": [],
+  "titlePatterns": ["Gemini"],
+  "isExtension": true,
+  "selectors": {
+    "inputSelector": ".ql-editor",
+    "sendButton": "button[aria-label='Send message']",
+    "responseSelector": ".response-content",
+    "responseContainer": ".model-response-text",
+    "streamingIndicator": ".loading-indicator"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Gemini extension side panel - placeholder selectors, update after DOM inspection"
+}

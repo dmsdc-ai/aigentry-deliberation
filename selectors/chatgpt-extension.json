@@ -1,0 +1,21 @@
+{
+  "provider": "chatgpt-extension",
+  "version": "1.0.0",
+  "domains": [],
+  "titlePatterns": ["ChatGPT"],
+  "isExtension": true,
+  "selectors": {
+    "inputSelector": "#prompt-textarea",
+    "sendButton": "button[data-testid='send-button']",
+    "responseSelector": ".markdown.prose",
+    "responseContainer": "[data-message-author-role='assistant']",
+    "streamingIndicator": ".result-streaming"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "ChatGPT extension side panel - placeholder selectors, update after DOM inspection"
+}
