@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deliberation Observer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+  h1 { color: #58a6ff; margin-bottom: 20px; font-size: 1.4em; }
+  .sessions { display: flex; flex-direction: column; gap: 12px; }
+  .session-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; cursor: pointer; transition: border-color 0.2s; }
+  .session-card:hover { border-color: #58a6ff; }
+  .session-card.active { border-color: #3fb950; }
+  .session-card h2 { font-size: 1em; color: #58a6ff; margin-bottom: 8px; }
+  .meta { font-size: 0.85em; color: #8b949e; }
+  .meta span { margin-right: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; font-weight: 600; }
+  .badge.active { background: #23833022; color: #3fb950; border: 1px solid #3fb95044; }
+  .badge.done { background: #58a6ff22; color: #58a6ff; border: 1px solid #58a6ff44; }
+  #log-panel { display: none; margin-top: 20px; }
+  #log-panel.visible { display: block; }
+  #log-panel h2 { color: #58a6ff; margin-bottom: 12px; font-size: 1.1em; }
+  .log-entry { background: #161b22; border-left: 3px solid #30363d; padding: 12px 16px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
+  .log-entry .speaker { color: #d2a8ff; font-weight: 600; }
+  .log-entry .round { color: #8b949e; font-size: 0.8em; }
+  .log-entry .content { margin-top: 6px; white-space: pre-wrap; font-size: 0.9em; line-height: 1.5; }
+  .status-bar { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; display: flex; gap: 16px; align-items: center; }
+  .status-bar .current { color: #3fb950; font-weight: 600; }
+  .empty { color: #484f58; text-align: center; padding: 40px; }
+  .refresh-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85em; }
+  .refresh-btn:hover { border-color: #58a6ff; }
+</style>
+</head>
+<body>
+<h1>Deliberation Observer <button class="refresh-btn" onclick="loadSessions()">새로고침</button></h1>
+<div id="sessions" class="sessions"><div class="empty">로딩 중...</div></div>
+<div id="log-panel">
+  <h2 id="log-title"></h2>
+  <div id="log-status" class="status-bar"></div>
+  <div id="log-entries"></div>
+</div>
+<script>
+let currentStream = null;
+
+async function loadSessions() {
+  try {
+    const res = await fetch('/api/sessions');
+    const sessions = await res.json();
+    const el = document.getElementById('sessions');
+    if (sessions.length === 0) {
+      el.innerHTML = '<div class="empty">활성 세션이 없습니다</div>';
+      return;
+    }
+    el.innerHTML = sessions.map(s => `
+      <div class="session-card ${s.status}" onclick="openSession('${s.id}')">
+        <h2>${s.topic}</h2>
+        <div class="meta">
+          <span class="badge ${s.status}">${s.status}</span>
+          <span>R${s.current_round}/${s.max_rounds}</span>
+          <span>&#128100; ${s.current_speaker}</span>
+          <span>&#128172; ${s.log_count}</span>
+          <span>${s.speakers.join(', ')}</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    document.getElementById('sessions').innerHTML = `<div class="empty">연결 실패: ${e.message}</div>`;
+  }
+}
+
+function openSession(id) {
+  if (currentStream) { currentStream.close(); currentStream = null; }
+  const panel = document.getElementById('log-panel');
+  const entries = document.getElementById('log-entries');
+  const status = document.getElementById('log-status');
+  panel.classList.add('visible');
+  entries.innerHTML = '';
+  document.getElementById('log-title').textContent = id;
+
+  const es = new EventSource(`/api/sessions/${id}/stream`);
+  currentStream = es;
+
+  es.addEventListener('snapshot', (e) => {
+    const data = JSON.parse(e.data);
+    status.innerHTML = `<span>상태: <b>${data.status}</b></span><span class="current">현재: ${data.current_speaker}</span><span>R${data.current_round}/${data.max_rounds}</span>`;
+    entries.innerHTML = '';
+    (data.log || []).forEach(entry => addLogEntry(entry));
+  });
+
+  es.addEventListener('turn', (e) => {
+    addLogEntry(JSON.parse(e.data));
+  });
+
+  es.addEventListener('status', (e) => {
+    const data = JSON.parse(e.data);
+    status.innerHTML = `<span>상태: <b>${data.status}</b></span><span class="current">현재: ${data.current_speaker}</span><span>R${data.current_round}/${data.max_rounds}</span>`;
+  });
+
+  es.onerror = () => { status.innerHTML += ' <span style="color:#f85149">connection lost</span>'; };
+}
+
+function addLogEntry(entry) {
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  const content = (entry.content || '').length > 500 ? entry.content.substring(0, 500) + '...' : entry.content;
+  el.innerHTML = `<span class="speaker">${entry.speaker}</span> <span class="round">Round ${entry.round}</span>${entry.role_drift ? ' <span style="color:#d29922">drift</span>' : ''}<div class="content">${escapeHtml(content)}</div>`;
+  document.getElementById('log-entries').appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadSessions();
+setInterval(loadSessions, 5000);
+</script>
+</body>
+</html>

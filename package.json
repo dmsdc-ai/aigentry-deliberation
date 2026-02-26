@@ -18,24 +18,29 @@
   },
   "main": "index.js",
   "bin": {
-    "mcp-deliberation": "./index.js"
+    "mcp-deliberation": "./index.js",
+    "deliberation-observer": "./observer.js"
   },
   "engines": {
     "node": ">=18"
   },
   "files": [
     "index.js",
+    "observer.js",
     "browser-control-port.js",
     "degradation-state-machine.js",
     "session-monitor.sh",
     "session-monitor-win.js",
     "selectors/**",
     "skills/**",
+    "public/**",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -51,5 +56,8 @@
     "chatgpt",
     "gemini",
     "codex"
-  ]
+  ],
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
 }

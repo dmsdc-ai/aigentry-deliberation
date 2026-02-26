@@ -183,6 +183,77 @@ function parseVotes(text) {
   return votes;
 }
 
+let _rolePresetsCache = null;
+function loadRolePresets() {
+  if (_rolePresetsCache) return _rolePresetsCache;
+  try {
+    const presetsPath = path.join(__dirnameEsm, "selectors", "role-presets.json");
+    _rolePresetsCache = JSON.parse(fs.readFileSync(presetsPath, "utf-8"));
+    return _rolePresetsCache;
+  } catch {
+    _rolePresetsCache = { presets: {} };
+    return _rolePresetsCache;
+  }
+}
+
+function applyRolePreset(preset, speakers) {
+  const presets = loadRolePresets();
+  const presetDef = presets.presets[preset];
+  if (!presetDef) return {};
+
+  const roles = presetDef.roles;
+  const result = {};
+  for (let i = 0; i < speakers.length; i++) {
+    result[speakers[i]] = roles[i % roles.length];
+  }
+  return result;
+}
+
+// ── Graceful Degradation Matrix ──────────────────────────────────
+
+const DEGRADATION_TIERS = {
+  monitoring: {
+    tier1: { name: "tmux", description: "tmux 실시간 모니터링 윈도우", check: () => { try { execFileSync("which", ["tmux"], { stdio: "pipe" }); return true; } catch { return false; } } },
+    tier2: { name: "logfile", description: "로그 파일 tail 모니터링", check: () => true },
+    tier3: { name: "silent", description: "모니터링 없음 (로그만 기록)", check: () => true },
+  },
+  browser: {
+    tier1: { name: "cdp_auto", description: "CDP 자동 전송/수집", check: async () => { try { const res = await fetch("http://127.0.0.1:9222/json/version", { signal: AbortSignal.timeout(2000) }); return res.ok; } catch { return false; } } },
+    tier2: { name: "clipboard", description: "클립보드 기반 수동 전달", check: () => true },
+    tier3: { name: "manual", description: "완전 수동 복사/붙여넣기", check: () => true },
+  },
+  terminal: {
+    tier1: { name: "auto_open", description: "터미널 앱 자동 오픈", check: () => process.platform === "darwin" || process.platform === "win32" },
+    tier2: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
+    tier3: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
+  },
+};
+
+async function detectDegradationLevels() {
+  const levels = {};
+  for (const [feature, tiers] of Object.entries(DEGRADATION_TIERS)) {
+    for (const tierKey of ["tier1", "tier2", "tier3"]) {
+      const tier = tiers[tierKey];
+      const available = await Promise.resolve(tier.check());
+      if (available) {
+        levels[feature] = { tier: tierKey, name: tier.name, description: tier.description };
+        break;
+      }
+    }
+  }
+  return levels;
+}
+
+function formatDegradationReport(levels) {
+  const lines = [];
+  for (const [feature, info] of Object.entries(levels)) {
+    const tierNum = parseInt(info.tier.replace("tier", ""));
+    const indicator = tierNum === 1 ? "🟢" : tierNum === 2 ? "🟡" : "🔴";
+    lines.push(`  ${indicator} **${feature}**: ${info.name} — ${info.description}`);
+  }
+  return lines.join("\n");
+}
+
 const PRODUCT_DISCLAIMER = "ℹ️ 이 도구는 외부 웹사이트를 영구 수정하지 않습니다. 브라우저 문맥을 읽기 전용으로 참조하여 발화자를 라우팅합니다.";
 const LOCKS_SUBDIR = ".locks";
 const LOCK_RETRY_MS = 25;
@@ -1952,6 +2023,8 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
 
     const votes = parseVotes(content);
     const suggestedRole = inferSuggestedRole(content);
+    const assignedRole = (state.speaker_roles || {})[normalizedSpeaker] || "free";
+    const roleDrift = assignedRole !== "free" && suggestedRole !== "free" && assignedRole !== suggestedRole;
     state.log.push({
       round: state.current_round,
       speaker: normalizedSpeaker,
@@ -1962,6 +2035,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       fallback_reason: fallback_reason || null,
       votes: votes.length > 0 ? votes : undefined,
       suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
+      role_drift: roleDrift || undefined,
     });
 
     state.current_speaker = selectNextSpeaker(state);
@@ -2056,8 +2130,10 @@ server.tool(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["critic", "implementer", "mediator", "researcher", "free"])).optional()
     ).describe("speaker별 역할 배정 (예: {\"claude\": \"critic\", \"codex\": \"implementer\"})"),
+    role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
+      .describe("역할 프리셋 (balanced/debate/research/brainstorm/review/consensus). speaker_roles가 명시되면 무시됨"),
   },
-  safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles }) => {
+  safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
     const sessionId = generateSessionId(topic);
     const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0;
     const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
@@ -2091,6 +2167,8 @@ server.tool(
       ? "수동 지정"
       : (autoDiscoveredSpeakers.length > 0 ? "자동 탐색(PATH)" : "기본값");
 
+    const degradationLevels = await detectDegradationLevels();
+
     const state = {
       id: sessionId,
       project: getProjectSlug(),
@@ -2106,7 +2184,8 @@ server.tool(
       pending_turn_id: generateTurnId(),
       monitor_terminal_window_ids: [],
       ordering_strategy: ordering_strategy || "cyclic",
-      speaker_roles: speaker_roles || {},
+      speaker_roles: speaker_roles || (role_preset ? applyRolePreset(role_preset, speakerOrder) : {}),
+      degradation: degradationLevels,
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
     };
@@ -2176,7 +2255,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Deliberation 시작!\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}\n\n**역할 배정:**\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.`,
+        text: `✅ Deliberation 시작!\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.`,
       }],
     };
   })
@@ -2237,7 +2316,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `**세션:** ${state.id}\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**상태:** ${state.status}\n**라운드:** ${state.current_round}/${state.max_rounds}\n**참가자:** ${state.speakers.join(", ")}\n**현재 차례:** ${state.current_speaker}\n**응답 수:** ${state.log.length}`,
+        text: `**세션:** ${state.id}\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**상태:** ${state.status}\n**라운드:** ${state.current_round}/${state.max_rounds}\n**참가자:** ${state.speakers.join(", ")}\n**현재 차례:** ${state.current_speaker}\n**응답 수:** ${state.log.length}${state.degradation ? `\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}` : ""}`,
       }],
     };
   }
@@ -2995,5 +3074,13 @@ server.tool(
 
 // ── Start ──────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Only start server when run directly (not imported for testing)
+const __currentFile = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
+const __entryFile = process.argv[1] ? path.resolve(process.argv[1]) : null;
+if (__entryFile && path.resolve(__currentFile) === __entryFile) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+// ── Test exports (used by vitest) ──
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS };
