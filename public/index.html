@@ -1,118 +1,704 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Deliberation Observer</title>
+<title>🔭 Deliberation Observer</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
-  h1 { color: #58a6ff; margin-bottom: 20px; font-size: 1.4em; }
-  .sessions { display: flex; flex-direction: column; gap: 12px; }
-  .session-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; cursor: pointer; transition: border-color 0.2s; }
-  .session-card:hover { border-color: #58a6ff; }
-  .session-card.active { border-color: #3fb950; }
-  .session-card h2 { font-size: 1em; color: #58a6ff; margin-bottom: 8px; }
-  .meta { font-size: 0.85em; color: #8b949e; }
-  .meta span { margin-right: 12px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; font-weight: 600; }
-  .badge.active { background: #23833022; color: #3fb950; border: 1px solid #3fb95044; }
-  .badge.done { background: #58a6ff22; color: #58a6ff; border: 1px solid #58a6ff44; }
-  #log-panel { display: none; margin-top: 20px; }
-  #log-panel.visible { display: block; }
-  #log-panel h2 { color: #58a6ff; margin-bottom: 12px; font-size: 1.1em; }
-  .log-entry { background: #161b22; border-left: 3px solid #30363d; padding: 12px 16px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
-  .log-entry .speaker { color: #d2a8ff; font-weight: 600; }
-  .log-entry .round { color: #8b949e; font-size: 0.8em; }
-  .log-entry .content { margin-top: 6px; white-space: pre-wrap; font-size: 0.9em; line-height: 1.5; }
-  .status-bar { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; display: flex; gap: 16px; align-items: center; }
-  .status-bar .current { color: #3fb950; font-weight: 600; }
-  .empty { color: #484f58; text-align: center; padding: 40px; }
-  .refresh-btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85em; }
-  .refresh-btn:hover { border-color: #58a6ff; }
+/* ── Reset & Base ─────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --border:   #30363d;
+  --border-h: #58a6ff;
+  --text:     #c9d1d9;
+  --muted:    #8b949e;
+  --blue:     #58a6ff;
+  --green:    #3fb950;
+  --red:      #f85149;
+  --yellow:   #d29922;
+  --purple:   #d2a8ff;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'SF Pro Text', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ── Animations ───────────────────────────────────────── */
+@keyframes pulse        { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.85; } }
+@keyframes fadeSlideIn  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes spin         { to { transform: rotate(360deg); } }
+@keyframes blink        { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── Layout ───────────────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky; top: 0; z-index: 100;
+}
+header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.btn {
+  background: #21262d; border: 1px solid var(--border); color: var(--text);
+  padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 0.82em;
+  transition: border-color 0.15s, background 0.15s;
+}
+.btn:hover { border-color: var(--blue); background: #1c2128; }
+.btn.back { display: flex; align-items: center; gap: 6px; }
+
+/* ── Screen management ────────────────────────────────── */
+.screen { display: none; flex: 1; overflow: hidden; }
+.screen.active { display: flex; flex-direction: column; }
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 1: Session List
+══════════════════════════════════════════════════════ */
+#screen-list { padding: 20px; overflow-y: auto; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.session-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 18px; cursor: pointer;
+  transition: border-color 0.2s, transform 0.15s;
+  animation: fadeSlideIn 0.3s ease both;
+}
+.session-card:hover { border-color: var(--blue); transform: translateY(-1px); }
+.session-card.active-border { border-color: var(--green); }
+
+.card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+.card-topic { font-size: 0.95em; font-weight: 600; color: var(--text); flex: 1; }
+
+/* Status badges */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 12px;
+  font-size: 0.72em; font-weight: 600; white-space: nowrap;
+}
+.badge.active     { background: #23833022; color: var(--green); border: 1px solid #3fb95044; }
+.badge.awaiting_synthesis { background: #1f6feb22; color: var(--blue); border: 1px solid #58a6ff44; }
+.badge.synthesized { background: #30363d; color: var(--muted); border: 1px solid var(--border); }
+
+/* Mini avatar row */
+.avatar-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+.avatar { position: relative; display: inline-flex; flex-shrink: 0; }
+.avatar svg { display: block; }
+.avatar.idle svg { opacity: 0.45; }
+.avatar.speaking svg { animation: pulse 1.4s ease-in-out infinite; }
+
+/* Speech bubble */
+.bubble {
+  position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: #21262d; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 8px;
+  font-size: 0.72em; color: var(--text); white-space: nowrap;
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; z-index: 10;
+  opacity: 0; transition: opacity 0.15s;
+}
+.bubble::after {
+  content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: var(--border);
+}
+.avatar.speaking .bubble,
+.avatar:hover .bubble { opacity: 1; }
+
+/* Progress bar */
+.progress-wrap { margin-bottom: 10px; }
+.progress-label { display: flex; justify-content: space-between; font-size: 0.78em; color: var(--muted); margin-bottom: 4px; }
+.progress-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.progress-fill  { height: 100%; background: var(--blue); border-radius: 2px; transition: width 0.4s ease; }
+.progress-fill.green { background: var(--green); }
+
+/* Card meta */
+.card-meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.78em; color: var(--muted); }
+
+/* Empty / loading */
+.empty { color: var(--muted); text-align: center; padding: 60px 20px; font-size: 0.95em; }
+.spinner {
+  width: 20px; height: 20px; border: 2px solid var(--border);
+  border-top-color: var(--blue); border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin: 0 auto 12px;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCREEN 2: Session Detail
+══════════════════════════════════════════════════════ */
+#screen-detail { overflow: hidden; }
+
+/* Speaker top bar */
+.speaker-bar {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 20px; display: flex; gap: 16px; overflow-x: auto;
+  scrollbar-width: none;
+}
+.speaker-bar::-webkit-scrollbar { display: none; }
+.speaker-slot { display: flex; flex-direction: column; align-items: center; gap: 5px; flex-shrink: 0; }
+.speaker-name { font-size: 0.7em; color: var(--muted); max-width: 60px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.speaker-slot.current-speaker .speaker-name { color: var(--green); font-weight: 600; }
+
+/* Detail body: log + sidebar */
+.detail-body { display: flex; flex: 1; overflow: hidden; }
+
+/* Chat log */
+#chat-log {
+  flex: 1; overflow-y: auto; padding: 16px 20px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.log-entry {
+  display: flex; gap: 12px; align-items: flex-start;
+  animation: fadeSlideIn 0.35s ease both;
+  border-left: 3px solid transparent; padding-left: 10px; border-radius: 0 6px 6px 0;
+  background: var(--surface); padding: 12px; border-radius: 6px;
+}
+.entry-avatar { flex-shrink: 0; }
+.entry-body { flex: 1; min-width: 0; }
+.entry-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.entry-speaker { font-weight: 600; font-size: 0.88em; }
+.entry-round { font-size: 0.72em; color: var(--muted); background: var(--border); padding: 1px 6px; border-radius: 10px; }
+.entry-drift { font-size: 0.72em; color: var(--yellow); }
+.entry-content { font-size: 0.88em; line-height: 1.6; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+
+/* Sidebar */
+#sidebar {
+  width: 240px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow-y: auto; padding: 16px;
+  background: var(--surface);
+  display: flex; flex-direction: column; gap: 18px;
+}
+.sidebar-section h3 { font-size: 0.78em; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+/* Vote bars */
+.vote-bar-wrap { display: flex; flex-direction: column; gap: 6px; }
+.vote-row { display: flex; align-items: center; gap: 8px; }
+.vote-label { font-size: 0.75em; color: var(--muted); width: 80px; }
+.vote-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.vote-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+.vote-fill.agree       { background: var(--green); }
+.vote-fill.disagree    { background: var(--red); }
+.vote-fill.conditional { background: var(--yellow); }
+.vote-count { font-size: 0.75em; color: var(--muted); width: 20px; text-align: right; }
+
+/* Degradation indicators */
+.deg-row { display: flex; align-items: center; gap: 8px; font-size: 0.8em; }
+.deg-dot { font-size: 1em; }
+.deg-label { color: var(--muted); flex: 1; }
+
+/* Role list */
+.role-item { display: flex; align-items: center; gap: 6px; font-size: 0.8em; margin-bottom: 4px; }
+.role-item .role-speaker { color: var(--text); }
+.role-item .role-name { color: var(--muted); }
+
+/* Connection warning */
+.conn-warn {
+  background: #f8514918; border: 1px solid #f8514944;
+  color: var(--red); font-size: 0.8em; padding: 8px 12px;
+  border-radius: 6px; display: flex; align-items: center; gap: 8px;
+}
+.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); animation: blink 1s infinite; }
+
+/* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 640px) {
+  #sidebar { display: none; }
+  .grid { grid-template-columns: 1fr; }
+  .bubble { max-width: 140px; }
+}
 </style>
 </head>
 <body>
-<h1>Deliberation Observer <button class="refresh-btn" onclick="loadSessions()">새로고침</button></h1>
-<div id="sessions" class="sessions"><div class="empty">로딩 중...</div></div>
-<div id="log-panel">
-  <h2 id="log-title"></h2>
-  <div id="log-status" class="status-bar"></div>
-  <div id="log-entries"></div>
-</div>
-<script>
-let currentStream = null;
+<div id="app">
+  <!-- ── Header ─────────────────────────────────────── -->
+  <header>
+    <h1 id="header-title">🔭 Deliberation Observer</h1>
+    <div class="header-actions">
+      <button class="btn back" id="btn-back" onclick="showList()" style="display:none">
+        ← Back
+      </button>
+      <div id="conn-status"></div>
+      <button class="btn" id="btn-refresh" onclick="loadSessions()">↻ Refresh</button>
+    </div>
+  </header>
 
+  <!-- ── Screen 1: Session List ─────────────────────── -->
+  <div id="screen-list" class="screen active">
+    <div class="grid" id="session-grid">
+      <div class="empty"><div class="spinner"></div>Loading sessions…</div>
+    </div>
+  </div>
+
+  <!-- ── Screen 2: Session Detail ───────────────────── -->
+  <div id="screen-detail" class="screen">
+    <!-- Speaker top bar -->
+    <div class="speaker-bar" id="speaker-bar"></div>
+
+    <!-- Body -->
+    <div class="detail-body">
+      <div id="chat-log"></div>
+
+      <!-- Sidebar -->
+      <div id="sidebar">
+        <!-- Round progress -->
+        <div class="sidebar-section" id="sb-round">
+          <h3>Round Progress</h3>
+          <div class="progress-label"><span id="sb-round-label">—</span></div>
+          <div class="progress-track"><div class="progress-fill" id="sb-round-fill" style="width:0%"></div></div>
+        </div>
+
+        <!-- Vote tally -->
+        <div class="sidebar-section" id="sb-votes">
+          <h3>Vote Tally</h3>
+          <div class="vote-bar-wrap">
+            <div class="vote-row">
+              <span class="vote-label">✅ AGREE</span>
+              <div class="vote-track"><div class="vote-fill agree" id="vf-agree" style="width:0%"></div></div>
+              <span class="vote-count" id="vc-agree">0</span>
+            </div>
+            <div class="vote-row">
+              <span class="vote-label">❌ DISAGREE</span>
+              <div class="vote-track"><div class="vote-fill disagree" id="vf-disagree" style="width:0%"></div></div>
+              <span class="vote-count" id="vc-disagree">0</span>
+            </div>
+            <div class="vote-row">
+              <span class="vote-label">🟡 CONDITIONAL</span>
+              <div class="vote-track"><div class="vote-fill conditional" id="vf-conditional" style="width:0%"></div></div>
+              <span class="vote-count" id="vc-conditional">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Degradation -->
+        <div class="sidebar-section" id="sb-deg">
+          <h3>Degradation</h3>
+          <div id="deg-list"></div>
+        </div>
+
+        <!-- Ordering / Roles -->
+        <div class="sidebar-section" id="sb-roles">
+          <h3>Roles</h3>
+          <div id="roles-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════
+   DATA
+══════════════════════════════════════════════════════ */
+let sessions       = [];
+let currentSession = null;
+let currentStream  = null;
+
+/* ══════════════════════════════════════════════════════
+   MASCOT SYSTEM
+══════════════════════════════════════════════════════ */
+const MASCOTS = {
+  claude:     { initial: "C",  color: "#D4744E", shape: "circle" },
+  chatgpt:    { initial: "G",  color: "#10A37F", shape: "circle" },
+  gemini:     { initial: "Gm", color: "#4285F4", shape: "diamond" },
+  codex:      { initial: "Cx", color: "#171717", shape: "square" },
+  copilot:    { initial: "Co", color: "#0078D4", shape: "hexagon" },
+  perplexity: { initial: "P",  color: "#20B8CD", shape: "circle" },
+  deepseek:   { initial: "D",  color: "#4D6BFF", shape: "circle" },
+  qwen:       { initial: "Q",  color: "#6F42C1", shape: "circle" },
+  aigentry:   { initial: "A",  color: "#888888", shape: "star" },
+};
+
+/** Derive a stable HSL color from a speaker name string */
+function hashColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xFFFFFF;
+  return `hsl(${h % 360}, 55%, 55%)`;
+}
+
+/** Return mascot config (or generated fallback) for a speaker */
+function getMascot(speaker) {
+  const key = (speaker || '').toLowerCase().split(/[-_\s]/)[0];
+  if (MASCOTS[key]) return MASCOTS[key];
+  return {
+    initial: speaker.charAt(0).toUpperCase(),
+    color: hashColor(speaker),
+    shape: 'circle',
+  };
+}
+
+/** Render an SVG avatar. size in px, state: 'idle'|'speaking'|'done' */
+function renderAvatar(speaker, state = 'done', size = 36) {
+  const m   = getMascot(speaker);
+  const s   = size;
+  const cx  = s / 2;
+  const fs  = s * 0.36;
+  const col = m.color;
+  const cls = `avatar ${state}`;
+
+  let shape = '';
+  if (m.shape === 'circle') {
+    shape = `<circle cx="${cx}" cy="${cx}" r="${cx - 1}" fill="${col}" />`;
+  } else if (m.shape === 'diamond') {
+    const d = cx - 1;
+    shape = `<polygon points="${cx},1 ${s-1},${cx} ${cx},${s-1} 1,${cx}" fill="${col}" />`;
+  } else if (m.shape === 'square') {
+    shape = `<rect x="1" y="1" width="${s-2}" height="${s-2}" rx="4" fill="${col}" />`;
+  } else if (m.shape === 'hexagon') {
+    const r = cx - 1, h = r * Math.sin(Math.PI / 3);
+    const pts = [
+      [cx, cx - r], [cx + h, cx - r/2], [cx + h, cx + r/2],
+      [cx, cx + r], [cx - h, cx + r/2], [cx - h, cx - r/2]
+    ].map(p => p.join(',')).join(' ');
+    shape = `<polygon points="${pts}" fill="${col}" />`;
+  } else if (m.shape === 'star') {
+    const r1 = cx - 1, r2 = r1 * 0.45;
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const a = (Math.PI / 5) * i - Math.PI / 2;
+      const r = i % 2 === 0 ? r1 : r2;
+      pts.push([cx + r * Math.cos(a), cx + r * Math.sin(a)].join(','));
+    }
+    shape = `<polygon points="${pts.join(' ')}" fill="${col}" />`;
+  }
+
+  return `<span class="${cls}" title="${escHtml(speaker)}">
+    <svg width="${s}" height="${s}" viewBox="0 0 ${s} ${s}" xmlns="http://www.w3.org/2000/svg">
+      ${shape}
+      <text x="${cx}" y="${cx}" text-anchor="middle" dominant-baseline="central"
+        fill="white" font-size="${fs}" font-weight="700"
+        font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">${escHtml(m.initial)}</text>
+    </svg>
+  </span>`;
+}
+
+/** Render a speech bubble tooltip for an avatar slot */
+function renderSpeechBubble(text) {
+  if (!text) return '';
+  const preview = text.length > 50 ? text.substring(0, 50) + '…' : text;
+  return `<span class="bubble">${escHtml(preview)}</span>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   API
+══════════════════════════════════════════════════════ */
 async function loadSessions() {
   try {
     const res = await fetch('/api/sessions');
-    const sessions = await res.json();
-    const el = document.getElementById('sessions');
-    if (sessions.length === 0) {
-      el.innerHTML = '<div class="empty">활성 세션이 없습니다</div>';
-      return;
-    }
-    el.innerHTML = sessions.map(s => `
-      <div class="session-card ${s.status}" onclick="openSession('${s.id}')">
-        <h2>${s.topic}</h2>
-        <div class="meta">
-          <span class="badge ${s.status}">${s.status}</span>
-          <span>R${s.current_round}/${s.max_rounds}</span>
-          <span>&#128100; ${s.current_speaker}</span>
-          <span>&#128172; ${s.log_count}</span>
-          <span>${s.speakers.join(', ')}</span>
-        </div>
-      </div>
-    `).join('');
+    sessions  = await res.json();
+    renderSessionList(sessions);
   } catch (e) {
-    document.getElementById('sessions').innerHTML = `<div class="empty">연결 실패: ${e.message}</div>`;
+    document.getElementById('session-grid').innerHTML =
+      `<div class="empty">Connection failed: ${escHtml(e.message)}</div>`;
   }
 }
 
-function openSession(id) {
+function connectSSE(sessionId) {
   if (currentStream) { currentStream.close(); currentStream = null; }
-  const panel = document.getElementById('log-panel');
-  const entries = document.getElementById('log-entries');
-  const status = document.getElementById('log-status');
-  panel.classList.add('visible');
-  entries.innerHTML = '';
-  document.getElementById('log-title').textContent = id;
 
-  const es = new EventSource(`/api/sessions/${id}/stream`);
+  const es = new EventSource(`/api/sessions/${sessionId}/stream`);
   currentStream = es;
+
+  es.addEventListener('connected', () => setConnStatus('connected'));
 
   es.addEventListener('snapshot', (e) => {
     const data = JSON.parse(e.data);
-    status.innerHTML = `<span>상태: <b>${data.status}</b></span><span class="current">현재: ${data.current_speaker}</span><span>R${data.current_round}/${data.max_rounds}</span>`;
-    entries.innerHTML = '';
-    (data.log || []).forEach(entry => addLogEntry(entry));
+    currentSession = data;
+    renderSessionDetail(data);
+    setConnStatus('connected');
   });
 
   es.addEventListener('turn', (e) => {
-    addLogEntry(JSON.parse(e.data));
+    const entry = JSON.parse(e.data);
+    if (currentSession) {
+      currentSession.log = currentSession.log || [];
+      currentSession.log.push(entry);
+    }
+    addLogEntry(entry);
+    renderVoteTally(currentSession ? currentSession.log : []);
   });
 
   es.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
-    status.innerHTML = `<span>상태: <b>${data.status}</b></span><span class="current">현재: ${data.current_speaker}</span><span>R${data.current_round}/${data.max_rounds}</span>`;
+    if (currentSession) Object.assign(currentSession, data);
+    updateSpeakerBar(data.current_speaker, currentSession ? currentSession.log : []);
+    updateRoundProgress(data.current_round, data.max_rounds);
+    renderDegradation(data.degradation);
   });
 
-  es.onerror = () => { status.innerHTML += ' <span style="color:#f85149">connection lost</span>'; };
+  es.onerror = () => {
+    setConnStatus('disconnected');
+    setTimeout(() => {
+      if (currentSession) connectSSE(currentSession.id || currentSession.session_id);
+    }, 3000);
+  };
 }
 
-function addLogEntry(entry) {
-  const el = document.createElement('div');
+/* ══════════════════════════════════════════════════════
+   RENDERING — Session List
+══════════════════════════════════════════════════════ */
+function renderSessionList(list) {
+  const grid = document.getElementById('session-grid');
+  if (!list || list.length === 0) {
+    grid.innerHTML = '<div class="empty">No active sessions</div>';
+    return;
+  }
+
+  grid.innerHTML = list.map(s => {
+    const pct = s.max_rounds > 0 ? Math.round((s.current_round / s.max_rounds) * 100) : 0;
+    const speakers = (s.speakers || []);
+    const avatarRow = speakers.slice(0, 8).map(sp =>
+      renderAvatar(sp, sp === s.current_speaker ? 'speaking' : 'done', 28)
+    ).join('');
+    const created = s.created_at ? new Date(s.created_at).toLocaleTimeString() : '';
+    const borderCls = s.status === 'active' ? 'active-border' : '';
+
+    return `<div class="session-card ${borderCls}" onclick="showDetail('${escHtml(s.id || s.session_id)}')">
+      <div class="card-header">
+        <span class="card-topic">${escHtml(s.topic || 'Untitled')}</span>
+        <span class="badge ${escHtml(s.status || 'active')}">${escHtml(s.status || 'active')}</span>
+      </div>
+      <div class="avatar-row">${avatarRow}</div>
+      <div class="progress-wrap">
+        <div class="progress-label">
+          <span>Round ${s.current_round || 0} / ${s.max_rounds || '?'}</span>
+          <span>${pct}%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill ${s.status === 'synthesized' ? 'green' : ''}" style="width:${pct}%"></div>
+        </div>
+      </div>
+      <div class="card-meta">
+        <span>👤 ${speakers.length} speaker${speakers.length !== 1 ? 's' : ''}</span>
+        <span>💬 ${s.log_count || 0} entries</span>
+        ${created ? `<span>🕐 ${created}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDERING — Session Detail
+══════════════════════════════════════════════════════ */
+function renderSessionDetail(data) {
+  // Chat log
+  const log = document.getElementById('chat-log');
+  log.innerHTML = '';
+  (data.log || []).forEach(entry => addLogEntry(entry, false));
+  log.scrollTop = log.scrollHeight;
+
+  // Speaker bar
+  updateSpeakerBar(data.current_speaker, data.log || []);
+
+  // Round progress
+  updateRoundProgress(data.current_round, data.max_rounds);
+
+  // Vote tally
+  renderVoteTally(data.log || []);
+
+  // Degradation
+  renderDegradation(data.degradation);
+
+  // Roles
+  renderRoles(data.roles || data.role_assignments);
+
+  // Ordering badge
+  if (data.ordering_strategy) {
+    const h = document.querySelector('#sb-roles h3');
+    if (h) h.textContent = `Roles · ${data.ordering_strategy}`;
+  }
+
+  // Header title
+  document.getElementById('header-title').textContent =
+    '🔭 ' + (data.topic || 'Session');
+}
+
+function updateSpeakerBar(currentSpeaker, log) {
+  const bar = document.getElementById('speaker-bar');
+  if (!currentSession) return;
+  const speakers = currentSession.speakers || [];
+
+  // Build last-response map
+  const lastMsg = {};
+  (log || []).forEach(e => { if (e.speaker) lastMsg[e.speaker] = e.content || ''; });
+
+  bar.innerHTML = speakers.map(sp => {
+    const isCurrent = sp === currentSpeaker;
+    const state     = isCurrent ? 'speaking' : (lastMsg[sp] ? 'done' : 'idle');
+    const bubble    = renderSpeechBubble(lastMsg[sp]);
+    return `<div class="speaker-slot ${isCurrent ? 'current-speaker' : ''}">
+      <div class="avatar ${state}" style="position:relative">
+        ${renderAvatar(sp, state, 40).replace(/^<span[^>]*>/, '').replace(/<\/span>$/, '')}
+        ${bubble}
+      </div>
+      <span class="speaker-name">${escHtml(sp)}</span>
+    </div>`;
+  }).join('');
+}
+
+function updateRoundProgress(current, max) {
+  const pct = max > 0 ? Math.round((current / max) * 100) : 0;
+  const lbl = document.getElementById('sb-round-label');
+  const fill = document.getElementById('sb-round-fill');
+  if (lbl)  lbl.textContent = `Round ${current || 0} / ${max || '?'}`;
+  if (fill) fill.style.width = pct + '%';
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDERING — Chat log entry
+══════════════════════════════════════════════════════ */
+function addLogEntry(entry, animate = true) {
+  const log = document.getElementById('chat-log');
+  const el  = document.createElement('div');
   el.className = 'log-entry';
-  const content = (entry.content || '').length > 500 ? entry.content.substring(0, 500) + '...' : entry.content;
-  el.innerHTML = `<span class="speaker">${entry.speaker}</span> <span class="round">Round ${entry.round}</span>${entry.role_drift ? ' <span style="color:#d29922">drift</span>' : ''}<div class="content">${escapeHtml(content)}</div>`;
-  document.getElementById('log-entries').appendChild(el);
-  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (!animate) el.style.animation = 'none';
+
+  const m     = getMascot(entry.speaker || '');
+  const color = m.color;
+  el.style.borderLeft = `3px solid ${color}`;
+
+  const content = (entry.content || '');
+  const preview = content.length > 800 ? content.substring(0, 800) + '\n\n[truncated…]' : content;
+
+  el.innerHTML = `
+    <div class="entry-avatar">${renderAvatar(entry.speaker, 'done', 32)}</div>
+    <div class="entry-body">
+      <div class="entry-header">
+        <span class="entry-speaker" style="color:${color}">${escHtml(entry.speaker || '?')}</span>
+        ${entry.round != null ? `<span class="entry-round">Round ${entry.round}</span>` : ''}
+        ${entry.role_drift ? `<span class="entry-drift">⚠ drift</span>` : ''}
+      </div>
+      <div class="entry-content">${escHtml(preview)}</div>
+    </div>`;
+
+  log.appendChild(el);
+  if (animate) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+/* ══════════════════════════════════════════════════════
+   RENDERING — Vote tally
+══════════════════════════════════════════════════════ */
+function renderVoteTally(log) {
+  const counts = { agree: 0, disagree: 0, conditional: 0 };
+  (log || []).forEach(entry => {
+    (entry.votes || []).forEach(v => {
+      const key = (v || '').toLowerCase();
+      if (key in counts) counts[key]++;
+    });
+  });
 
+  const total = counts.agree + counts.disagree + counts.conditional || 1;
+  ['agree', 'disagree', 'conditional'].forEach(k => {
+    const fill  = document.getElementById(`vf-${k}`);
+    const count = document.getElementById(`vc-${k}`);
+    if (fill)  fill.style.width = Math.round((counts[k] / total) * 100) + '%';
+    if (count) count.textContent = counts[k];
+  });
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDERING — Degradation
+══════════════════════════════════════════════════════ */
+function renderDegradation(deg) {
+  const list = document.getElementById('deg-list');
+  if (!list) return;
+  if (!deg || typeof deg !== 'object') { list.innerHTML = '<span style="color:var(--muted);font-size:0.8em">No data</span>'; return; }
+
+  const tiers = { ok: '🟢', warn: '🟡', error: '🔴', monitoring: '🟢', browser: '🟡', terminal: '🔴' };
+  list.innerHTML = Object.entries(deg).map(([key, val]) => {
+    const dot = tiers[val] || tiers[key] || '⚪';
+    return `<div class="deg-row"><span class="deg-dot">${dot}</span><span class="deg-label">${escHtml(key)}</span><span style="color:var(--muted);font-size:0.75em">${escHtml(String(val))}</span></div>`;
+  }).join('');
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDERING — Roles
+══════════════════════════════════════════════════════ */
+function renderRoles(roles) {
+  const list = document.getElementById('roles-list');
+  if (!list) return;
+  if (!roles || typeof roles !== 'object') { list.innerHTML = '<span style="color:var(--muted);font-size:0.8em">No roles</span>'; return; }
+
+  list.innerHTML = Object.entries(roles).map(([sp, role]) => `
+    <div class="role-item">
+      ${renderAvatar(sp, 'done', 20)}
+      <span class="role-speaker">${escHtml(sp)}</span>
+      <span class="role-name">${escHtml(role)}</span>
+    </div>`).join('');
+}
+
+/* ══════════════════════════════════════════════════════
+   CONNECTION STATUS
+══════════════════════════════════════════════════════ */
+function setConnStatus(state) {
+  const el = document.getElementById('conn-status');
+  if (state === 'connected') {
+    el.innerHTML = '';
+  } else {
+    el.innerHTML = `<div class="conn-warn"><span class="conn-dot"></span>Reconnecting…</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   NAVIGATION
+══════════════════════════════════════════════════════ */
+function showList() {
+  if (currentStream) { currentStream.close(); currentStream = null; }
+  currentSession = null;
+
+  document.getElementById('screen-list').classList.add('active');
+  document.getElementById('screen-detail').classList.remove('active');
+  document.getElementById('btn-back').style.display = 'none';
+  document.getElementById('btn-refresh').style.display = '';
+  document.getElementById('header-title').textContent = '🔭 Deliberation Observer';
+  document.getElementById('conn-status').innerHTML = '';
+  loadSessions();
+}
+
+function showDetail(sessionId) {
+  document.getElementById('screen-list').classList.remove('active');
+  document.getElementById('screen-detail').classList.add('active');
+  document.getElementById('btn-back').style.display = '';
+  document.getElementById('btn-refresh').style.display = 'none';
+  document.getElementById('chat-log').innerHTML = '';
+  document.getElementById('speaker-bar').innerHTML = '';
+
+  // Find session data for initial render while SSE loads
+  const found = sessions.find(s => (s.id || s.session_id) === sessionId);
+  if (found) {
+    currentSession = found;
+    document.getElementById('header-title').textContent = '🔭 ' + (found.topic || 'Session');
+  }
+
+  connectSSE(sessionId);
+}
+
+/* ══════════════════════════════════════════════════════
+   UTILITIES
+══════════════════════════════════════════════════════ */
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ══════════════════════════════════════════════════════
+   INIT
+══════════════════════════════════════════════════════ */
 loadSessions();
-setInterval(loadSessions, 5000);
+setInterval(() => {
+  // Only auto-refresh the list when on the list screen
+  if (document.getElementById('screen-list').classList.contains('active')) {
+    loadSessions();
+  }
+}, 5000);
 </script>
 </body>
 </html>
