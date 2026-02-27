@@ -18,11 +18,17 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "state");
 const CONFIG_PATH = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "config.json");
 const DEFAULT_CLI_CANDIDATES = ["claude", "codex", "gemini", "qwen", "chatgpt", "aider", "llm", "opencode", "cursor", "continue"];
+const CLI_LABELS = {
+  claude: "Claude", codex: "Codex", gemini: "Gemini", qwen: "Qwen",
+  chatgpt: "ChatGPT", aider: "Aider", llm: "LLM (Simon)",
+  opencode: "OpenCode", cursor: "Cursor", continue: "Continue"
+};
 const DEFAULT_PORT = 3847;
 
 function getProjectSlug() {
@@ -143,6 +149,111 @@ function saveConfig(config) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
+function checkCliInstalled(name) {
+  try {
+    execSync(`which ${name}`, { stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+}
+
+function fetchCdpTargets() {
+  return new Promise((resolve) => {
+    const req = http.get("http://localhost:9222/json", (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try {
+          const targets = JSON.parse(data);
+          const llmPatterns = /claude|chatgpt|openai|gemini|bard|copilot|perplexity|deepseek|qwen/i;
+          const llmTabs = targets
+            .filter(t => t.type === "page" && (llmPatterns.test(t.url) || llmPatterns.test(t.title)))
+            .map(t => ({ title: t.title, url: t.url, id: t.id }));
+          resolve({ cdp_available: true, tabs: llmTabs });
+        } catch { resolve({ cdp_available: true, tabs: [] }); }
+      });
+    });
+    req.on("error", () => resolve({ cdp_available: false, tabs: [], message: "CDP not available. Launch Chrome with --remote-debugging-port=9222" }));
+    req.setTimeout(2000, () => { req.destroy(); resolve({ cdp_available: false, tabs: [], message: "CDP connection timeout" }); });
+  });
+}
+
+function createSession(topic, speakers, maxRounds) {
+  const id = `obs-${Date.now().toString(36)}`;
+  const projectSlug = getProjectSlug();
+  const sessionsDir = path.join(STATE_DIR, projectSlug, "sessions");
+
+  fs.mkdirSync(sessionsDir, { recursive: true });
+
+  const session = {
+    id,
+    topic: topic || "Untitled Discussion",
+    speakers: speakers || ["claude", "gemini"],
+    status: "active",
+    current_round: 1,
+    max_rounds: maxRounds || 3,
+    current_speaker: speakers?.[0] || "claude",
+    ordering_strategy: "cyclic",
+    log: [],
+    created_at: new Date().toISOString(),
+    created_by: "observer",
+  };
+
+  fs.writeFileSync(path.join(sessionsDir, `${id}.json`), JSON.stringify(session, null, 2));
+  return session;
+}
+
+function computeStats() {
+  const stats = {
+    total_sessions: 0,
+    total_turns: 0,
+    speakers: {},
+  };
+
+  try {
+    const slugs = fs.readdirSync(STATE_DIR).filter(f => {
+      try { return fs.statSync(path.join(STATE_DIR, f)).isDirectory(); } catch { return false; }
+    });
+
+    for (const slug of slugs) {
+      const sessionsDir = path.join(STATE_DIR, slug, "sessions");
+      let files;
+      try { files = fs.readdirSync(sessionsDir).filter(f => f.endsWith(".json")); } catch { continue; }
+
+      for (const file of files) {
+        try {
+          const session = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), "utf-8"));
+          stats.total_sessions++;
+
+          for (const entry of (session.log || [])) {
+            stats.total_turns++;
+            const sp = entry.speaker;
+            if (!sp) continue;
+
+            if (!stats.speakers[sp]) {
+              stats.speakers[sp] = { turns: 0, votes: { agree: 0, disagree: 0, conditional: 0 }, total_length: 0 };
+            }
+            stats.speakers[sp].turns++;
+            stats.speakers[sp].total_length += (entry.content || "").length;
+
+            for (const v of (entry.votes || [])) {
+              const key = v.toLowerCase();
+              if (key in stats.speakers[sp].votes) stats.speakers[sp].votes[key]++;
+            }
+          }
+        } catch { continue; }
+      }
+    }
+
+    for (const sp of Object.keys(stats.speakers)) {
+      const s = stats.speakers[sp];
+      s.avg_length = s.turns > 0 ? Math.round(s.total_length / s.turns) : 0;
+      delete s.total_length;
+    }
+  } catch {}
+
+  return stats;
+}
+
 // HTTP Server
 function createServer(port) {
   const server = http.createServer((req, res) => {
@@ -183,6 +294,35 @@ function createServer(port) {
       }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(summary));
+      return;
+    }
+
+    if (pathname === "/api/sessions/start" && req.method === "POST") {
+      let body = "";
+      req.on("data", chunk => { body += chunk; });
+      req.on("end", () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          return;
+        }
+        if (!parsed.topic) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "topic is required" }));
+          return;
+        }
+        try {
+          const session = createSession(parsed.topic, parsed.speakers, parsed.max_rounds);
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(session));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
       return;
     }
 
@@ -281,6 +421,36 @@ function createServer(port) {
           updated: config.updated,
         }));
       });
+      return;
+    }
+
+    if (pathname === "/api/cli-status" && req.method === "GET") {
+      const clis = DEFAULT_CLI_CANDIDATES.map(name => ({
+        name,
+        label: CLI_LABELS[name] || name,
+        installed: checkCliInstalled(name),
+      }));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ clis }));
+      return;
+    }
+
+    if (pathname === "/api/browser-tabs" && req.method === "GET") {
+      (async () => {
+        const tabs = await fetchCdpTargets();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(tabs));
+      })().catch(err => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+      });
+      return;
+    }
+
+    if (pathname === "/api/stats" && req.method === "GET") {
+      const stats = computeStats();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(stats));
       return;
     }
 

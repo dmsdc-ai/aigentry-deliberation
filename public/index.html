@@ -334,6 +334,131 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
   .bubble { max-width: 140px; }
   .llm-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
+
+/* ═══════════════════════════════════════════════════════
+   FEATURE 1: CLI Install Status Dots
+══════════════════════════════════════════════════════ */
+.cli-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; margin-left: 6px;
+  flex-shrink: 0;
+}
+.cli-status-dot.installed     { background: var(--green); box-shadow: 0 0 4px var(--green); }
+.cli-status-dot.not-installed { background: var(--red); }
+.cli-status-dot.loading       { background: var(--muted); }
+
+/* ═══════════════════════════════════════════════════════
+   FEATURE 2: Browser LLM Tabs
+══════════════════════════════════════════════════════ */
+.browser-tabs-section {
+  margin: 20px auto 0;
+  padding: 16px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; max-width: 900px;
+}
+.section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  cursor: pointer; user-select: none;
+}
+.section-header h3 { font-size: 0.9em; color: var(--text); margin: 0; font-weight: 600; }
+.section-toggle { color: var(--muted); font-size: 0.8em; transition: transform 0.2s; display: inline-block; }
+.section-toggle.open { transform: rotate(90deg); }
+.browser-tabs-body { margin-top: 14px; }
+.browser-tab-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 6px; background: var(--bg);
+  margin-bottom: 6px; font-size: 0.85em;
+}
+.browser-tab-item .tab-title { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-tab-item .tab-url { color: var(--muted); font-size: 0.8em; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cdp-status { font-size: 0.8em; color: var(--muted); margin-bottom: 10px; }
+.cdp-status.available   { color: var(--green); }
+.cdp-status.unavailable { color: var(--red); }
+
+/* ═══════════════════════════════════════════════════════
+   FEATURE 3: Quick Start FAB + Modal
+══════════════════════════════════════════════════════ */
+.fab {
+  position: fixed; bottom: 24px; right: 24px; z-index: 90;
+  width: 56px; height: 56px; border-radius: 50%;
+  background: var(--blue); color: white; border: none;
+  font-size: 1.4em; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  transition: transform 0.15s, box-shadow 0.15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.fab:hover { transform: scale(1.1); box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
+
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 150;
+  background: rgba(0,0,0,0.6); display: flex;
+  align-items: center; justify-content: center;
+}
+.modal {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; width: 90%; max-width: 480px;
+  animation: fadeSlideIn 0.25s ease;
+}
+.modal h2 { font-size: 1.1em; margin-bottom: 18px; color: var(--text); }
+.form-group { margin-bottom: 16px; }
+.form-group label {
+  display: block; font-size: 0.8em; color: var(--muted);
+  margin-bottom: 6px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.form-input {
+  width: 100%; padding: 10px 12px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-size: 0.9em; outline: none;
+  transition: border-color 0.15s; font-family: inherit;
+}
+.form-input:focus { border-color: var(--blue); }
+.form-input-sm { width: 80px; }
+
+.speaker-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.speaker-chip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 20px;
+  background: var(--bg); border: 1px solid var(--border);
+  cursor: pointer; font-size: 0.82em; color: var(--muted);
+  transition: all 0.15s; user-select: none;
+}
+.speaker-chip.selected {
+  border-color: var(--blue); background: #58a6ff18; color: var(--text);
+}
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+/* ═══════════════════════════════════════════════════════
+   FEATURE 4: LLM Statistics Screen
+══════════════════════════════════════════════════════ */
+#screen-stats { padding: 0; overflow: hidden; }
+#screen-stats > div { flex: 1; }
+
+.stats-summary {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; text-align: center;
+  animation: fadeSlideIn 0.3s ease both;
+}
+.stat-value { font-size: 1.8em; font-weight: 700; color: var(--blue); }
+.stat-label { font-size: 0.75em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px; }
+
+.stats-speakers { display: flex; flex-direction: column; gap: 10px; }
+.speaker-stat-row {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px 16px;
+  animation: fadeSlideIn 0.3s ease both;
+}
+.speaker-stat-info { flex: 1; }
+.speaker-stat-name { font-weight: 600; font-size: 0.9em; color: var(--text); }
+.speaker-stat-detail { font-size: 0.78em; color: var(--muted); margin-top: 2px; }
+.speaker-stat-bar { width: 120px; }
+.mini-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.mini-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
 </style>
 </head>
 <body>
@@ -346,6 +471,7 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
         ← Back
       </button>
       <div id="conn-status"></div>
+      <button class="btn-gear" id="btn-stats" title="LLM Statistics" onclick="showStats()">📊</button>
       <button class="btn-gear" id="btn-gear" title="LLM Configuration" onclick="showConfig()">⚙</button>
       <button class="btn" id="btn-refresh" onclick="loadSessions()">↻ Refresh</button>
     </div>
@@ -428,6 +554,56 @@ header h1 { font-size: 1.1em; font-weight: 600; color: var(--text); letter-spaci
     <div class="config-actions">
       <button class="btn-primary" onclick="saveConfig()">Save</button>
       <button class="btn-secondary" onclick="resetConfig()">Reset to Auto-detect</button>
+    </div>
+
+    <!-- Feature 2: Browser LLM Tabs -->
+    <div class="browser-tabs-section">
+      <div class="section-header" onclick="toggleBrowserTabs()">
+        <h3>🌐 Browser LLM Tabs</h3>
+        <span class="section-toggle" id="browser-toggle">▶</span>
+      </div>
+      <div class="browser-tabs-body" id="browser-tabs-body" style="display:none">
+        <div id="browser-tabs-list"></div>
+        <button class="btn" onclick="loadBrowserTabs()" style="margin-top:8px">↻ Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Screen 4: LLM Statistics ───────────────────── -->
+  <div id="screen-stats" class="screen">
+    <div style="padding:20px;overflow-y:auto;flex:1;max-width:900px;margin:0 auto;width:100%">
+      <div class="config-header">
+        <h2>📊 LLM Statistics</h2>
+        <p>토론 참여 통계 / Deliberation participation stats</p>
+      </div>
+      <div class="stats-summary" id="stats-summary"></div>
+      <div class="stats-speakers" id="stats-speakers"></div>
+    </div>
+  </div>
+
+  <!-- Feature 3: FAB -->
+  <button class="fab" id="fab-start" onclick="showQuickStart()" title="New Deliberation">+</button>
+
+  <!-- Feature 3: Quick Start Modal -->
+  <div class="modal-overlay" id="quick-start-modal" style="display:none" onclick="if(event.target===this)hideQuickStart()">
+    <div class="modal">
+      <h2>🚀 New Deliberation</h2>
+      <div class="form-group">
+        <label>Topic</label>
+        <input type="text" id="qs-topic" placeholder="토론 주제를 입력하세요" class="form-input">
+      </div>
+      <div class="form-group">
+        <label>Speakers</label>
+        <div class="speaker-chips" id="qs-speakers"></div>
+      </div>
+      <div class="form-group">
+        <label>Max Rounds</label>
+        <input type="number" id="qs-rounds" value="3" min="1" max="20" class="form-input form-input-sm">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="hideQuickStart()">Cancel</button>
+        <button class="btn-primary" onclick="startDeliberation()">Start</button>
+      </div>
     </div>
   </div>
 </div>
@@ -796,11 +972,16 @@ function showList() {
   document.getElementById('screen-list').classList.add('active');
   document.getElementById('screen-detail').classList.remove('active');
   document.getElementById('screen-config').classList.remove('active');
+  document.getElementById('screen-stats').classList.remove('active');
   document.getElementById('btn-back').style.display = 'none';
   document.getElementById('btn-refresh').style.display = '';
   document.getElementById('btn-gear').classList.remove('active');
+  document.getElementById('btn-stats').classList.remove('active');
   document.getElementById('header-title').textContent = '🔭 Deliberation Observer';
   document.getElementById('conn-status').innerHTML = '';
+  // Show FAB on list screen
+  const fab = document.getElementById('fab-start');
+  if (fab) fab.style.display = '';
   previousScreen = 'list';
   loadSessions();
 }
@@ -809,11 +990,16 @@ function showDetail(sessionId) {
   document.getElementById('screen-list').classList.remove('active');
   document.getElementById('screen-detail').classList.add('active');
   document.getElementById('screen-config').classList.remove('active');
+  document.getElementById('screen-stats').classList.remove('active');
   document.getElementById('btn-back').style.display = '';
   document.getElementById('btn-refresh').style.display = 'none';
   document.getElementById('btn-gear').classList.remove('active');
+  document.getElementById('btn-stats').classList.remove('active');
   document.getElementById('chat-log').innerHTML = '';
   document.getElementById('speaker-bar').innerHTML = '';
+  // Hide FAB on detail screen
+  const fab = document.getElementById('fab-start');
+  if (fab) fab.style.display = 'none';
   previousScreen = 'detail';
 
   // Find session data for initial render while SSE loads
@@ -848,19 +1034,51 @@ function showConfig() {
   document.getElementById('screen-list').classList.remove('active');
   document.getElementById('screen-detail').classList.remove('active');
   document.getElementById('screen-config').classList.add('active');
+  document.getElementById('screen-stats').classList.remove('active');
   document.getElementById('btn-back').style.display = '';
   document.getElementById('btn-refresh').style.display = 'none';
   document.getElementById('btn-gear').classList.add('active');
+  document.getElementById('btn-stats').classList.remove('active');
   document.getElementById('header-title').textContent = '⚙ LLM Configuration';
   document.getElementById('conn-status').innerHTML = '';
+  // Hide FAB on config screen
+  const fab = document.getElementById('fab-start');
+  if (fab) fab.style.display = 'none';
 
   loadConfig();
 }
 
-// Override Back button behavior to respect config screen
+function showStats() {
+  // Toggle: if already on stats, go back to list
+  if (document.getElementById('screen-stats').classList.contains('active')) {
+    showList();
+    return;
+  }
+
+  document.getElementById('screen-list').classList.remove('active');
+  document.getElementById('screen-detail').classList.remove('active');
+  document.getElementById('screen-config').classList.remove('active');
+  document.getElementById('screen-stats').classList.add('active');
+  document.getElementById('btn-back').style.display = '';
+  document.getElementById('btn-refresh').style.display = 'none';
+  document.getElementById('btn-gear').classList.remove('active');
+  document.getElementById('btn-stats').classList.add('active');
+  document.getElementById('header-title').textContent = '📊 LLM Statistics';
+  document.getElementById('conn-status').innerHTML = '';
+  // Hide FAB on stats screen
+  const fab = document.getElementById('fab-start');
+  if (fab) fab.style.display = 'none';
+
+  previousScreen = 'list';
+  loadStats();
+}
+
+// Override Back button behavior to respect all screens
 document.getElementById('btn-back').addEventListener('click', function(e) {
   e.stopPropagation();
-  if (document.getElementById('screen-config').classList.contains('active')) {
+  if (document.getElementById('screen-stats').classList.contains('active')) {
+    showList();
+  } else if (document.getElementById('screen-config').classList.contains('active')) {
     if (previousScreen === 'detail' && currentSession) {
       const id = currentSession.id || currentSession.session_id;
       showDetail(id);
@@ -883,16 +1101,16 @@ function escHtml(s) {
    LLM CONFIG — Master list
 ══════════════════════════════════════════════════════ */
 const LLM_LIST = [
-  { key: 'claude',    name: 'Claude',       cmd: 'claude'    },
-  { key: 'codex',     name: 'Codex',        cmd: 'codex'     },
-  { key: 'gemini',    name: 'Gemini',       cmd: 'gemini'    },
-  { key: 'qwen',      name: 'Qwen',         cmd: 'qwen'      },
-  { key: 'chatgpt',   name: 'ChatGPT',      cmd: 'chatgpt'   },
-  { key: 'aider',     name: 'Aider',        cmd: 'aider'     },
-  { key: 'llm',       name: 'LLM (Simon)',  cmd: 'llm'       },
-  { key: 'opencode',  name: 'OpenCode',     cmd: 'opencode'  },
-  { key: 'cursor',    name: 'Cursor',       cmd: 'cursor'    },
-  { key: 'continue',  name: 'Continue',     cmd: 'continue'  },
+  { key: 'claude',    name: 'Claude',       label: 'Claude',      cmd: 'claude'    },
+  { key: 'codex',     name: 'Codex',        label: 'Codex',       cmd: 'codex'     },
+  { key: 'gemini',    name: 'Gemini',       label: 'Gemini',      cmd: 'gemini'    },
+  { key: 'qwen',      name: 'Qwen',         label: 'Qwen',        cmd: 'qwen'      },
+  { key: 'chatgpt',   name: 'ChatGPT',      label: 'ChatGPT',     cmd: 'chatgpt'   },
+  { key: 'aider',     name: 'Aider',        label: 'Aider',       cmd: 'aider'     },
+  { key: 'llm',       name: 'LLM (Simon)',  label: 'LLM',         cmd: 'llm'       },
+  { key: 'opencode',  name: 'OpenCode',     label: 'OpenCode',    cmd: 'opencode'  },
+  { key: 'cursor',    name: 'Cursor',       label: 'Cursor',      cmd: 'cursor'    },
+  { key: 'continue',  name: 'Continue',     label: 'Continue',    cmd: 'continue'  },
 ];
 
 // Extend MASCOTS with any missing entries
@@ -978,7 +1196,9 @@ function renderLlmGrid() {
               style="animation-delay:${delay}ms"
               onclick="toggleLlmCard('${llm.key}')">
       ${avatar}
-      <span class="llm-card-name">${escHtml(llm.name)}</span>
+      <span class="llm-card-name">
+        ${escHtml(llm.name)}<span class="cli-status-dot loading" id="dot-${llm.key}" title="Checking..."></span>
+      </span>
       <span class="llm-card-cmd">${escHtml(llm.cmd)}</span>
       <div class="toggle-wrap">
         <label class="toggle" onclick="event.stopPropagation()">
@@ -991,6 +1211,8 @@ function renderLlmGrid() {
       </div>
     </div>`;
   }).join('');
+
+  loadCliStatus();
 }
 
 function toggleLlmCard(key) {
@@ -1046,6 +1268,199 @@ function showToast(message, type = 'success') {
     toast.classList.add('hiding');
     setTimeout(() => { if (toast.parentNode) toast.remove(); }, 380);
   }, 3000);
+}
+
+/* ══════════════════════════════════════════════════════
+   FEATURE 1: CLI Install Status
+══════════════════════════════════════════════════════ */
+async function loadCliStatus() {
+  try {
+    const res  = await fetch('/api/cli-status');
+    const data = await res.json();
+    const statusMap = {};
+    (data.clis || []).forEach(c => { statusMap[c.name] = c.installed; });
+    LLM_LIST.forEach(llm => {
+      const dot = document.getElementById(`dot-${llm.key}`);
+      if (!dot) return;
+      const installed = statusMap[llm.key] === true;
+      dot.className = 'cli-status-dot ' + (installed ? 'installed' : 'not-installed');
+      dot.title     = installed ? 'Installed' : 'Not installed';
+    });
+  } catch (e) {
+    // On error, leave dots as loading (gray) — non-critical
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   FEATURE 2: Browser LLM Tabs
+══════════════════════════════════════════════════════ */
+function toggleBrowserTabs() {
+  const body   = document.getElementById('browser-tabs-body');
+  const toggle = document.getElementById('browser-toggle');
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  toggle.classList.toggle('open', !isOpen);
+  if (!isOpen) loadBrowserTabs();
+}
+
+async function loadBrowserTabs() {
+  const list = document.getElementById('browser-tabs-list');
+  list.innerHTML = '<div class="cdp-status">Scanning...</div>';
+  try {
+    const res  = await fetch('/api/browser-tabs');
+    const data = await res.json();
+    if (!data.cdp_available) {
+      list.innerHTML = `<div class="cdp-status unavailable">⚠ ${escHtml(data.message || 'CDP not available')}</div>`;
+      return;
+    }
+    if (!data.tabs || data.tabs.length === 0) {
+      list.innerHTML = '<div class="cdp-status available">✓ CDP connected — No LLM tabs detected</div>';
+      return;
+    }
+    list.innerHTML = `<div class="cdp-status available">✓ CDP connected — ${data.tabs.length} LLM tab(s)</div>` +
+      data.tabs.map(t => `<div class="browser-tab-item">
+        <span class="tab-title">${escHtml(t.title || '')}</span>
+        <span class="tab-url">${escHtml(t.url || '')}</span>
+      </div>`).join('');
+  } catch (e) {
+    list.innerHTML = `<div class="cdp-status unavailable">Error: ${escHtml(e.message)}</div>`;
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   FEATURE 3: Quick Start Deliberation
+══════════════════════════════════════════════════════ */
+let quickStartSpeakers = new Set();
+
+function showQuickStart() {
+  document.getElementById('quick-start-modal').style.display = 'flex';
+  // Pre-select from config (enabled CLIs), or default to first 3
+  quickStartSpeakers = new Set(
+    configState.length > 0
+      ? configState
+      : LLM_LIST.slice(0, 3).map(l => l.key)
+  );
+  renderSpeakerChips();
+}
+
+function hideQuickStart() {
+  document.getElementById('quick-start-modal').style.display = 'none';
+}
+
+function renderSpeakerChips() {
+  const container = document.getElementById('qs-speakers');
+  container.innerHTML = LLM_LIST.map(llm => {
+    const sel = quickStartSpeakers.has(llm.key) ? 'selected' : '';
+    return `<span class="speaker-chip ${sel}" onclick="toggleSpeakerChip('${llm.key}')">
+      ${renderAvatar(llm.key, 'done', 20)} ${escHtml(llm.label)}
+    </span>`;
+  }).join('');
+}
+
+function toggleSpeakerChip(key) {
+  if (quickStartSpeakers.has(key)) quickStartSpeakers.delete(key);
+  else quickStartSpeakers.add(key);
+  renderSpeakerChips();
+}
+
+async function startDeliberation() {
+  const topic   = document.getElementById('qs-topic').value.trim();
+  const rounds  = parseInt(document.getElementById('qs-rounds').value) || 3;
+  const speakers = [...quickStartSpeakers];
+  if (!topic)             { showToast('Please enter a topic', 'error'); return; }
+  if (speakers.length < 2) { showToast('Select at least 2 speakers', 'error'); return; }
+  try {
+    const res = await fetch('/api/sessions/start', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ topic, speakers, max_rounds: rounds }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const session = await res.json();
+    hideQuickStart();
+    showToast(`Deliberation started: ${topic}`, 'success');
+    await loadSessions();
+    showDetail(session.id || session.session_id);
+  } catch (e) {
+    showToast('Failed to start: ' + e.message, 'error');
+  }
+}
+
+// Close modal on Escape key
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') hideQuickStart();
+});
+
+/* ══════════════════════════════════════════════════════
+   FEATURE 4: LLM Statistics Dashboard
+══════════════════════════════════════════════════════ */
+async function loadStats() {
+  const summary  = document.getElementById('stats-summary');
+  const speakers = document.getElementById('stats-speakers');
+  summary.innerHTML  = '<div class="empty"><div class="spinner"></div>Loading…</div>';
+  speakers.innerHTML = '';
+  try {
+    const res  = await fetch('/api/stats');
+    const data = await res.json();
+    renderStats(data);
+  } catch (e) {
+    summary.innerHTML  = `<div class="empty">Failed to load stats: ${escHtml(e.message)}</div>`;
+    speakers.innerHTML = '';
+  }
+}
+
+function renderStats(data) {
+  const summary  = document.getElementById('stats-summary');
+  const container = document.getElementById('stats-speakers');
+
+  const speakerEntries = Object.entries(data.speakers || {});
+  summary.innerHTML = `
+    <div class="stat-card" style="animation-delay:0ms">
+      <div class="stat-value">${data.total_sessions != null ? data.total_sessions : '—'}</div>
+      <div class="stat-label">Sessions</div>
+    </div>
+    <div class="stat-card" style="animation-delay:60ms">
+      <div class="stat-value">${data.total_turns != null ? data.total_turns : '—'}</div>
+      <div class="stat-label">Total Turns</div>
+    </div>
+    <div class="stat-card" style="animation-delay:120ms">
+      <div class="stat-value">${speakerEntries.length}</div>
+      <div class="stat-label">Speakers</div>
+    </div>
+  `;
+
+  if (speakerEntries.length === 0) {
+    container.innerHTML = '<div class="empty">No participation data yet</div>';
+    return;
+  }
+
+  const sorted   = speakerEntries.sort((a, b) => b[1].turns - a[1].turns);
+  const maxTurns = sorted[0][1].turns || 1;
+
+  container.innerHTML = sorted.map(([name, s], i) => {
+    const pct = Math.round(((s.turns || 0) / maxTurns) * 100);
+    const m   = getMascot(name);
+    const votes = s.votes || {};
+    const voteStr = [
+      votes.agree       > 0 ? `✅${votes.agree}`       : '',
+      votes.disagree    > 0 ? `❌${votes.disagree}`    : '',
+      votes.conditional > 0 ? `🟡${votes.conditional}` : '',
+    ].filter(Boolean).join(' ') || 'No votes';
+
+    return `<div class="speaker-stat-row" style="animation-delay:${i * 0.05}s">
+      ${renderAvatar(name, 'done', 40)}
+      <div class="speaker-stat-info">
+        <div class="speaker-stat-name">${escHtml(name)}</div>
+        <div class="speaker-stat-detail">${s.turns || 0} turns · avg ${s.avg_length || 0} chars · ${voteStr}</div>
+      </div>
+      <div class="speaker-stat-bar">
+        <div style="font-size:0.75em;color:var(--muted);text-align:right">${s.turns || 0}</div>
+        <div class="mini-bar">
+          <div class="mini-bar-fill" style="width:${pct}%;background:${escHtml(m.color)}"></div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 /* ══════════════════════════════════════════════════════
