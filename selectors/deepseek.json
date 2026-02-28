@@ -1,11 +1,11 @@
 {
   "provider": "deepseek",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["chat.deepseek.com", "deepseek.com"],
   "selectors": {
-    "inputSelector": "textarea#chat-input, textarea[placeholder*='Message'], textarea[placeholder*='Send a message']",
-    "sendButton": "button[aria-label='Send'], div[role='button'].ds-icon-button",
-    "responseSelector": ".markdown-body, .ds-markdown",
+    "inputSelector": "textarea#chat-input, textarea[placeholder*='Send a message'], textarea[placeholder*='Message'], div[contenteditable='true']",
+    "sendButton": "div[role='button'].ds-icon-button, button[aria-label='Send'], button[type='submit']",
+    "responseSelector": ".ds-markdown, .ds-markdown--block, .markdown-body",
     "responseContainer": ".chat-message-content",
     "streamingIndicator": ".chat-message--streaming, .typing-indicator"
   },
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "DeepSeek web selectors - verify via DOM inspection if selectors change"
+  "notes": "DeepSeek requires login. Input/response selectors verified from public DOM references. ds-icon-button div[role='button'] is the send trigger."
 }

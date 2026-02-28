@@ -1,11 +1,11 @@
 {
   "provider": "copilot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["copilot.microsoft.com"],
   "selectors": {
-    "inputSelector": "textarea#searchbox, textarea[placeholder*='message'], #userInput",
-    "sendButton": "button[aria-label='Submit'], button[aria-label='Send'], button.submit-button",
-    "responseSelector": ".ac-textBlock, .response-message-content",
+    "inputSelector": "#userInput, textarea#userInput",
+    "sendButton": "button[data-testid='submit-button'], button[aria-label='메시지 제출'], button[aria-label='Submit message']",
+    "responseSelector": ".ac-textBlock, [data-content='ai-message']",
     "responseContainer": "[data-content='ai-message'], .response-message",
     "streamingIndicator": ".typing-indicator, .is-streaming"
   },
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Microsoft Copilot web selectors - verify via DOM inspection if selectors change"
+  "notes": "Microsoft Copilot selectors - send button aria-label is locale-dependent (EN: 'Submit message', KR: '메시지 제출'). Button appears after text input. data-testid='submit-button' is stable."
 }

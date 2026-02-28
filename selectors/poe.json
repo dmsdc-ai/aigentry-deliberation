@@ -1,13 +1,13 @@
 {
   "provider": "poe",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["poe.com"],
   "selectors": {
-    "inputSelector": "textarea[class*='GrowingTextArea'], textarea[placeholder*='Talk to']",
-    "sendButton": "button[class*='SendButton'], button[aria-label='Send message']",
-    "responseSelector": ".Markdown_markdownContainer__Tz3HQ, .Message_botMessageBubble__CPGMI .Markdown_markdownContainer__Tz3HQ",
-    "responseContainer": ".Message_botMessageBubble__CPGMI",
-    "streamingIndicator": ".Message_botMessageBubble__CPGMI .ChatMessage_streamingBotMessage__wDBTh"
+    "inputSelector": "textarea[class*='GrowingTextArea'], textarea[placeholder*='Talk to'], textarea[class*='TextArea']",
+    "sendButton": "button[class*='SendButton'], button[aria-label='Send message'], button[class*='send']",
+    "responseSelector": "[class*='Markdown_markdownContainer'], [class*='markdownContainer']",
+    "responseContainer": "[class*='botMessageBubble'], [class*='Message_bot']",
+    "streamingIndicator": "[class*='streamingBotMessage'], [class*='ChatMessage_streaming']"
   },
   "timing": {
     "inputDelayMs": 100,
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Poe web selectors - verify via DOM inspection if selectors change. Poe uses hashed class names that may change between deployments."
+  "notes": "Poe requires login. Uses hashed class names (e.g., GrowingTextArea_xxx, SendButton_xxx) that may change between deployments. Partial class matching (class*=) is used for resilience."
 }

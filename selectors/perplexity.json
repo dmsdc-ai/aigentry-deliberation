@@ -1,10 +1,10 @@
 {
   "provider": "perplexity",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["perplexity.ai", "www.perplexity.ai"],
   "selectors": {
-    "inputSelector": "textarea[placeholder*='Ask'], textarea[placeholder*='ask'], textarea#ppl-query",
-    "sendButton": "button[aria-label='Submit'], button[aria-label='Send'], button.bg-super",
+    "inputSelector": "#ask-input, div#ask-input[contenteditable='true']",
+    "sendButton": "button[aria-label='Submit'], button[aria-label='제출'], button[type='submit']",
     "responseSelector": ".prose, .markdown-content",
     "responseContainer": "[data-testid='answer-content'], .answer-content",
     "streamingIndicator": ".animate-pulse, [data-testid='streaming-indicator']"
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Perplexity web selectors - verify via DOM inspection if selectors change"
+  "notes": "Perplexity uses contenteditable div#ask-input. No visible send button — Enter key is the primary send method. sendTurn dispatches Enter key first."
 }

@@ -1,10 +1,10 @@
 {
   "provider": "claude",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["claude.ai"],
   "selectors": {
-    "inputSelector": "div.ProseMirror[contenteditable='true']",
-    "sendButton": "button[aria-label='Send Message'], button[data-testid='send-button']",
+    "inputSelector": "div.ProseMirror[contenteditable='true'], div.tiptap.ProseMirror",
+    "sendButton": "button[aria-label='Send Message'], button[aria-label='메시지 보내기'], button[aria-label='Send message']",
     "responseSelector": ".font-claude-message .grid-cols-1 .grid .min-w-0",
     "responseContainer": "[data-is-streaming]",
     "streamingIndicator": "[data-is-streaming='true']"
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "Claude web selectors - verify via DOM inspection if selectors change"
+  "notes": "Claude web selectors - send button aria-label is locale-dependent (EN: 'Send Message', KR: '메시지 보내기'). Button only appears when input has text."
 }

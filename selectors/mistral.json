@@ -1,10 +1,10 @@
 {
   "provider": "mistral",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["chat.mistral.ai", "mistral.ai"],
   "selectors": {
-    "inputSelector": "textarea[placeholder*='Message'], textarea[placeholder*='Ask'], div[contenteditable='true']",
-    "sendButton": "button[aria-label='Send'], button[type='submit']",
+    "inputSelector": "div.ProseMirror[contenteditable='true'], div[contenteditable='true']",
+    "sendButton": "button[aria-label='Send question'], button[aria-label='Send'], button[type='submit']",
     "responseSelector": ".prose, .markdown-body",
     "responseContainer": ".message-assistant, [data-role='assistant']",
     "streamingIndicator": ".animate-pulse, [data-streaming='true']"
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Mistral Le Chat web selectors - verify via DOM inspection if selectors change"
+  "notes": "Mistral Le Chat uses ProseMirror contenteditable. Send button aria-label='Send question' appears after text input."
 }
