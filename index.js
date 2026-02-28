@@ -2114,12 +2114,12 @@ server.tool(
     ).describe("참가자 이름 목록 (예: codex, claude, web-chatgpt-1)"),
     require_manual_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
-      z.boolean().default(true)
-    ).describe("true면 speakers를 반드시 직접 지정해야 시작"),
+      z.boolean().optional()
+    ).describe("true면 speakers를 반드시 직접 지정해야 시작 (미지정 시 config 설정 따름)"),
     auto_discover_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
-      z.boolean().default(false)
-    ).describe("speakers 생략 시 PATH 기반 자동 탐색 여부 (require_manual_speakers=false일 때만 사용)"),
+      z.boolean().optional()
+    ).describe("speakers 생략 시 자동 탐색 여부 (미지정 시 config 설정 따름)"),
     participant_types: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["cli", "browser", "browser_auto", "manual"])).optional()
@@ -2138,7 +2138,12 @@ server.tool(
     const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0;
     const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
 
-    if (!hasManualSpeakers && require_manual_speakers) {
+    // Resolve effective settings from config
+    const config = loadDeliberationConfig();
+    const effectiveRequireManual = require_manual_speakers ?? config.require_speaker_selection ?? true;
+    const effectiveAutoDiscover = auto_discover_speakers ?? !effectiveRequireManual;
+
+    if (!hasManualSpeakers && effectiveRequireManual) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
       return {
         content: [{
@@ -2148,9 +2153,25 @@ server.tool(
       };
     }
 
-    const autoDiscoveredSpeakers = (!hasManualSpeakers && auto_discover_speakers)
-      ? discoverLocalCliSpeakers()
-      : [];
+    let autoDiscoveredSpeakers = [];
+    let autoParticipantTypes = {};
+    if (!hasManualSpeakers && effectiveAutoDiscover) {
+      // Include ALL candidates: CLI + browser
+      for (const c of candidateSnapshot.candidates) {
+        autoDiscoveredSpeakers.push(c.speaker);
+        if (c.type === "browser" && c.cdp_available) {
+          autoParticipantTypes[c.speaker] = "browser_auto";
+        } else if (c.type === "browser") {
+          autoParticipantTypes[c.speaker] = "browser";
+        } else {
+          autoParticipantTypes[c.speaker] = "cli";
+        }
+      }
+    }
+    // Merge auto-detected participant_types with manual overrides
+    if (!hasManualSpeakers && Object.keys(autoParticipantTypes).length > 0) {
+      participant_types = { ...autoParticipantTypes, ...(participant_types || {}) };
+    }
     const selectedSpeakers = dedupeSpeakers(hasManualSpeakers
       ? speakers
       : autoDiscoveredSpeakers);
@@ -2750,9 +2771,19 @@ server.tool(
   "딜리버레이션 참가자 CLI 설정을 조회하거나 변경합니다. enabled_clis를 지정하면 저장합니다.",
   {
     enabled_clis: z.array(z.string()).optional().describe("활성화할 CLI 목록 (예: [\"claude\", \"codex\", \"gemini\"]). 미지정 시 현재 설정 조회"),
+    require_speaker_selection: z.preprocess(
+      (v) => (typeof v === "string" ? v === "true" : v),
+      z.boolean().optional()
+    ).describe("true: 매번 사용자가 스피커 선택 후 시작, false: 감지된 스피커 전체 자동 참여"),
   },
-  safeToolHandler("deliberation_cli_config", async ({ enabled_clis }) => {
+  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection }) => {
     const config = loadDeliberationConfig();
+
+    // Handle require_speaker_selection toggle
+    if (require_speaker_selection !== undefined && require_speaker_selection !== null) {
+      config.require_speaker_selection = require_speaker_selection;
+      saveDeliberationConfig(config);
+    }
 
     if (!enabled_clis) {
       // Read mode: show current config + detected CLIs
@@ -2763,7 +2794,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI 설정\n\n**모드:** ${mode}\n**설정된 CLI:** ${configured.length > 0 ? configured.join(", ") : "(없음 — 전체 자동 감지)"}\n**현재 감지된 CLI:** ${detected.join(", ") || "(없음)"}\n**지원 CLI 전체:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\n변경하려면:\n\`deliberation_cli_config(enabled_clis: ["claude", "codex"])\`\n\n전체 자동 감지로 되돌리려면:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI 설정\n\n**모드:** ${mode}\n**스피커 선택:** ${config.require_speaker_selection === false ? "자동 (감지된 스피커 전체 참여)" : "수동 (사용자가 직접 선택)"}\n**설정된 CLI:** ${configured.length > 0 ? configured.join(", ") : "(없음 — 전체 자동 감지)"}\n**현재 감지된 CLI:** ${detected.join(", ") || "(없음)"}\n**지원 CLI 전체:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\n변경하려면:\n\`deliberation_cli_config(enabled_clis: ["claude", "codex"])\`\n\n스피커 자동 참여로 전환:\n\`deliberation_cli_config(require_speaker_selection: false)\`\n\n전체 자동 감지로 되돌리려면:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
