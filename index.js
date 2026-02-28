@@ -126,6 +126,20 @@ const DEFAULT_LLM_DOMAINS = [
   "notebooklm.google.com",
 ];
 
+// Well-known web LLMs — always available as speaker candidates regardless of browser detection.
+// When a matching browser tab is detected, transport upgrades to browser_auto (CDP) or clipboard.
+// When no tab is detected, transport falls back to clipboard (manual paste).
+const DEFAULT_WEB_SPEAKERS = [
+  { speaker: "web-chatgpt", provider: "chatgpt", name: "ChatGPT", url: "https://chatgpt.com" },
+  { speaker: "web-claude", provider: "claude", name: "Claude", url: "https://claude.ai" },
+  { speaker: "web-gemini", provider: "gemini", name: "Gemini", url: "https://gemini.google.com" },
+  { speaker: "web-copilot", provider: "copilot", name: "Copilot", url: "https://copilot.microsoft.com" },
+  { speaker: "web-perplexity", provider: "perplexity", name: "Perplexity", url: "https://perplexity.ai" },
+  { speaker: "web-deepseek", provider: "deepseek", name: "DeepSeek", url: "https://deepseek.com" },
+  { speaker: "web-mistral", provider: "mistral", name: "Mistral", url: "https://mistral.ai" },
+  { speaker: "web-poe", provider: "poe", name: "Poe", url: "https://poe.com" },
+];
+
 let _extensionProviderRegistry = null;
 const __dirnameEsm = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"));
 function loadExtensionProviderRegistry() {
@@ -1159,12 +1173,33 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
     }
   }
 
+  // Auto-register well-known web LLMs that weren't already detected via browser scanning.
+  // This ensures web speakers are ALWAYS available regardless of browser detection success.
+  // If a browser tab for the same provider was already detected, skip auto-registration
+  // to avoid duplicates (e.g., detected "web-chatgpt-1" vs auto-registered "web-chatgpt").
+  const detectedProviders = new Set(
+    candidates.filter(c => c.type === "browser" && !c.auto_registered).map(c => c.provider)
+  );
+  for (const ws of DEFAULT_WEB_SPEAKERS) {
+    if (detectedProviders.has(ws.provider)) continue;
+    add({
+      speaker: ws.speaker,
+      type: "browser",
+      provider: ws.provider,
+      browser: "auto-registered",
+      title: ws.name,
+      url: ws.url,
+      auto_registered: true,
+    });
+  }
+
   return { candidates, browserNote };
 }
 
 function formatSpeakerCandidatesReport({ candidates, browserNote }) {
   const cli = candidates.filter(c => c.type === "cli");
-  const browser = candidates.filter(c => c.type === "browser");
+  const detected = candidates.filter(c => c.type === "browser" && !c.auto_registered);
+  const autoReg = candidates.filter(c => c.type === "browser" && c.auto_registered);
 
   let out = "## Selectable Speakers\n\n";
   out += "### CLI\n";
@@ -1174,16 +1209,21 @@ function formatSpeakerCandidatesReport({ candidates, browserNote }) {
     out += `${cli.map(c => `- \`${c.speaker}\` (command: ${c.command})`).join("\n")}\n\n`;
   }
 
-  out += "### Browser LLM\n";
-  if (browser.length === 0) {
-    out += "- (감지된 브라우저 LLM 탭 없음)\n";
+  out += "### Browser LLM (감지됨)\n";
+  if (detected.length === 0) {
+    out += "- (브라우저에서 감지된 LLM 탭 없음)\n";
   } else {
-    out += `${browser.map(c => {
+    out += `${detected.map(c => {
       const icon = c.cdp_available ? "⚡자동" : "📋클립보드";
       const extTag = String(c.url || "").startsWith("chrome-extension://") ? " [Extension]" : "";
       return `- \`${c.speaker}\` [${icon}]${extTag} [${c.browser}] ${c.title}\n  ${c.url}`;
     }).join("\n")}\n`;
   }
+
+  out += "\n### Web LLM (자동 등록)\n";
+  out += `${autoReg.map(c => {
+    return `- \`${c.speaker}\` — ${c.title} (${c.url})`;
+  }).join("\n")}\n`;
 
   if (browserNote) {
     out += `\n\nℹ️ ${browserNote}`;
