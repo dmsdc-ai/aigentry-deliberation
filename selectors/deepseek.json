@@ -1,0 +1,19 @@
+{
+  "provider": "deepseek",
+  "version": "1.0.0",
+  "domains": ["chat.deepseek.com", "deepseek.com"],
+  "selectors": {
+    "inputSelector": "textarea#chat-input, textarea[placeholder*='Message'], textarea[placeholder*='Send a message']",
+    "sendButton": "button[aria-label='Send'], div[role='button'].ds-icon-button",
+    "responseSelector": ".markdown-body, .ds-markdown",
+    "responseContainer": ".chat-message-content",
+    "streamingIndicator": ".chat-message--streaming, .typing-indicator"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 60000
+  },
+  "notes": "DeepSeek web selectors - verify via DOM inspection if selectors change"
+}

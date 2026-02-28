@@ -154,10 +154,35 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       }
     }
 
+    // If no matching tab found, try to open one automatically
+    if (!foundTab && targetHint.url) {
+      for (const endpoint of this.cdpEndpoints) {
+        try {
+          const baseUrl = endpoint.replace(/\/json\/list\/?$/, "");
+          const createUrl = `${baseUrl}/json/new?${encodeURIComponent(targetHint.url)}`;
+          const resp = await fetch(createUrl, {
+            method: "PUT",
+            signal: AbortSignal.timeout(5000),
+          });
+          if (resp.ok) {
+            const newTab = await resp.json();
+            if (newTab && newTab.webSocketDebuggerUrl) {
+              // Wait for page to initialize
+              await new Promise(r => setTimeout(r, 3000));
+              foundTab = { ...newTab, endpoint };
+              break;
+            }
+          }
+        } catch {
+          // endpoint not reachable or create failed
+        }
+      }
+    }
+
     if (!foundTab) {
       return makeResult(false, null, {
         code: "BIND_FAILED",
-        message: `No matching browser tab found for provider "${provider}" (checked ${this.cdpEndpoints.length} endpoints)`,
+        message: `No matching browser tab found for provider "${provider}" (checked ${this.cdpEndpoints.length} endpoints). Ensure Chrome is running with --remote-debugging-port=9222 and a tab with ${targetHint.url || provider} is open.`,
       });
     }
 

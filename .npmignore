@@ -1,0 +1,13 @@
+# Test files
+__tests__/
+*.test.js
+
+# Development files
+.github/
+.claude/
+.omc/
+.gitignore
+
+# Documentation (already on GitHub)
+*.md
+!README.md

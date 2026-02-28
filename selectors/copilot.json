@@ -1,0 +1,19 @@
+{
+  "provider": "copilot",
+  "version": "1.0.0",
+  "domains": ["copilot.microsoft.com"],
+  "selectors": {
+    "inputSelector": "textarea#searchbox, textarea[placeholder*='message'], #userInput",
+    "sendButton": "button[aria-label='Submit'], button[aria-label='Send'], button.submit-button",
+    "responseSelector": ".ac-textBlock, .response-message-content",
+    "responseContainer": "[data-content='ai-message'], .response-message",
+    "streamingIndicator": ".typing-indicator, .is-streaming"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Microsoft Copilot web selectors - verify via DOM inspection if selectors change"
+}

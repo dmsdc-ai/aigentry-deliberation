@@ -1171,26 +1171,29 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
         candidate.cdp_ws_url = matches[0].webSocketDebuggerUrl;
       }
     }
-  }
 
-  // Auto-register well-known web LLMs that weren't already detected via browser scanning.
-  // This ensures web speakers are ALWAYS available regardless of browser detection success.
-  // If a browser tab for the same provider was already detected, skip auto-registration
-  // to avoid duplicates (e.g., detected "web-chatgpt-1" vs auto-registered "web-chatgpt").
-  const detectedProviders = new Set(
-    candidates.filter(c => c.type === "browser" && !c.auto_registered).map(c => c.provider)
-  );
-  for (const ws of DEFAULT_WEB_SPEAKERS) {
-    if (detectedProviders.has(ws.provider)) continue;
-    add({
-      speaker: ws.speaker,
-      type: "browser",
-      provider: ws.provider,
-      browser: "auto-registered",
-      title: ws.name,
-      url: ws.url,
-      auto_registered: true,
-    });
+    // Auto-register well-known web LLMs that weren't already detected via browser scanning.
+    // This ensures web speakers are ALWAYS available regardless of browser detection success.
+    // If a browser tab for the same provider was already detected, skip auto-registration
+    // to avoid duplicates (e.g., detected "web-chatgpt-1" vs auto-registered "web-chatgpt").
+    const detectedProviders = new Set(
+      candidates.filter(c => c.type === "browser" && !c.auto_registered).map(c => c.provider)
+    );
+    // CDP is reachable if we got any tabs from the endpoints (attach() handles auto-tab-creation)
+    const cdpReachable = cdpTabs.length > 0 || cdpStatus.available;
+    for (const ws of DEFAULT_WEB_SPEAKERS) {
+      if (detectedProviders.has(ws.provider)) continue;
+      add({
+        speaker: ws.speaker,
+        type: "browser",
+        provider: ws.provider,
+        browser: "auto-registered",
+        title: ws.name,
+        url: ws.url,
+        auto_registered: true,
+        cdp_available: cdpReachable,
+      });
+    }
   }
 
   return { candidates, browserNote };
@@ -1222,7 +1225,8 @@ function formatSpeakerCandidatesReport({ candidates, browserNote }) {
 
   out += "\n### Web LLM (자동 등록)\n";
   out += `${autoReg.map(c => {
-    return `- \`${c.speaker}\` — ${c.title} (${c.url})`;
+    const icon = c.cdp_available ? "⚡자동" : "📋클립보드";
+    return `- \`${c.speaker}\` [${icon}] — ${c.title} (${c.url})`;
   }).join("\n")}\n`;
 
   if (browserNote) {
@@ -2634,8 +2638,15 @@ server.tool(
     const turnId = state.pending_turn_id || generateTurnId();
     const port = getBrowserPort();
 
-    // Step 1: Attach
-    const attachResult = await port.attach(resolved, { provider });
+    // Step 1: Attach (pass URL from participant profile for auto-tab-creation)
+    const speakerProfile = (state.participant_profiles || []).find(
+      p => normalizeSpeaker(p.speaker) === normalizeSpeaker(speaker)
+    );
+    const attachHint = {
+      provider: speakerProfile?.provider || provider,
+      url: speakerProfile?.url || undefined,
+    };
+    const attachResult = await port.attach(resolved, attachHint);
     if (!attachResult.ok) {
       return { content: [{ type: "text", text: `❌ 브라우저 탭 바인딩 실패: ${attachResult.error.message}\n\n**에러 코드:** ${attachResult.error.code}\n**도메인:** ${attachResult.error.domain}\n\nCDP 디버깅 포트가 활성화된 브라우저가 실행 중인지 확인하세요.\n\`google-chrome --remote-debugging-port=9222\`\n\n${PRODUCT_DISCLAIMER}` }] };
     }

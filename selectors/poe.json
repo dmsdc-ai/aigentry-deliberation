@@ -1,0 +1,19 @@
+{
+  "provider": "poe",
+  "version": "1.0.0",
+  "domains": ["poe.com"],
+  "selectors": {
+    "inputSelector": "textarea[class*='GrowingTextArea'], textarea[placeholder*='Talk to']",
+    "sendButton": "button[class*='SendButton'], button[aria-label='Send message']",
+    "responseSelector": ".Markdown_markdownContainer__Tz3HQ, .Message_botMessageBubble__CPGMI .Markdown_markdownContainer__Tz3HQ",
+    "responseContainer": ".Message_botMessageBubble__CPGMI",
+    "streamingIndicator": ".Message_botMessageBubble__CPGMI .ChatMessage_streamingBotMessage__wDBTh"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Poe web selectors - verify via DOM inspection if selectors change. Poe uses hashed class names that may change between deployments."
+}

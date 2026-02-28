@@ -1,0 +1,19 @@
+{
+  "provider": "perplexity",
+  "version": "1.0.0",
+  "domains": ["perplexity.ai", "www.perplexity.ai"],
+  "selectors": {
+    "inputSelector": "textarea[placeholder*='Ask'], textarea[placeholder*='ask'], textarea#ppl-query",
+    "sendButton": "button[aria-label='Submit'], button[aria-label='Send'], button.bg-super",
+    "responseSelector": ".prose, .markdown-content",
+    "responseContainer": "[data-testid='answer-content'], .answer-content",
+    "streamingIndicator": ".animate-pulse, [data-testid='streaming-indicator']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Perplexity web selectors - verify via DOM inspection if selectors change"
+}

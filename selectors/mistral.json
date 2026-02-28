@@ -1,0 +1,19 @@
+{
+  "provider": "mistral",
+  "version": "1.0.0",
+  "domains": ["chat.mistral.ai", "mistral.ai"],
+  "selectors": {
+    "inputSelector": "textarea[placeholder*='Message'], textarea[placeholder*='Ask'], div[contenteditable='true']",
+    "sendButton": "button[aria-label='Send'], button[type='submit']",
+    "responseSelector": ".prose, .markdown-body",
+    "responseContainer": ".message-assistant, [data-role='assistant']",
+    "streamingIndicator": ".animate-pulse, [data-streaming='true']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Mistral Le Chat web selectors - verify via DOM inspection if selectors change"
+}
