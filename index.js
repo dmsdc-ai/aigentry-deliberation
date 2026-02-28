@@ -5,7 +5,9 @@
  * 모든 프로젝트에서 사용 가능한 AI 간 deliberation 서버.
  * 동시에 여러 deliberation을 병렬 진행할 수 있다.
  *
- * 상태 저장: ~/.local/lib/mcp-deliberation/state/{project-slug}/sessions/{id}.json
+ * 상태 저장: $INSTALL_DIR/state/{project-slug}/sessions/{id}.json
+ *   macOS/Linux: ~/.local/lib/mcp-deliberation/
+ *   Windows:     %LOCALAPPDATA%/mcp-deliberation/
  *
  * Tools:
  *   deliberation_start        새 토론 시작 → session_id 반환
@@ -35,8 +37,12 @@ import { OrchestratedBrowserPort } from "./browser-control-port.js";
 // ── Paths ──────────────────────────────────────────────────────
 
 const HOME = os.homedir();
-const GLOBAL_STATE_DIR = path.join(HOME, ".local", "lib", "mcp-deliberation", "state");
-const GLOBAL_RUNTIME_LOG = path.join(HOME, ".local", "lib", "mcp-deliberation", "runtime.log");
+const IS_WIN = process.platform === "win32";
+const INSTALL_DIR = IS_WIN
+  ? path.join(process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local"), "mcp-deliberation")
+  : path.join(HOME, ".local", "lib", "mcp-deliberation");
+const GLOBAL_STATE_DIR = path.join(INSTALL_DIR, "state");
+const GLOBAL_RUNTIME_LOG = path.join(INSTALL_DIR, "runtime.log");
 const OBSIDIAN_VAULT = path.join(HOME, "Documents", "Obsidian Vault");
 const OBSIDIAN_PROJECTS = path.join(OBSIDIAN_VAULT, "10-Projects");
 const DEFAULT_SPEAKERS = ["agent-a", "agent-b"];
@@ -56,7 +62,7 @@ const DEFAULT_CLI_CANDIDATES = [
 const MAX_AUTO_DISCOVERED_SPEAKERS = 12;
 
 function loadDeliberationConfig() {
-  const configPath = path.join(HOME, ".local", "lib", "mcp-deliberation", "config.json");
+  const configPath = path.join(INSTALL_DIR, "config.json");
   try {
     return JSON.parse(fs.readFileSync(configPath, "utf-8"));
   } catch {
@@ -65,7 +71,7 @@ function loadDeliberationConfig() {
 }
 
 function saveDeliberationConfig(config) {
-  const configPath = path.join(HOME, ".local", "lib", "mcp-deliberation", "config.json");
+  const configPath = path.join(INSTALL_DIR, "config.json");
   config.updated = new Date().toISOString();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
@@ -213,7 +219,7 @@ function applyRolePreset(preset, speakers) {
 
 const DEGRADATION_TIERS = {
   monitoring: {
-    tier1: { name: "tmux", description: "tmux 실시간 모니터링 윈도우", check: () => { try { execFileSync("which", ["tmux"], { stdio: "pipe" }); return true; } catch { return false; } } },
+    tier1: { name: "tmux", description: "tmux 실시간 모니터링 윈도우", check: () => commandExistsInPath("tmux") },
     tier2: { name: "logfile", description: "로그 파일 tail 모니터링", check: () => true },
     tier3: { name: "silent", description: "모니터링 없음 (로그만 기록)", check: () => true },
   },
@@ -1515,8 +1521,8 @@ function archiveState(state) {
 // ── Terminal management ────────────────────────────────────────
 
 const TMUX_SESSION = "deliberation";
-const MONITOR_SCRIPT = path.join(HOME, ".local", "lib", "mcp-deliberation", "session-monitor.sh");
-const MONITOR_SCRIPT_WIN = path.join(HOME, ".local", "lib", "mcp-deliberation", "session-monitor-win.js");
+const MONITOR_SCRIPT = path.join(INSTALL_DIR, "session-monitor.sh");
+const MONITOR_SCRIPT_WIN = path.join(INSTALL_DIR, "session-monitor-win.js");
 
 function tmuxWindowName(sessionId) {
   // tmux 윈도우 이름은 짧게 (마지막 부분 제거하고 20자)

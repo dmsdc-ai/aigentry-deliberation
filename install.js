@@ -21,8 +21,16 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const INSTALL_DIR = path.join(HOME, ".local", "lib", "mcp-deliberation");
+const IS_WIN = process.platform === "win32";
+const INSTALL_DIR = IS_WIN
+  ? path.join(process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local"), "mcp-deliberation")
+  : path.join(HOME, ".local", "lib", "mcp-deliberation");
 const MCP_CONFIG = path.join(HOME, ".claude", ".mcp.json");
+
+/** Normalize path to forward slashes for JSON config (Windows backslash → forward slash) */
+function toForwardSlash(p) {
+  return p.replace(/\\/g, "/");
+}
 
 const FILES_TO_COPY = [
   "index.js",
@@ -120,7 +128,7 @@ function install() {
   const alreadyRegistered = !!mcpConfig.mcpServers.deliberation;
   mcpConfig.mcpServers.deliberation = {
     command: "node",
-    args: [path.join(INSTALL_DIR, "index.js")],
+    args: [toForwardSlash(path.join(INSTALL_DIR, "index.js"))],
   };
 
   fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
