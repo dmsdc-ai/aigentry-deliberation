@@ -1,0 +1,19 @@
+{
+  "provider": "gemini",
+  "version": "1.0.0",
+  "domains": ["gemini.google.com"],
+  "selectors": {
+    "inputSelector": ".ql-editor[contenteditable='true']",
+    "sendButton": "button.send-button, button[aria-label='Send message']",
+    "responseSelector": ".markdown.markdown-main-panel",
+    "responseContainer": ".model-response-text",
+    "streamingIndicator": ".loading-indicator, .model-response-text .loading"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 45000
+  },
+  "notes": "Gemini web selectors - verify via DOM inspection if selectors change"
+}

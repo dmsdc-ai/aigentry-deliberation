@@ -196,14 +196,40 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     }
 
     try {
-      // Execute CDP commands to type and send
+      // Step 1: Focus input and insert text via execCommand for React/ProseMirror compatibility
+      const inputSel = JSON.stringify(binding.selectors.inputSelector);
+      const sendBtnSel = JSON.stringify(binding.selectors.sendButton);
+      const escapedText = JSON.stringify(text);
+
       const result = await this._cdpEvaluate(binding, `
         (function() {
-          const input = document.querySelector('${binding.selectors.inputSelector}');
+          const input = document.querySelector(${inputSel});
           if (!input) return { ok: false, error: 'INPUT_NOT_FOUND' };
+
+          // Focus and select all existing content
           input.focus();
-          input.textContent = ${JSON.stringify(text)};
-          input.dispatchEvent(new Event('input', { bubbles: true }));
+          if (input.isContentEditable) {
+            // For contenteditable (ChatGPT ProseMirror, Claude, etc.)
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(input);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            // execCommand triggers framework state updates (React, ProseMirror, Quill)
+            document.execCommand('insertText', false, ${escapedText});
+          } else {
+            // For regular <textarea>/<input>
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+              Object.getPrototypeOf(input), 'value'
+            )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(input, ${escapedText});
+            } else {
+              input.value = ${escapedText};
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          }
           return { ok: true };
         })()
       `);
@@ -215,14 +241,29 @@ class DevToolsMcpAdapter extends BrowserControlPort {
         });
       }
 
-      // Small delay then click send
+      // Small delay for framework state propagation
       await new Promise(r => setTimeout(r, binding.timing?.sendDelayMs || 200));
 
+      // Step 2: Send via Enter key (primary) + button click (fallback)
       const sendResult = await this._cdpEvaluate(binding, `
         (function() {
-          const btn = document.querySelector('${binding.selectors.sendButton}');
-          if (!btn) return { ok: false, error: 'SEND_BUTTON_NOT_FOUND' };
-          btn.click();
+          const input = document.querySelector(${inputSel});
+          if (!input) return { ok: false, error: 'INPUT_NOT_FOUND' };
+
+          // Primary: dispatch Enter key event on the input
+          input.focus();
+          const enterEvent = new KeyboardEvent('keydown', {
+            key: 'Enter', code: 'Enter',
+            keyCode: 13, which: 13,
+            bubbles: true, cancelable: true
+          });
+          input.dispatchEvent(enterEvent);
+
+          // Fallback: also click send button if it exists and is enabled
+          const btn = document.querySelector(${sendBtnSel});
+          if (btn && !btn.disabled) {
+            btn.click();
+          }
           return { ok: true };
         })()
       `);
@@ -254,17 +295,21 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     const pollInterval = binding.timing?.pollIntervalMs || 500;
     const startTime = Date.now();
 
+    const streamSel = JSON.stringify(binding.selectors.streamingIndicator);
+    const respContSel = JSON.stringify(binding.selectors.responseContainer);
+    const respSel = JSON.stringify(binding.selectors.responseSelector);
+
     try {
       while (Date.now() - startTime < timeoutMs) {
         // Check if streaming is complete
         const status = await this._cdpEvaluate(binding, `
           (function() {
-            const streaming = document.querySelector('${binding.selectors.streamingIndicator}');
+            const streaming = document.querySelector(${streamSel});
             if (streaming) return { streaming: true };
-            const responses = document.querySelectorAll('${binding.selectors.responseContainer}');
+            const responses = document.querySelectorAll(${respContSel});
             if (responses.length === 0) return { streaming: true };
             const last = responses[responses.length - 1];
-            const content = last.querySelector('${binding.selectors.responseSelector}');
+            const content = last.querySelector(${respSel});
             return {
               streaming: false,
               text: content ? content.textContent : last.textContent,

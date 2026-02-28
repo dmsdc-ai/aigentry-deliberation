@@ -1,0 +1,19 @@
+{
+  "provider": "claude",
+  "version": "1.0.0",
+  "domains": ["claude.ai"],
+  "selectors": {
+    "inputSelector": "div.ProseMirror[contenteditable='true']",
+    "sendButton": "button[aria-label='Send Message'], button[data-testid='send-button']",
+    "responseSelector": ".font-claude-message .grid-cols-1 .grid .min-w-0",
+    "responseContainer": "[data-is-streaming]",
+    "streamingIndicator": "[data-is-streaming='true']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 60000
+  },
+  "notes": "Claude web selectors - verify via DOM inspection if selectors change"
+}
