@@ -2134,12 +2134,24 @@ server.tool(
       .describe("역할 프리셋 (balanced/debate/research/brainstorm/review/consensus). speaker_roles가 명시되면 무시됨"),
   },
   safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
+    // ── First-time onboarding guard ──
+    const config = loadDeliberationConfig();
+    if (!config.setup_complete) {
+      const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
+      const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
+      return {
+        content: [{
+          type: "text",
+          text: `🎉 **Deliberation 첫 사용을 환영합니다!**\n\n시작 전에 스피커 참여 모드를 설정해주세요.\n\n**현재 감지된 스피커:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**스피커 참여 모드를 선택하세요:**\n\n1️⃣ **수동 선택** — 매번 토론 시작 시 참여할 스피커를 직접 선택합니다.\n   → \`deliberation_cli_config(require_speaker_selection: true)\`\n\n2️⃣ **자동 참여** — 감지된 CLI + 브라우저 LLM이 전부 자동으로 참여합니다.\n   → \`deliberation_cli_config(require_speaker_selection: false)\`\n\n설정 후 다시 deliberation_start를 호출하면 됩니다.`,
+        }],
+      };
+    }
+
     const sessionId = generateSessionId(topic);
     const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0;
     const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
 
     // Resolve effective settings from config
-    const config = loadDeliberationConfig();
     const effectiveRequireManual = require_manual_speakers ?? config.require_speaker_selection ?? true;
     const effectiveAutoDiscover = auto_discover_speakers ?? !effectiveRequireManual;
 
@@ -2782,6 +2794,7 @@ server.tool(
     // Handle require_speaker_selection toggle
     if (require_speaker_selection !== undefined && require_speaker_selection !== null) {
       config.require_speaker_selection = require_speaker_selection;
+      config.setup_complete = true;
       saveDeliberationConfig(config);
     }
 
