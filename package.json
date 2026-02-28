@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aigentry-deliberation",
-  "version": "1.0.0",
+  "version": "2.6.0",
   "description": "MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles",
   "type": "module",
   "license": "MIT",
@@ -18,9 +18,9 @@
   },
   "main": "index.js",
   "bin": {
-    "mcp-deliberation": "./index.js",
-    "deliberation-observer": "./observer.js",
-    "deliberation-install": "./install.js"
+    "mcp-deliberation": "index.js",
+    "deliberation-observer": "observer.js",
+    "deliberation-install": "install.js"
   },
   "engines": {
     "node": ">=18"
