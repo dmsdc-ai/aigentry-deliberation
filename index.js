@@ -32,7 +32,7 @@ Usage:
 }
 
 /**
- * MCP Deliberation Server (Global) — v2.5 Multi-Session + Transport Routing + Cross-Platform + BrowserControlPort
+ * MCP Deliberation Server (Global) — Multi-Session + Transport Routing + Cross-Platform + BrowserControlPort
  *
  * 모든 프로젝트에서 사용 가능한 AI 간 deliberation 서버.
  * 동시에 여러 deliberation을 병렬 진행할 수 있다.
@@ -63,6 +63,7 @@ import { z } from "zod";
 import { execFileSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import os from "os";
 import { OrchestratedBrowserPort } from "./browser-control-port.js";
 
@@ -2134,9 +2135,13 @@ process.on("unhandledRejection", (reason) => {
   }
 });
 
+// Read version from package.json (single source of truth)
+const __pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "package.json");
+const __pkgVersion = JSON.parse(fs.readFileSync(__pkgPath, "utf-8")).version;
+
 const server = new McpServer({
   name: "mcp-deliberation",
-  version: "2.4.0",
+  version: __pkgVersion,
 });
 
 server.tool(

@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aigentry-deliberation",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles",
   "type": "module",
   "license": "MIT",
@@ -40,10 +40,10 @@
     "README.md"
   ],
   "scripts": {
-    "postinstall": "node install.js || true",
     "start": "node index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
