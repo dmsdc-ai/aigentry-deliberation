@@ -1218,10 +1218,19 @@ function mapParticipantProfiles(speakers, candidates, typeOverrides) {
 
     const candidate = bySpeaker.get(speaker);
     if (!candidate) {
-      profiles.push({
-        speaker,
-        type: "manual",
-      });
+      // Force CLI type if the speaker is available as a CLI command in PATH
+      if (commandExistsInPath(speaker)) {
+        profiles.push({
+          speaker,
+          type: "cli",
+          command: speaker,
+        });
+      } else {
+        profiles.push({
+          speaker,
+          type: "manual",
+        });
+      }
       continue;
     }
 
