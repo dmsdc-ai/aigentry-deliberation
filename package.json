@@ -19,13 +19,15 @@
   "main": "index.js",
   "bin": {
     "mcp-deliberation": "./index.js",
-    "deliberation-observer": "./observer.js"
+    "deliberation-observer": "./observer.js",
+    "deliberation-install": "./install.js"
   },
   "engines": {
     "node": ">=18"
   },
   "files": [
     "index.js",
+    "install.js",
     "observer.js",
     "browser-control-port.js",
     "degradation-state-machine.js",
