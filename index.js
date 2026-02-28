@@ -2154,7 +2154,6 @@ server.tool(
     }
 
     const sessionId = generateSessionId(topic);
-    const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0;
     const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
 
     // Resolve effective settings from config
@@ -2165,12 +2164,26 @@ server.tool(
     // Resolve "auto": 2 speakers → cyclic, 3+ → weighted-random
     ordering_strategy = rawOrdering === "auto" ? undefined : rawOrdering; // resolved after speakers are known
 
+    // When require_speaker_selection is explicitly true in config,
+    // ignore LLM-provided speakers UNLESS require_manual_speakers: true is explicitly passed
+    // (which signals the user has confirmed the speaker selection)
+    const configRequiresSelection = config.require_speaker_selection === true;
+    const llmExplicitlyConfirmed = require_manual_speakers === true;
+    const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0
+      && (!configRequiresSelection || llmExplicitlyConfirmed);
+
     if (!hasManualSpeakers && effectiveRequireManual) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
+      const llmSuggested = Array.isArray(speakers) && speakers.length > 0
+        ? `\n\n💡 **LLM이 제안한 스피커:** ${speakers.join(", ")}\n위 제안을 사용하려면 \`require_manual_speakers: true\`와 함께 speakers를 다시 전달하세요.`
+        : "";
+      const configNote = configRequiresSelection
+        ? "\n\n⚙️ `require_speaker_selection: true` 설정에 의해 사용자가 직접 스피커를 선택해야 합니다."
+        : "";
       return {
         content: [{
           type: "text",
-          text: `스피커를 직접 선택해야 deliberation을 시작할 수 있습니다.\n\n${candidateText}\n\n예시:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["codex", "web-claude-1", "web-chatgpt-1"],\n  first_speaker: "codex"\n)\n\n먼저 deliberation_speaker_candidates를 호출해 현재 선택 가능한 스피커를 확인하세요.`,
+          text: `스피커를 직접 선택해야 deliberation을 시작할 수 있습니다.${configNote}${llmSuggested}\n\n${candidateText}\n\n예시:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["codex", "web-claude-1", "web-chatgpt-1"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\n먼저 deliberation_speaker_candidates를 호출해 현재 선택 가능한 스피커를 확인하세요.`,
         }],
       };
     }
