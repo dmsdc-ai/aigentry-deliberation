@@ -1,0 +1,8 @@
+# Force LF line endings for all text files to prevent Windows CRLF issues
+* text=auto eol=lf
+
+# Explicitly mark binary files
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
