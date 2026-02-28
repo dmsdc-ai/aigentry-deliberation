@@ -1,4 +1,36 @@
 #!/usr/bin/env node
+
+// ── CLI command routing (must be before any imports) ──
+// Supports: npx @dmsdc-ai/aigentry-deliberation install
+//           npx @dmsdc-ai/aigentry-deliberation --help
+const _cliArg = process.argv[2];
+if (_cliArg === "install" || _cliArg === "uninstall" || _cliArg === "--uninstall") {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const __installDir = dirname(fileURLToPath(import.meta.url));
+  const installArgs = _cliArg === "install" ? [] : ["--uninstall"];
+  try {
+    execFileSync(process.execPath, [join(__installDir, "install.js"), ...installArgs], { stdio: "inherit" });
+  } catch (e) {
+    process.exit(e.status || 1);
+  }
+  process.exit(0);
+}
+if (_cliArg === "--help" || _cliArg === "-h") {
+  console.log(`
+MCP Deliberation Server
+
+Usage:
+  npx @dmsdc-ai/aigentry-deliberation install     설치 (MCP 서버 등록)
+  npx @dmsdc-ai/aigentry-deliberation uninstall    제거
+  npx @dmsdc-ai/aigentry-deliberation              MCP 서버 실행 (stdio)
+
+설치 후 Claude Code를 재시작하면 자동으로 사용 가능합니다.
+`);
+  process.exit(0);
+}
+
 /**
  * MCP Deliberation Server (Global) — v2.5 Multi-Session + Transport Routing + Cross-Platform + BrowserControlPort
  *

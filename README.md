@@ -16,39 +16,37 @@ MCP Deliberation Server — Multi-session AI deliberation with smart speaker ord
 
 ## Installation
 
-### As standalone MCP server
+원클릭 설치 — 어떤 프로젝트 환경에서든 동작합니다:
 
 ```bash
+npx @dmsdc-ai/aigentry-deliberation install
+```
+
+이 명령은:
+1. `~/.local/lib/mcp-deliberation/`에 서버 파일 설치 (Windows: `%LOCALAPPDATA%/mcp-deliberation/`)
+2. npm 의존성 설치
+3. `~/.claude/.mcp.json`에 MCP 서버 자동 등록
+4. Claude Code 재시작하면 바로 사용 가능
+
+### 기타 설치 방법
+
+```bash
+# 글로벌 설치
 npm install -g @dmsdc-ai/aigentry-deliberation
-```
+deliberation-install
 
-### Via aigentry-devkit
-
-```bash
+# aigentry-devkit 통합 설치
 npx @dmsdc-ai/aigentry-devkit setup
+
+# 소스에서 직접 설치
+git clone https://github.com/dmsdc-ai/aigentry-deliberation.git
+cd aigentry-deliberation && npm install && node install.js
 ```
 
-### Manual
+### 제거
 
 ```bash
-git clone https://github.com/dmsdc-ai/aigentry-deliberation.git
-cd aigentry-deliberation
-npm install
-```
-
-## MCP Configuration
-
-Add to `~/.claude/.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "deliberation": {
-      "command": "node",
-      "args": ["/path/to/aigentry-deliberation/index.js"]
-    }
-  }
-}
+npx @dmsdc-ai/aigentry-deliberation uninstall
 ```
 
 ## MCP Tools
