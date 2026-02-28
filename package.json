@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aigentry-deliberation",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles",
   "type": "module",
   "license": "MIT",
