@@ -2106,7 +2106,7 @@ server.tool(
   "새 deliberation을 시작합니다. 여러 토론을 동시에 진행할 수 있습니다.",
   {
     topic: z.string().describe("토론 주제"),
-    rounds: z.coerce.number().default(3).describe("라운드 수 (기본 3)"),
+    rounds: z.coerce.number().optional().describe("라운드 수 (미지정 시 config 설정 따름, 기본 3)"),
     first_speaker: z.string().trim().min(1).max(64).optional().describe("첫 발언자 이름 (미지정 시 speakers의 첫 항목)"),
     speakers: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
@@ -2124,8 +2124,8 @@ server.tool(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["cli", "browser", "browser_auto", "manual"])).optional()
     ).describe("speaker별 타입 오버라이드 (예: {\"chatgpt\": \"browser_auto\"})"),
-    ordering_strategy: z.enum(["cyclic", "random", "weighted-random"]).default("cyclic")
-      .describe("발언 순서 전략: cyclic(순서대로), random(매턴 무작위), weighted-random(덜 말한 사람 우선)"),
+    ordering_strategy: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
+      .describe("발언 순서 전략: auto(스피커 수에 따라 자동), cyclic(순서대로), random(매턴 무작위), weighted-random(덜 말한 사람 우선)"),
     speaker_roles: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["critic", "implementer", "mediator", "researcher", "free"])).optional()
@@ -2142,7 +2142,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `🎉 **Deliberation 첫 사용을 환영합니다!**\n\n시작 전에 스피커 참여 모드를 설정해주세요.\n\n**현재 감지된 스피커:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n**스피커 참여 모드를 선택하세요:**\n\n1️⃣ **수동 선택** — 매번 토론 시작 시 참여할 스피커를 직접 선택합니다.\n   → \`deliberation_cli_config(require_speaker_selection: true)\`\n\n2️⃣ **자동 참여** — 감지된 CLI + 브라우저 LLM이 전부 자동으로 참여합니다.\n   → \`deliberation_cli_config(require_speaker_selection: false)\`\n\n설정 후 다시 deliberation_start를 호출하면 됩니다.`,
+          text: `🎉 **Deliberation 첫 사용을 환영합니다!**\n\n시작 전에 기본 설정을 해주세요.\n\n**현재 감지된 스피커:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n아래 설정을 한 번에 지정할 수 있습니다:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. 스피커 참여 모드** (\`require_speaker_selection\`)\n   - \`true\` — 매번 참여할 스피커를 직접 선택\n   - \`false\` — 감지된 CLI + 브라우저 LLM 전부 자동 참여\n\n**2. 기본 라운드 수** (\`default_rounds\`)\n   - \`1\` — 빠른 의견 수렴\n   - \`3\` — 기본 (권장)\n   - \`5\` — 심층 토론\n\n**3. 발언 순서 전략** (\`default_ordering\`)\n   - \`"auto"\` — 2명이면 cyclic, 3명 이상이면 weighted-random (권장)\n   - \`"cyclic"\` — 고정 순서\n   - \`"random"\` — 매턴 무작위\n   - \`"weighted-random"\` — 덜 발언한 사람 우선`,
         }],
       };
     }
@@ -2154,6 +2154,10 @@ server.tool(
     // Resolve effective settings from config
     const effectiveRequireManual = require_manual_speakers ?? config.require_speaker_selection ?? true;
     const effectiveAutoDiscover = auto_discover_speakers ?? !effectiveRequireManual;
+    rounds = rounds ?? config.default_rounds ?? 3;
+    const rawOrdering = ordering_strategy ?? config.default_ordering ?? "auto";
+    // Resolve "auto": 2 speakers → cyclic, 3+ → weighted-random
+    ordering_strategy = rawOrdering === "auto" ? undefined : rawOrdering; // resolved after speakers are known
 
     if (!hasManualSpeakers && effectiveRequireManual) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
@@ -2216,7 +2220,7 @@ server.tool(
       synthesis: null,
       pending_turn_id: generateTurnId(),
       monitor_terminal_window_ids: [],
-      ordering_strategy: ordering_strategy || "cyclic",
+      ordering_strategy: ordering_strategy || (speakerOrder.length <= 2 ? "cyclic" : "weighted-random"),
       speaker_roles: speaker_roles || (role_preset ? applyRolePreset(role_preset, speakerOrder) : {}),
       degradation: degradationLevels,
       created: new Date().toISOString(),
@@ -2787,13 +2791,29 @@ server.tool(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("true: 매번 사용자가 스피커 선택 후 시작, false: 감지된 스피커 전체 자동 참여"),
+    default_rounds: z.coerce.number().int().min(1).max(10).optional()
+      .describe("기본 라운드 수 (1-10, 기본 3)"),
+    default_ordering: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
+      .describe("기본 발언 순서 전략: auto(스피커 수에 따라 자동), cyclic, random, weighted-random"),
   },
-  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection }) => {
+  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, default_rounds, default_ordering }) => {
     const config = loadDeliberationConfig();
 
-    // Handle require_speaker_selection toggle
+    // Handle setup config updates
+    let configChanged = false;
     if (require_speaker_selection !== undefined && require_speaker_selection !== null) {
       config.require_speaker_selection = require_speaker_selection;
+      configChanged = true;
+    }
+    if (default_rounds !== undefined && default_rounds !== null) {
+      config.default_rounds = default_rounds;
+      configChanged = true;
+    }
+    if (default_ordering !== undefined && default_ordering !== null) {
+      config.default_ordering = default_ordering;
+      configChanged = true;
+    }
+    if (configChanged) {
       config.setup_complete = true;
       saveDeliberationConfig(config);
     }
@@ -2807,7 +2827,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI 설정\n\n**모드:** ${mode}\n**스피커 선택:** ${config.require_speaker_selection === false ? "자동 (감지된 스피커 전체 참여)" : "수동 (사용자가 직접 선택)"}\n**설정된 CLI:** ${configured.length > 0 ? configured.join(", ") : "(없음 — 전체 자동 감지)"}\n**현재 감지된 CLI:** ${detected.join(", ") || "(없음)"}\n**지원 CLI 전체:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\n변경하려면:\n\`deliberation_cli_config(enabled_clis: ["claude", "codex"])\`\n\n스피커 자동 참여로 전환:\n\`deliberation_cli_config(require_speaker_selection: false)\`\n\n전체 자동 감지로 되돌리려면:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI 설정\n\n**모드:** ${mode}\n**스피커 선택:** ${config.require_speaker_selection === false ? "자동 (감지된 스피커 전체 참여)" : "수동 (사용자가 직접 선택)"}\n**기본 라운드:** ${config.default_rounds || 3}\n**발언 순서:** ${config.default_ordering || "auto"}\n**설정된 CLI:** ${configured.length > 0 ? configured.join(", ") : "(없음 — 전체 자동 감지)"}\n**현재 감지된 CLI:** ${detected.join(", ") || "(없음)"}\n**지원 CLI 전체:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\n변경하려면:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\n전체 자동 감지로 되돌리려면:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
