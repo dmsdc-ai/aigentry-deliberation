@@ -1330,11 +1330,25 @@ function resolveTransportForSpeaker(state, speaker) {
   return { transport, profile, reason: null };
 }
 
+// CLI-specific invocation flags for non-interactive execution
+const CLI_INVOCATION_HINTS = {
+  claude: { cmd: "claude", flags: '-p --output-format text', example: 'claude -p --output-format text "프롬프트"' },
+  codex: { cmd: "codex", flags: 'exec', example: 'codex exec "프롬프트"' },
+  gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"' },
+  aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"' },
+  cursor: { cmd: "cursor", flags: '', example: 'cursor "프롬프트"' },
+};
+
 function formatTransportGuidance(transport, state, speaker) {
   const sid = state.id;
   switch (transport) {
-    case "cli_respond":
-      return `CLI speaker입니다. \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 직접 응답하세요.`;
+    case "cli_respond": {
+      const hint = CLI_INVOCATION_HINTS[speaker] || null;
+      const invocationGuide = hint
+        ? `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${hint.cmd} ${hint.flags}\`)`
+        : "";
+      return `CLI speaker입니다. \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 직접 응답하세요.${invocationGuide}`;
+    }
     case "clipboard":
       return `브라우저 LLM speaker입니다. CDP 자동 연결 시도 중... Chrome이 이미 CDP 없이 실행 중이면 재시작이 필요할 수 있습니다.`;
     case "browser_auto":
