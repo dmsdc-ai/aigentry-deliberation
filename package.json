@@ -18,6 +18,7 @@
   },
   "main": "index.js",
   "bin": {
+    "aigentry-deliberation": "index.js",
     "mcp-deliberation": "index.js",
     "deliberation-observer": "observer.js",
     "deliberation-install": "install.js"
