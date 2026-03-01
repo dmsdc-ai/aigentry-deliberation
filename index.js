@@ -870,15 +870,14 @@ async function ensureCdpAvailable() {
     } catch { /* not reachable */ }
   }
 
-  // Auto-launch Chrome with CDP on macOS and Linux
-  if (process.platform === "darwin" || process.platform === "linux") {
+  // Auto-launch Chrome with CDP on macOS, Linux, and Windows
+  {
     let chromeBin, chromeUserDataDir;
 
     if (process.platform === "darwin") {
       chromeBin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
       chromeUserDataDir = path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
-    } else {
-      // Linux: find Chrome/Chromium binary
+    } else if (process.platform === "linux") {
       const chromeCandidates = ["google-chrome", "google-chrome-stable", "google-chrome-beta", "chromium-browser", "chromium"];
       chromeBin = chromeCandidates.find(c => commandExistsInPath(c)) || null;
       if (!chromeBin) {
@@ -890,6 +889,32 @@ async function ensureCdpAvailable() {
       const googleDir = path.join(os.homedir(), ".config", "google-chrome");
       const chromiumDir = path.join(os.homedir(), ".config", "chromium");
       chromeUserDataDir = fs.existsSync(googleDir) ? googleDir : fs.existsSync(chromiumDir) ? chromiumDir : null;
+    } else if (process.platform === "win32") {
+      const programFiles = process.env.PROGRAMFILES || "C:\\Program Files";
+      const programFilesX86 = process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)";
+      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+      const winCandidates = [
+        path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+      ];
+      chromeBin = winCandidates.find(p => fs.existsSync(p)) || null;
+      if (!chromeBin) {
+        return {
+          available: false,
+          reason: "Chrome/Edge를 찾을 수 없습니다. Chrome을 설치하거나 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+        };
+      }
+      const chromeDir = path.join(localAppData, "Google", "Chrome", "User Data");
+      const edgeDir = path.join(localAppData, "Microsoft", "Edge", "User Data");
+      chromeUserDataDir = fs.existsSync(chromeDir) ? chromeDir : fs.existsSync(edgeDir) ? edgeDir : null;
+    } else {
+      return {
+        available: false,
+        reason: "Chrome CDP를 활성화할 수 없습니다. Chrome을 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+      };
     }
 
     // Chrome 145+ requires --user-data-dir for CDP to work.
@@ -958,7 +983,7 @@ async function ensureCdpAvailable() {
     };
   }
 
-  // Windows: cannot auto-launch yet
+  // Unreachable (all platforms handled above), but keep as safety net
   return {
     available: false,
     reason: "Chrome CDP를 활성화할 수 없습니다. Chrome을 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
