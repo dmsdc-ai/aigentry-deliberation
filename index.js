@@ -2515,19 +2515,11 @@ server.tool(
         nonLiveCli.push(s);
       }
     }
+    // Warn but proceed — user explicitly selected these speakers.
+    // cli_auto_turn will handle runtime errors per-turn.
+    let detectWarningLiveness = "";
     if (nonLiveCli.length > 0) {
-      const liveSpeakers = speakerOrder.filter(s => !nonLiveCli.includes(s));
-      const liveSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
-      const candidateText = formatSpeakerCandidatesReport(liveSnapshot);
-      const liveList = liveSpeakers.length > 0
-        ? `\n\n실행 가능한 스피커만으로 시작하려면:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ${JSON.stringify(liveSpeakers)})`
-        : "";
-      return {
-        content: [{
-          type: "text",
-          text: `⚠️ 일부 CLI 스피커가 현재 실행 불가합니다:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\n\n실행 가능: ${liveSpeakers.length > 0 ? liveSpeakers.map(s => `\`${s}\``).join(", ") : "(없음)"}\n\n${candidateText}${liveList}\n\n실행 불가 원인: CLI가 설치되지 않았거나, 중첩 세션 제약, 또는 인증 만료일 수 있습니다.`,
-        }],
-      };
+      detectWarningLiveness = `\n\n⚠️ 일부 CLI가 현재 실행 불가 상태이지만 사용자 선택을 존중하여 진행합니다:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\n턴 진행 시 CLI 실행을 재시도합니다. 실패 시 해당 턴에서 오류가 보고됩니다.`;
     }
 
     const participantMode = hasManualSpeakers
@@ -2622,7 +2614,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Deliberation 시작! Forum이 생성되었습니다.\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.\n📋 Forum 상태 조회: \`deliberation_status(session_id: "${sessionId}")\``,
+        text: `✅ Deliberation 시작! Forum이 생성되었습니다.\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}${detectWarningLiveness}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.\n📋 Forum 상태 조회: \`deliberation_status(session_id: "${sessionId}")\``,
       }],
     };
   })
