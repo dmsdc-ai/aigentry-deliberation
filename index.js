@@ -2411,6 +2411,19 @@ server.tool(
       || normalizeSpeaker(selectedSpeakers?.[0])
       || DEFAULT_SPEAKERS[0];
     const speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
+
+    // Warn if only 1 speaker — deliberation requires 2+
+    if (speakerOrder.length < 2) {
+      const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
+      const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
+      return {
+        content: [{
+          type: "text",
+          text: `⚠️ Deliberation에는 최소 2명의 speaker가 필요합니다. 현재 ${speakerOrder.length}명만 지정됨: ${speakerOrder.join(", ")}\n\n사용 가능한 스피커 후보:\n${candidateText}\n\n예시:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "web-gemini-1"])`,
+        }],
+      };
+    }
+
     const participantMode = hasManualSpeakers
       ? "수동 지정"
       : (autoDiscoveredSpeakers.length > 0 ? "자동 탐색(PATH)" : "기본값");
