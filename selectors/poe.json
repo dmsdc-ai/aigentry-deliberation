@@ -1,10 +1,10 @@
 {
   "provider": "poe",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "domains": ["poe.com"],
   "selectors": {
-    "inputSelector": "textarea[class*='GrowingTextArea'], textarea[placeholder*='Talk to'], textarea[class*='TextArea']",
-    "sendButton": "button[class*='SendButton'], button[aria-label='Send message'], button[class*='send']",
+    "inputSelector": "textarea[class*='GrowingTextArea'], textarea[class*='textArea']",
+    "sendButton": "button[aria-label='메시지 전송'], button[aria-label='Send message'], button[class*='button_primary']",
     "responseSelector": "[class*='Markdown_markdownContainer'], [class*='markdownContainer']",
     "responseContainer": "[class*='botMessageBubble'], [class*='Message_bot']",
     "streamingIndicator": "[class*='streamingBotMessage'], [class*='ChatMessage_streaming']"
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Poe requires login. Uses hashed class names (e.g., GrowingTextArea_xxx, SendButton_xxx) that may change between deployments. Partial class matching (class*=) is used for resilience."
+  "notes": "Poe verified via CDP. Input: textarea.GrowingTextArea_textArea__ZWQbP (hashed). Send: button[aria-label='메시지 전송'] (KR locale) / 'Send message' (EN). Hashed class names change between deployments."
 }
