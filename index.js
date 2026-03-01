@@ -1366,7 +1366,7 @@ function resolveTransportForSpeaker(state, speaker) {
 
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
-  claude: { cmd: "claude", flags: '-p --output-format text', example: 'claude -p --output-format text "프롬프트"', modelFlag: '--model', provider: 'claude' },
+  claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "프롬프트"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
   codex: { cmd: "codex", flags: 'exec', example: 'codex exec "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
   gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"', modelFlag: '--model', provider: 'gemini' },
   aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
@@ -1381,7 +1381,8 @@ function formatTransportGuidance(transport, state, speaker) {
       let invocationGuide = "";
       let modelGuide = "";
       if (hint) {
-        invocationGuide = `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${hint.cmd} ${hint.flags}\`)`;
+        const prefix = hint.envPrefix || '';
+        invocationGuide = `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${prefix}${hint.cmd} ${hint.flags}\`)`;
         if (hint.modelFlag && hint.provider) {
           const cliModel = getModelSelectionForTurn(state, speaker, hint.provider);
           if (cliModel.model !== 'default') {
