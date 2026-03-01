@@ -54,6 +54,7 @@ Usage:
  *   deliberation_speaker_candidates      선택 가능한 스피커 후보(로컬 CLI + 브라우저 LLM 탭) 조회
  *   deliberation_browser_llm_tabs      브라우저 LLM 탭 목록 조회
  *   deliberation_browser_auto_turn      브라우저 LLM에 자동으로 턴을 전송하고 응답을 수집 (CDP 기반)
+ *   deliberation_cli_auto_turn          CLI speaker에 자동으로 턴을 전송하고 응답을 수집
  *   deliberation_request_review         코드 리뷰 요청 (CLI 리뷰어 자동 호출, sync/async 모드)
  */
 
@@ -2891,6 +2892,153 @@ server.tool(
         text: `✅ 브라우저 자동 턴 완료!\n\n**Provider:** ${effectiveProvider}\n**Turn ID:** ${turnId}${modelInfo}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${waitResult.data.elapsedMs}ms${degradationInfo}\n\n${result.content[0].text}`,
       }],
     };
+  })
+);
+
+server.tool(
+  "deliberation_cli_auto_turn",
+  "CLI speaker에 자동으로 턴을 전송하고 응답을 수집합니다.",
+  {
+    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
+    timeout_sec: z.number().optional().default(120).describe("CLI 응답 대기 타임아웃 (초)"),
+  },
+  safeToolHandler("deliberation_cli_auto_turn", async ({ session_id, timeout_sec }) => {
+    const resolved = resolveSessionId(session_id);
+    if (!resolved) {
+      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+    }
+    if (resolved === "MULTIPLE") {
+      return { content: [{ type: "text", text: multipleSessionsError() }] };
+    }
+
+    const state = loadSession(resolved);
+    if (!state || state.status !== "active") {
+      return { content: [{ type: "text", text: `세션 "${resolved}"이 활성 상태가 아닙니다.` }] };
+    }
+
+    const speaker = state.current_speaker;
+    if (speaker === "none") {
+      return { content: [{ type: "text", text: "현재 발언 차례인 speaker가 없습니다." }] };
+    }
+
+    const { transport } = resolveTransportForSpeaker(state, speaker);
+    if (transport !== "cli_respond") {
+      return { content: [{ type: "text", text: `speaker "${speaker}"는 CLI 타입이 아닙니다 (transport: ${transport}). 브라우저 speaker는 deliberation_browser_auto_turn을 사용하세요.` }] };
+    }
+
+    const hint = CLI_INVOCATION_HINTS[speaker];
+    if (!hint) {
+      return { content: [{ type: "text", text: `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.` }] };
+    }
+
+    // Check CLI liveness
+    if (!checkCliLiveness(hint.cmd)) {
+      return { content: [{ type: "text", text: `❌ CLI "${hint.cmd}"가 설치되어 있지 않거나 실행할 수 없습니다.` }] };
+    }
+
+    const turnId = state.pending_turn_id || generateTurnId();
+    const turnPrompt = buildClipboardTurnPrompt(state, speaker, null, 3);
+
+    // Spawn CLI process
+    const startTime = Date.now();
+    try {
+      const response = await new Promise((resolve, reject) => {
+        const env = { ...process.env };
+        // Unset CLAUDECODE for claude to avoid nested session errors
+        if (hint.envPrefix?.includes("CLAUDECODE=")) {
+          delete env.CLAUDECODE;
+        }
+
+        let child;
+        let stdout = "";
+        let stderr = "";
+
+        // Different invocation patterns per CLI
+        switch (speaker) {
+          case "claude":
+            child = spawn("claude", ["-p", "--output-format", "text"], { env, windowsHide: true });
+            child.stdin.write(turnPrompt);
+            child.stdin.end();
+            break;
+          case "codex":
+            child = spawn("codex", ["exec", turnPrompt], { env, windowsHide: true });
+            break;
+          case "gemini":
+            child = spawn("gemini", ["-p", turnPrompt], { env, windowsHide: true });
+            break;
+          default: {
+            // Generic: try command with prompt as argument
+            const flags = hint.flags ? hint.flags.split(/\s+/) : [];
+            child = spawn(hint.cmd, [...flags, turnPrompt], { env, windowsHide: true });
+            break;
+          }
+        }
+
+        const timer = setTimeout(() => {
+          child.kill("SIGTERM");
+          reject(new Error(`CLI 타임아웃 (${timeout_sec}초)`));
+        }, timeout_sec * 1000);
+
+        child.stdout.on("data", (data) => { stdout += data.toString(); });
+        child.stderr.on("data", (data) => { stderr += data.toString(); });
+
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code !== 0 && !stdout.trim()) {
+            reject(new Error(`CLI exit code ${code}: ${stderr.slice(0, 500)}`));
+          } else {
+            // Clean up output noise
+            let cleaned = stdout;
+            if (speaker === "codex") {
+              cleaned = stdout.split("\n")
+                .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|user$|mcp:|thinking$|tokens used$|^[0-9,]*$)/.test(line))
+                .join("\n");
+            } else if (speaker === "gemini") {
+              cleaned = stdout.split("\n")
+                .filter(line => !/^(Loaded cached|Error during discovery)/.test(line))
+                .join("\n");
+            }
+            resolve(cleaned.trim());
+          }
+        });
+
+        child.on("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      const elapsedMs = Date.now() - startTime;
+
+      if (!response) {
+        return { content: [{ type: "text", text: `⚠️ CLI "${speaker}"가 빈 응답을 반환했습니다.` }] };
+      }
+
+      // Submit the response
+      const result = submitDeliberationTurn({
+        session_id: resolved,
+        speaker,
+        content: response,
+        turn_id: turnId,
+        channel_used: "cli_auto",
+        fallback_reason: null,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `✅ CLI 자동 턴 완료!\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n**Turn ID:** ${turnId}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${elapsedMs}ms\n\n${result.content[0].text}`,
+        }],
+      };
+
+    } catch (err) {
+      return {
+        content: [{
+          type: "text",
+          text: `❌ CLI 자동 턴 실패: ${err.message}\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n\ndeliberation_respond(speaker: "${speaker}", content: "...")로 수동 응답을 제출할 수 있습니다.`,
+        }],
+      };
+    }
   })
 );
 
