@@ -176,3 +176,8 @@ bash deliberation-monitor.sh --tmux
 4. 실시간 sync 파일은 state 디렉토리에 저장되며 완료 시 자동 삭제됨 (프로젝트 루트 오염 없음)
 5. `Transport closed` 발생 시 현재 CLI 세션 재시작 후 재시도 (stdio 연결은 세션 바인딩)
 6. 멀티 세션 운영 중 `pkill -f mcp-deliberation` 사용 금지 (다른 세션 연결까지 끊길 수 있음)
+
+## 관련 스킬
+
+- **deliberation-gate**: superpowers 워크플로우 통합 스킬. brainstorming/code-review/debugging 의사결정 지점에 멀티-AI 검증 게이트를 삽입합니다. `~/.claude/skills/deliberation-gate/SKILL.md`에 설치.
+- **deliberation-executor**: deliberation 합의안을 실제 코드 구현으로 전환하는 실행 전용 스킬.

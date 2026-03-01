@@ -107,6 +107,22 @@ open demo/forum/index.html
 | `researcher` | Data, benchmarks, references |
 | `free` | No role constraint (default) |
 
+### deliberation-gate (Superpowers Integration)
+
+Inserts multi-AI verification gates at key [superpowers](https://github.com/anthropics/superpowers) workflow decision points.
+
+**Scenarios:**
+- **brainstorming** → multi-AI design validation before writing plans
+- **code-review** → multi-AI review via `deliberation_request_review`
+- **debugging** → multi-AI hypothesis verification when stuck
+
+**Trigger:** Semi-automatic — skill recommends deliberation, user approves.
+
+**Install:**
+```bash
+cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
+```
+
 ## aigentry Ecosystem
 
 aigentry-deliberation is one component of the unified aigentry platform. All packages work together to make AI decisions transparent and auditable.
