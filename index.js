@@ -3689,6 +3689,23 @@ const __currentFile = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "
 const __entryFile = process.argv[1] ? path.resolve(process.argv[1]) : null;
 if (__entryFile && path.resolve(__currentFile) === __entryFile) {
   const transport = new StdioServerTransport();
+
+  // ── Gemini CLI compatibility: strip $schema from tool inputSchemas ──
+  // Gemini CLI strictly validates MCP tool schemas and rejects $schema metadata
+  // that zod-to-json-schema adds. Intercept transport.send to patch tools/list responses.
+  const _origSend = transport.send.bind(transport);
+  transport.send = (message) => {
+    if (message.result && Array.isArray(message.result.tools)) {
+      for (const tool of message.result.tools) {
+        if (tool.inputSchema) {
+          delete tool.inputSchema["$schema"];
+          if (!tool.inputSchema.type) tool.inputSchema.type = "object";
+        }
+      }
+    }
+    return _origSend(message);
+  };
+
   await server.connect(transport);
 }
 
