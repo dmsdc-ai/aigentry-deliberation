@@ -1,0 +1,19 @@
+{
+  "provider": "huggingchat",
+  "version": "1.0.0",
+  "domains": ["huggingface.co/chat"],
+  "selectors": {
+    "inputSelector": "textarea[placeholder='Ask anything'], textarea[placeholder*='Ask']",
+    "sendButton": "button[aria-label='Send message'], button[type='submit']",
+    "responseSelector": ".prose, .markdown",
+    "responseContainer": ".message-assistant, [data-role='assistant']",
+    "streamingIndicator": ".animate-pulse, [data-streaming='true']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 60000
+  },
+  "notes": "HuggingChat - textarea with placeholder 'Ask anything'. Send button has aria-label='Send message'."
+}

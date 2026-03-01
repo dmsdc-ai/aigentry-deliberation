@@ -1,0 +1,19 @@
+{
+  "provider": "qwen",
+  "version": "1.0.0",
+  "domains": ["qwen.ai", "chat.qwen.ai"],
+  "selectors": {
+    "inputSelector": "textarea.message-input-textarea, textarea[placeholder*='도와드릴까요'], textarea[placeholder*='help you']",
+    "sendButton": "button.send-button, button[type='submit']",
+    "responseSelector": ".markdown-body, .message-content",
+    "responseContainer": ".message-assistant, [data-role='assistant']",
+    "streamingIndicator": ".typing-indicator, [data-streaming='true']"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 60000
+  },
+  "notes": "Alibaba Qwen Chat - uses textarea.message-input-textarea. Send button has class 'send-button'."
+}

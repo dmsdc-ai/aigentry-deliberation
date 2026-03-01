@@ -138,6 +138,9 @@ const DEFAULT_WEB_SPEAKERS = [
   { speaker: "web-deepseek", provider: "deepseek", name: "DeepSeek", url: "https://deepseek.com" },
   { speaker: "web-mistral", provider: "mistral", name: "Mistral", url: "https://mistral.ai" },
   { speaker: "web-poe", provider: "poe", name: "Poe", url: "https://poe.com" },
+  { speaker: "web-grok", provider: "grok", name: "Grok", url: "https://grok.com" },
+  { speaker: "web-qwen", provider: "qwen", name: "Qwen", url: "https://chat.qwen.ai" },
+  { speaker: "web-huggingchat", provider: "huggingchat", name: "HuggingChat", url: "https://huggingface.co/chat" },
 ];
 
 let _extensionProviderRegistry = null;
@@ -1068,9 +1071,10 @@ function inferLlmProvider(url = "", title = "") {
   if (value.includes("perplexity.ai")) return "perplexity";
   if (value.includes("poe.com")) return "poe";
   if (value.includes("mistral.ai")) return "mistral";
-  if (value.includes("huggingface.co/chat")) return "huggingface";
+  if (value.includes("huggingface.co/chat")) return "huggingchat";
   if (value.includes("deepseek.com")) return "deepseek";
   if (value.includes("qwen.ai")) return "qwen";
+  if (value.includes("grok.com")) return "grok";
   return "web-llm";
 }
 

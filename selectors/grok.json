@@ -1,0 +1,19 @@
+{
+  "provider": "grok",
+  "version": "1.0.0",
+  "domains": ["grok.com"],
+  "selectors": {
+    "inputSelector": "div.tiptap.ProseMirror[contenteditable='true'], div.ProseMirror[contenteditable='true']",
+    "sendButton": "button[aria-label='제출'], button[aria-label='Submit'], button[type='submit']",
+    "responseSelector": ".markdown, .prose",
+    "responseContainer": "[data-role='assistant'], .message-assistant",
+    "streamingIndicator": "[data-streaming='true'], .animate-pulse"
+  },
+  "timing": {
+    "inputDelayMs": 100,
+    "sendDelayMs": 300,
+    "pollIntervalMs": 500,
+    "streamingTimeoutMs": 60000
+  },
+  "notes": "xAI Grok - uses tiptap ProseMirror contenteditable. Send button aria-label is locale-dependent (EN: 'Submit', KR: '제출')."
+}
