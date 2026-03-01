@@ -1008,6 +1008,10 @@ class OrchestratedBrowserPort {
     return this.adapter.waitTurnResult(sessionId, turnId, timeoutSec);
   }
 
+  async switchModel(sessionId, modelName) {
+    return this.adapter.switchModel(sessionId, modelName);
+  }
+
   async checkLogin(sessionId) {
     return this.adapter.checkLogin(sessionId);
   }

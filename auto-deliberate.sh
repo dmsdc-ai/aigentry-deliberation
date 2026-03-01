@@ -90,7 +90,7 @@ ${context}
 
     case "$speaker" in
         claude)
-            echo "$prompt" | claude -p 2>/dev/null \
+            echo "$prompt" | CLAUDECODE= claude -p --output-format text 2>/dev/null \
                 || echo "Claude response unavailable"
             ;;
         codex)

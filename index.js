@@ -2298,9 +2298,18 @@ server.tool(
     rounds: z.coerce.number().optional().describe("라운드 수 (미지정 시 config 설정 따름, 기본 3)"),
     first_speaker: z.string().trim().min(1).max(64).optional().describe("첫 발언자 이름 (미지정 시 speakers의 첫 항목)"),
     speakers: z.preprocess(
-      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      (v) => {
+        const parsed = typeof v === "string" ? JSON.parse(v) : v;
+        if (!Array.isArray(parsed)) return parsed;
+        // Normalize: accept both string[] and {name, role?, instructions?}[]
+        return parsed.map(item => (typeof item === "object" && item !== null && item.name) ? item.name : item);
+      },
       z.array(z.string().trim().min(1).max(64)).min(1).optional()
-    ).describe("참가자 이름 목록 (예: codex, claude, web-chatgpt-1)"),
+    ).describe("참가자 이름 목록. 문자열 배열 또는 {name, role, instructions} 객체 배열 모두 지원"),
+    speaker_instructions: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.record(z.string(), z.string()).optional()
+    ).describe("speaker별 추가 지시사항 (예: {\"claude\": \"비판적으로 검토\"})"),
     require_manual_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
@@ -2322,7 +2331,7 @@ server.tool(
     role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
       .describe("역할 프리셋 (balanced/debate/research/brainstorm/review/consensus). speaker_roles가 명시되면 무시됨"),
   },
-  safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
+  safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
