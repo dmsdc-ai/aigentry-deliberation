@@ -1705,6 +1705,32 @@ function hasTmuxSession(name) {
   }
 }
 
+function hasTmuxWindow(sessionName, windowName) {
+  try {
+    const output = execFileSync("tmux", ["list-windows", "-t", sessionName, "-F", "#{window_name}"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return String(output).split("\n").map(s => s.trim()).includes(windowName);
+  } catch {
+    return false;
+  }
+}
+
+function tmuxHasAttachedClients(sessionName) {
+  try {
+    const output = execFileSync("tmux", ["list-clients", "-t", sessionName], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return String(output).trim().split("\n").filter(Boolean).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function tmuxWindowCount(name) {
   try {
     const output = execFileSync("tmux", ["list-windows", "-t", name], {
@@ -1766,6 +1792,17 @@ function listPhysicalTerminalWindowIds() {
 function openPhysicalTerminal(sessionId) {
   const winName = tmuxWindowName(sessionId);
   const attachCmd = `tmux attach -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
+
+  // If a terminal is already attached to this tmux session, just switch to the right window
+  if (tmuxHasAttachedClients(TMUX_SESSION)) {
+    try {
+      execFileSync("tmux", ["select-window", "-t", `${TMUX_SESSION}:${winName}`], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch { /* window might not exist yet */ }
+    return { opened: true, windowIds: [] };
+  }
 
   if (process.platform === "darwin") {
     const before = new Set(listPhysicalTerminalWindowIds());
@@ -1874,6 +1911,10 @@ function spawnMonitorTerminal(sessionId) {
 
   try {
     if (hasTmuxSession(TMUX_SESSION)) {
+      // Skip if a window with the same name already exists (prevents duplicates)
+      if (hasTmuxWindow(TMUX_SESSION, winName)) {
+        return true;
+      }
       execFileSync("tmux", ["new-window", "-t", TMUX_SESSION, "-n", winName, cmd], {
         stdio: "ignore",
         windowsHide: true,
