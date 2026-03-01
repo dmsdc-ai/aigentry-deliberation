@@ -40,6 +40,7 @@ const FILES_TO_COPY = [
   "browser-control-port.js",
   "degradation-state-machine.js",
   "model-router.js",
+  "doctor.js",
   "session-monitor.sh",
   "session-monitor-win.js",
   "package.json",

@@ -21,7 +21,8 @@
     "aigentry-deliberation": "index.js",
     "mcp-deliberation": "index.js",
     "deliberation-observer": "observer.js",
-    "deliberation-install": "install.js"
+    "deliberation-install": "install.js",
+    "deliberation-doctor": "doctor.js"
   },
   "engines": {
     "node": ">=18"
@@ -29,6 +30,7 @@
   "files": [
     "index.js",
     "install.js",
+    "doctor.js",
     "observer.js",
     "browser-control-port.js",
     "degradation-state-machine.js",
