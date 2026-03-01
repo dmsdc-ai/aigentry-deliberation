@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aigentry Forum — AI Deliberation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0a;
+  --card: #141414;
+  --border: #2a2a2a;
+  --border-hover: #333333;
+  --accent: #d4a574;
+  --text: #e4e4e4;
+  --text-muted: #666666;
+  --text-secondary: #a0a0a0;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --error: #f87171;
+
+  --claude: #E8734A;
+  --codex: #10A37F;
+  --gemini: #4285F4;
+  --grok: #1DA1F2;
+  --deepseek: #00D4AA;
+  --qwen: #FF6A00;
+  --huggingchat: #FFD21E;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', 'Noto Sans KR', monospace;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── Hero container — wider to let diagram breathe ── */
+.hero-container {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── Header ── */
+.header {
+  padding: 64px 0 32px;
+}
+
+.header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+
+.header .subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+
+/* ── Hero Stats — big numbers ── */
+.hero-stats {
+  display: flex;
+  justify-content: center;
+  gap: 48px;
+  margin-top: 40px;
+}
+
+.hero-stat {
+  text-align: center;
+}
+
+.hero-stat-number {
+  font-size: 56px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.hero-stat-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 6px;
+}
+
+.hero-stat-sep {
+  font-size: 56px;
+  font-weight: 300;
+  color: var(--border);
+  line-height: 1;
+  letter-spacing: -0.03em;
+  user-select: none;
+}
+
+/* ── Node pulse animation ── */
+@keyframes nodePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+
+/* ── Orbit ring rotation ── */
+@keyframes orbitSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* ── Scroll reveal ── */
+.reveal {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Section ── */
+.section {
+  padding: 64px 0;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 24px;
+  letter-spacing: -0.01em;
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+}
+
+.section-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+
+/* ── Divider ── */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+/* ── Tab System ── */
+.tab-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.tab-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.tab-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.tab-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+/* ── Opinion Card ── */
+.opinion-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 16px 18px;
+  border-left: 3px solid var(--border);
+  transition: border-color 0.15s;
+}
+
+.opinion-card:hover {
+  border-color: var(--border-hover);
+}
+
+.opinion-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.opinion-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.opinion-role {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.opinion-transport {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 1px 6px;
+  margin-left: auto;
+}
+
+.opinion-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.opinion-list li {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  padding-left: 14px;
+  position: relative;
+}
+
+.opinion-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  background: var(--text-muted);
+  border-radius: 50%;
+}
+
+/* ── Heatmap ── */
+.heatmap-wrap {
+  overflow-x: auto;
+}
+
+.heatmap {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  min-width: 640px;
+}
+
+.heatmap th {
+  text-align: center;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.heatmap th:first-child {
+  text-align: left;
+}
+
+.heatmap td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.heatmap td:first-child {
+  text-align: left;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.heatmap tr:last-child td {
+  border-bottom: none;
+}
+
+.cell-s { background: rgba(74, 222, 128, 0.15); color: var(--success); font-weight: 700; font-size: 12px; }
+.cell-p { background: rgba(251, 191, 36, 0.15); color: var(--warning); font-weight: 700; font-size: 12px; }
+.cell-w { background: rgba(248, 113, 113, 0.15); color: var(--error); font-weight: 700; font-size: 12px; }
+.cell-na { background: var(--border); color: var(--text-muted); }
+
+/* ── Consensus Cards ── */
+.consensus-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.consensus-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 16px 18px;
+  border-left: 3px solid var(--border);
+  transition: border-color 0.15s;
+}
+
+.consensus-card:hover {
+  border-color: var(--border-hover);
+}
+
+.consensus-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.consensus-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.consensus-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 1px 8px;
+}
+
+.consensus-score {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.consensus-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.consensus-list li {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  padding-left: 14px;
+  position: relative;
+}
+
+.consensus-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  background: var(--text-muted);
+  border-radius: 50%;
+}
+
+/* ── Synthesis ── */
+.synthesis-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 24px;
+  transition: border-color 0.15s;
+}
+
+.synthesis-card:hover {
+  border-color: var(--border-hover);
+}
+
+.synthesis-positioning {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.synthesis-heading {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 12px;
+  margin-top: 24px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.synthesis-heading:first-of-type {
+  margin-top: 0;
+}
+
+/* ── Data Tables ── */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.data-table td {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.data-table td:first-child {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.td-accent {
+  border-left: 2px solid var(--accent);
+  padding-left: 10px !important;
+}
+
+/* ── Competition Matrix ── */
+.matrix-wrap {
+  overflow-x: auto;
+}
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  min-width: 640px;
+}
+
+.matrix th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.matrix td {
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.matrix td:first-child {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.matrix tr:last-child td {
+  border-bottom: none;
+}
+
+.matrix .col-aigentry {
+  border-left: 2px solid var(--accent);
+}
+
+.check { color: var(--success); font-size: 12px; font-weight: 700; }
+.dash { color: var(--text-muted); }
+.triangle { color: var(--warning); }
+
+/* ── Timeline — connected dots ── */
+.timeline-wrap {
+  position: relative;
+  padding-left: 28px;
+}
+
+.timeline-line {
+  position: absolute;
+  left: 7px;
+  top: 20px;
+  bottom: 20px;
+  width: 1px;
+  background: var(--border);
+}
+
+.timeline-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+}
+
+.timeline-item {
+  position: relative;
+}
+
+.timeline-dot {
+  position: absolute;
+  left: -28px;
+  top: 20px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: var(--bg);
+  z-index: 1;
+}
+
+.timeline-dot-inner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.timeline-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 16px 20px;
+  transition: border-color 0.15s;
+}
+
+.timeline-card:hover {
+  border-color: var(--border-hover);
+}
+
+.timeline-phase {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0.25rem;
+  padding: 1px 8px;
+  margin-bottom: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.timeline-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.timeline-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  margin-bottom: 10px;
+}
+
+.timeline-kpi {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  background: rgba(212, 165, 116, 0.1);
+  border-radius: 0.25rem;
+  padding: 3px 10px;
+}
+
+/* ── Rankings ── */
+.rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rank-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.rank-pos {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.rank-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  width: 100px;
+  flex-shrink: 0;
+}
+
+.rank-bar-wrap {
+  flex: 1;
+  height: 10px;
+  background: var(--border);
+  border-radius: 0.25rem;
+  overflow: hidden;
+}
+
+.rank-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 0.25rem;
+  opacity: 0.7;
+}
+
+.rank-score {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  width: 50px;
+  text-align: right;
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Ecosystem Table ── */
+.eco-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.eco-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.eco-table td {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.eco-table td:first-child {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.eco-table tr.current td:first-child {
+  color: var(--accent);
+}
+
+.eco-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Pricing Row ── */
+.pricing-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pricing-item {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 12px 16px;
+  flex: 1;
+  min-width: 140px;
+  transition: border-color 0.15s;
+}
+
+.pricing-item:hover {
+  border-color: var(--border-hover);
+}
+
+.pricing-tier {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pricing-amount {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── CTA ── */
+.cta-section {
+  padding: 64px 0 80px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.cta-cmd {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.cta-cmd code {
+  color: var(--accent);
+}
+
+.cta-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 4px 12px;
+  transition: border-color 0.15s;
+}
+
+.cta-badge:hover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+}
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .container, .hero-container { padding: 0 16px; }
+  .header { padding: 40px 0 32px; }
+  .header h1 { font-size: 20px; }
+  .section { padding: 40px 0; }
+  .tab-nav { gap: 4px; }
+  .tab-btn { font-size: 10px; padding: 3px 7px; }
+  .opinion-card { padding: 14px; }
+  .rank-name { width: 80px; }
+  .pricing-item { min-width: 100%; }
+  .hero-stats { gap: 24px; }
+  .hero-stat-number, .hero-stat-sep { font-size: 40px; }
+  .hero-container { max-width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div class="hero-container">
+
+  <!-- ── Header ── -->
+  <header class="header" style="text-align:center;">
+    <h1 style="font-size:28px; margin-bottom:8px;">aigentry Forum</h1>
+    <p class="subtitle">Where AIs Debate, Consensus Emerges</p>
+
+    <!-- Council Diagram — enlarged with animations -->
+    <svg width="500" height="520" viewBox="0 0 500 520" style="margin:40px auto 0; display:block;" xmlns="http://www.w3.org/2000/svg">
+
+      <!-- Dashed orbit ring — slowly rotating -->
+      <g style="transform-origin: 250px 240px; animation: orbitSpin 60s linear infinite;">
+        <circle cx="250" cy="240" r="175" fill="none" stroke="#1e1e1e" stroke-width="1" stroke-dasharray="6 8"/>
+      </g>
+      <g style="transform-origin: 250px 240px; animation: orbitSpin 90s linear infinite reverse;">
+        <circle cx="250" cy="240" r="195" fill="none" stroke="#181818" stroke-width="1" stroke-dasharray="3 12"/>
+      </g>
+
+      <!-- Connection lines — dashed, brighter -->
+      <line x1="250" y1="240" x2="250" y2="55"  stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="410" y2="110" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="445" y2="295" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="345" y2="432" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="155" y2="432" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="55"  y2="295" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+      <line x1="250" y1="240" x2="90"  y2="110" stroke="#333" stroke-width="1" stroke-dasharray="4 4"/>
+
+      <!-- Center hub -->
+      <circle cx="250" cy="240" r="52" fill="none" stroke="#2a2a2a" stroke-width="1"/>
+      <text x="250" y="233" text-anchor="middle" fill="#d4a574" font-family="'JetBrains Mono',monospace" font-size="11" font-weight="700" letter-spacing="0.5">AIGENTRY</text>
+      <text x="250" y="250" text-anchor="middle" fill="#d4a574" font-family="'JetBrains Mono',monospace" font-size="11" font-weight="700" letter-spacing="0.5">FORUM</text>
+
+      <!-- Claude — 0 deg (top) -->
+      <g style="transform-origin: 250px 55px; animation: nodePulse 3s ease-in-out 0s infinite;">
+        <circle cx="250" cy="55" r="28" fill="rgba(232,115,74,0.08)" stroke="#E8734A" stroke-width="1"/>
+        <text x="250" y="62" text-anchor="middle" fill="#E8734A" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">C</text>
+      </g>
+      <text x="250" y="98" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">Claude</text>
+
+      <!-- Codex — 51.4 deg -->
+      <g style="transform-origin: 410px 110px; animation: nodePulse 3s ease-in-out 0.3s infinite;">
+        <circle cx="410" cy="110" r="28" fill="rgba(16,163,127,0.08)" stroke="#10A37F" stroke-width="1"/>
+        <text x="410" y="117" text-anchor="middle" fill="#10A37F" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">G</text>
+      </g>
+      <text x="410" y="153" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">Codex</text>
+
+      <!-- Gemini — 102.9 deg -->
+      <g style="transform-origin: 445px 295px; animation: nodePulse 3s ease-in-out 0.6s infinite;">
+        <circle cx="445" cy="295" r="28" fill="rgba(66,133,244,0.08)" stroke="#4285F4" stroke-width="1"/>
+        <text x="445" y="302" text-anchor="middle" fill="#4285F4" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">G</text>
+      </g>
+      <text x="445" y="338" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">Gemini</text>
+
+      <!-- Grok — 154.3 deg -->
+      <g style="transform-origin: 345px 432px; animation: nodePulse 3s ease-in-out 0.9s infinite;">
+        <circle cx="345" cy="432" r="28" fill="rgba(29,161,242,0.08)" stroke="#1DA1F2" stroke-width="1"/>
+        <text x="345" y="439" text-anchor="middle" fill="#1DA1F2" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">X</text>
+      </g>
+      <text x="345" y="475" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">Grok</text>
+
+      <!-- DeepSeek — 205.7 deg -->
+      <g style="transform-origin: 155px 432px; animation: nodePulse 3s ease-in-out 1.2s infinite;">
+        <circle cx="155" cy="432" r="28" fill="rgba(0,212,170,0.08)" stroke="#00D4AA" stroke-width="1"/>
+        <text x="155" y="439" text-anchor="middle" fill="#00D4AA" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">D</text>
+      </g>
+      <text x="155" y="475" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">DeepSeek</text>
+
+      <!-- Qwen — 257.1 deg -->
+      <g style="transform-origin: 55px 295px; animation: nodePulse 3s ease-in-out 1.5s infinite;">
+        <circle cx="55" cy="295" r="28" fill="rgba(255,106,0,0.08)" stroke="#FF6A00" stroke-width="1"/>
+        <text x="55" y="302" text-anchor="middle" fill="#FF6A00" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">Q</text>
+      </g>
+      <text x="55" y="338" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">Qwen</text>
+
+      <!-- HuggingChat — 308.6 deg -->
+      <g style="transform-origin: 90px 110px; animation: nodePulse 3s ease-in-out 1.8s infinite;">
+        <circle cx="90" cy="110" r="28" fill="rgba(255,210,30,0.08)" stroke="#FFD21E" stroke-width="1"/>
+        <text x="90" y="117" text-anchor="middle" fill="#FFD21E" font-family="'JetBrains Mono',monospace" font-size="18" font-weight="700">H</text>
+      </g>
+      <text x="90" y="153" text-anchor="middle" fill="#666" font-family="'JetBrains Mono',monospace" font-size="10">HChat</text>
+    </svg>
+
+    <!-- Hero stats — big numbers -->
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="hero-stat-number">7</div>
+        <div class="hero-stat-label">models</div>
+      </div>
+      <div class="hero-stat-sep" aria-hidden="true">&middot;</div>
+      <div class="hero-stat">
+        <div class="hero-stat-number">2</div>
+        <div class="hero-stat-label">rounds</div>
+      </div>
+      <div class="hero-stat-sep" aria-hidden="true">&middot;</div>
+      <div class="hero-stat">
+        <div class="hero-stat-number">1</div>
+        <div class="hero-stat-label">consensus</div>
+      </div>
+    </div>
+  </header>
+</div>
+
+<div class="container">
+
+  <hr class="divider">
+
+  <!-- ── Round 1: Individual Opinions ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Round 1 — Individual Opinions</h2>
+    <p class="section-subtitle">Independent analysis from each AI model. No cross-referencing.</p>
+
+    <nav class="tab-nav" role="tablist">
+      <button class="tab-btn active" role="tab" data-tab="claude" aria-selected="true">Claude</button>
+      <button class="tab-btn" role="tab" data-tab="codex" aria-selected="false">Codex</button>
+      <button class="tab-btn" role="tab" data-tab="gemini" aria-selected="false">Gemini</button>
+      <button class="tab-btn" role="tab" data-tab="grok" aria-selected="false">Grok</button>
+      <button class="tab-btn" role="tab" data-tab="deepseek" aria-selected="false">DeepSeek</button>
+      <button class="tab-btn" role="tab" data-tab="qwen" aria-selected="false">Qwen</button>
+      <button class="tab-btn" role="tab" data-tab="huggingchat" aria-selected="false">HuggingChat</button>
+    </nav>
+
+    <!-- Claude -->
+    <div class="tab-panel active" id="tab-claude" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--claude);">
+        <div class="opinion-header">
+          <span class="opinion-name">Claude</span>
+          <span class="opinion-role">Strategist</span>
+          <span class="opinion-transport">CLI</span>
+        </div>
+        <ul class="opinion-list">
+          <li>Positioning: "Your AI, Your Memory, Your Rules"</li>
+          <li>Target: P0 MCP/Claude Code power users → P1 Multi-LLM devs → P2 AI-native startup CTOs</li>
+          <li>Channels: npm/MCP > GitHub/Reddit/HN > Dev blogs/YouTube</li>
+          <li>30/60/90 days: HN Show → Mem0 benchmark → Product Hunt</li>
+          <li>Monetization: Open-core Pro $19/mo</li>
+          <li>Key differentiator: deliberation (no competitor has this)</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Codex -->
+    <div class="tab-panel" id="tab-codex" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--codex);">
+        <div class="opinion-header">
+          <span class="opinion-name">Codex / GPT-5.3</span>
+          <span class="opinion-role">Critical Analyst</span>
+          <span class="opinion-transport">CLI</span>
+        </div>
+        <ul class="opinion-list">
+          <li>Positioning too declarative — differentiated benefit unclear</li>
+          <li>MCP power user base is small; dev → CTO conversion is hard</li>
+          <li>KPIs (npm 1K→5K, stars 500) likely overestimated</li>
+          <li>$19 lacks compelling reason to pay vs free alternatives</li>
+          <li>Missing: retention, onboarding churn, security/compliance, competitive response</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Gemini -->
+    <div class="tab-panel" id="tab-gemini" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--gemini);">
+        <div class="opinion-header">
+          <span class="opinion-name">Gemini</span>
+          <span class="opinion-role">Market Researcher</span>
+          <span class="opinion-transport">CLI</span>
+        </div>
+        <ul class="opinion-list">
+          <li>TAM is large but SOM is tens of thousands — early niche</li>
+          <li>Deliberation + data sovereignty is a unique space</li>
+          <li>Redefine SAM as small dev teams where security/compliance matters</li>
+          <li>Dev community CAC <$10, spikes with B2B expansion</li>
+          <li>MCP standardization timing = optimal window</li>
+          <li>Proposed positioning: "Auditable AI Decision Engine"</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Grok -->
+    <div class="tab-panel" id="tab-grok" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--grok);">
+        <div class="opinion-header">
+          <span class="opinion-name">Grok</span>
+          <span class="opinion-role">Growth Strategist</span>
+          <span class="opinion-transport">CDP Auto</span>
+        </div>
+        <ul class="opinion-list">
+          <li>CDP auto-dispatch completed</li>
+          <li>Viral growth strategy focus</li>
+          <li>Developer Advocacy + viral strategy proposed</li>
+          <li>Leverage X/Twitter developer community</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- DeepSeek -->
+    <div class="tab-panel" id="tab-deepseek" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--deepseek);">
+        <div class="opinion-header">
+          <span class="opinion-name">DeepSeek</span>
+          <span class="opinion-role">Technical Marketer</span>
+          <span class="opinion-transport">CDP Manual</span>
+        </div>
+        <ul class="opinion-list">
+          <li>Messaging: "Auditable AI assistant" — compliance/legal/finance target</li>
+          <li>3 demos: contract risk review, board report drafting, compliance search</li>
+          <li>Content: "End of Black-Box AI" LinkedIn → comparison whitepaper → industry series</li>
+          <li>Onboarding funnel: 5-min tutorial → MCP trial → enterprise customization</li>
+          <li>Tech branding: "AI You Can Audit"</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Qwen -->
+    <div class="tab-panel" id="tab-qwen" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--qwen);">
+        <div class="opinion-header">
+          <span class="opinion-name">Qwen</span>
+          <span class="opinion-role">Asia Market Specialist</span>
+          <span class="opinion-transport">API</span>
+        </div>
+        <ul class="opinion-list">
+          <li>Korea: active startup ecosystem, UX/UI focus</li>
+          <li>Japan: high AI trust, emphasis on quality/readability</li>
+          <li>China: massive dev pool, mobile-first</li>
+          <li>Channels: WeChat, LINE, KakaoTalk + global GitHub</li>
+          <li>Culture: trust and collaboration, long-term partnerships</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- HuggingChat -->
+    <div class="tab-panel" id="tab-huggingchat" role="tabpanel">
+      <div class="opinion-card" style="border-left-color: var(--huggingchat);">
+        <div class="opinion-header">
+          <span class="opinion-name">HuggingChat</span>
+          <span class="opinion-role">OSS Community Builder</span>
+          <span class="opinion-transport">API</span>
+        </div>
+        <ul class="opinion-list">
+          <li>GitHub: hashtag campaigns, modular tutorials, monthly top contributor incentives</li>
+          <li>Discord/Slack: community manager, regular AMAs, Dev Talk sessions</li>
+          <li>HuggingFace: joint projects, community competitions</li>
+          <li>Contributors: first-contribution guide, mentor program</li>
+          <li>Governance: community feedback integration, board structure</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Agreement Heatmap ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Agreement Heatmap</h2>
+    <p class="section-subtitle">7 models x 6 topics. S = Strong agree, P = Partial, W = Weak/Disagree</p>
+
+    <div class="heatmap-wrap">
+      <table class="heatmap">
+        <thead>
+          <tr>
+            <th>Topic</th>
+            <th>Claude</th>
+            <th>Codex</th>
+            <th>Gemini</th>
+            <th>Grok</th>
+            <th>DeepSeek</th>
+            <th>Qwen</th>
+            <th>HChat</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Positioning</td>
+            <td class="cell-s">S</td>
+            <td class="cell-w">W</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+          </tr>
+          <tr>
+            <td>Target Audience</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+          </tr>
+          <tr>
+            <td>Pricing</td>
+            <td class="cell-p">P</td>
+            <td class="cell-w">W</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+          </tr>
+          <tr>
+            <td>Channels</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+          </tr>
+          <tr>
+            <td>Differentiation</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+          </tr>
+          <tr>
+            <td>Risk Analysis</td>
+            <td class="cell-p">P</td>
+            <td class="cell-s">S</td>
+            <td class="cell-s">S</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+            <td class="cell-p">P</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Round 2: Peer Review & Consensus ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Round 2 — Peer Review & Consensus</h2>
+    <p class="section-subtitle">Final consensus through peer review.</p>
+
+    <div class="consensus-stack">
+
+      <!-- Claude final -->
+      <div class="consensus-card" style="border-left-color: var(--claude);">
+        <div class="consensus-header">
+          <span class="consensus-name">Claude</span>
+          <span class="consensus-badge">Final Consensus</span>
+        </div>
+        <ul class="consensus-list">
+          <li>Final Positioning: "The open-source engine that makes AI decisions auditable"</li>
+          <li>Top target: 10-50 person startup tech leads / CTOs</li>
+          <li>First 30 days TOP 3: (1) 5-min interactive tutorial (2) HN Show + decision demo (3) Discord + first-contribution guide</li>
+          <li>Monetization: Open-core Pro $29/mo</li>
+          <li>KPI: Stars 500 (30d), weekly active sessions 100 (60d), Pro paid users 20 (90d)</li>
+        </ul>
+      </div>
+
+      <!-- Codex review -->
+      <div class="consensus-card" style="border-left-color: var(--codex);">
+        <div class="consensus-header">
+          <span class="consensus-name">Codex / GPT-5.3</span>
+          <span class="consensus-badge">Conditional Approval</span>
+          <span class="consensus-score">7/10</span>
+        </div>
+        <ul class="consensus-list">
+          <li>Needs audit trust evidence (reproducible demos/log templates) and paid conversion design</li>
+          <li>Top risk: single-channel dependency on HN + Discord</li>
+          <li>KPI shortfall likely without acquisition/conversion diversification</li>
+        </ul>
+      </div>
+
+      <!-- Gemini review -->
+      <div class="consensus-card" style="border-left-color: var(--gemini);">
+        <div class="consensus-header">
+          <span class="consensus-name">Gemini</span>
+          <span class="consensus-badge">Approved</span>
+          <span class="consensus-score">8/10</span>
+        </div>
+        <ul class="consensus-list">
+          <li>Positioning strength: 8/10</li>
+          <li>Note: for 10-50 person startups, "quality control" framing resonates more than "audit"</li>
+          <li>Pro tier needs hosted dashboards and visual reports for operational convenience</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Final Synthesis ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Final Synthesis</h2>
+
+    <div class="synthesis-card">
+      <div class="synthesis-positioning">"The open-source engine that makes AI decisions auditable"</div>
+
+      <div class="synthesis-heading">Key Differentiators</div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>aigentry</th>
+            <th>Competitors</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="td-accent">Multi-AI debate improves decision quality</td>
+            <td>Single LLM response</td>
+          </tr>
+          <tr>
+            <td class="td-accent">Audit logs + decision tracking</td>
+            <td>Black box</td>
+          </tr>
+          <tr>
+            <td class="td-accent">Cross-LLM memory (any AI)</td>
+            <td>LLM lock-in</td>
+          </tr>
+          <tr>
+            <td class="td-accent">Self-hosted + data sovereignty</td>
+            <td>SaaS lock-in</td>
+          </tr>
+          <tr>
+            <td class="td-accent">5-module full-stack platform</td>
+            <td>Memory-only / search-only</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="synthesis-heading">Monetization</div>
+      <div class="pricing-row">
+        <div class="pricing-item">
+          <div class="pricing-tier">Core</div>
+          <div class="pricing-amount">Free</div>
+        </div>
+        <div class="pricing-item">
+          <div class="pricing-tier">Pro</div>
+          <div class="pricing-amount">$29/mo</div>
+        </div>
+        <div class="pricing-item">
+          <div class="pricing-tier">Enterprise</div>
+          <div class="pricing-amount">Custom</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Competition Matrix ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Competition Matrix</h2>
+
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>aigentry</th>
+            <th>Mem0</th>
+            <th>Khoj</th>
+            <th>OpenClaw</th>
+            <th>Cognee</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Multi-AI Debate</td>
+            <td class="col-aigentry"><span class="check">ONLY</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+          </tr>
+          <tr>
+            <td>Audit Logs</td>
+            <td class="col-aigentry"><span class="check">Yes</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="triangle">Partial</span></td>
+            <td><span class="dash">&mdash;</span></td>
+          </tr>
+          <tr>
+            <td>Cross-LLM Memory</td>
+            <td class="col-aigentry"><span class="check">Yes</span></td>
+            <td><span class="check">Yes</span></td>
+            <td><span class="check">Yes</span></td>
+            <td><span class="triangle">Partial</span></td>
+            <td><span class="check">Yes</span></td>
+          </tr>
+          <tr>
+            <td>Self-host</td>
+            <td class="col-aigentry"><span class="check">Yes</span></td>
+            <td><span class="check">Yes</span></td>
+            <td><span class="check">Yes</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="check">Yes</span></td>
+          </tr>
+          <tr>
+            <td>MCP Native</td>
+            <td class="col-aigentry"><span class="check">14 tools</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+          </tr>
+          <tr>
+            <td>Full-stack</td>
+            <td class="col-aigentry"><span class="check">5 modules</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="dash">&mdash;</span></td>
+            <td><span class="triangle">Partial</span></td>
+            <td><span class="dash">&mdash;</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── 30/60/90 Day Timeline ── -->
+  <section class="section reveal">
+    <h2 class="section-title">30 / 60 / 90 Day Timeline</h2>
+
+    <div class="timeline-wrap">
+      <div class="timeline-line"></div>
+      <div class="timeline-stack">
+        <div class="timeline-item">
+          <div class="timeline-dot"><div class="timeline-dot-inner"></div></div>
+          <div class="timeline-card">
+            <span class="timeline-phase">Phase 1</span>
+            <div class="timeline-title">Day 1-30 — Foundation</div>
+            <div class="timeline-desc">5-min interactive tutorial + HN Show + Discord launch</div>
+            <span class="timeline-kpi">KPI: Stars 500</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot"><div class="timeline-dot-inner"></div></div>
+          <div class="timeline-card">
+            <span class="timeline-phase">Phase 2</span>
+            <div class="timeline-title">Day 31-60 — Traction</div>
+            <div class="timeline-desc">Mem0 comparison benchmark + LinkedIn content series</div>
+            <span class="timeline-kpi">KPI: Weekly active sessions 100</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot"><div class="timeline-dot-inner"></div></div>
+          <div class="timeline-card">
+            <span class="timeline-phase">Phase 3</span>
+            <div class="timeline-title">Day 61-90 — Monetization</div>
+            <div class="timeline-desc">Product Hunt launch + case studies + Pro plan release</div>
+            <span class="timeline-kpi">KPI: 20 Pro paid users</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Aggregate Rankings ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Aggregate Rankings</h2>
+    <p class="section-subtitle">Ranked by overall agreement score.</p>
+
+    <div class="rank-list">
+      <div class="rank-item">
+        <span class="rank-pos">#1</span>
+        <span class="rank-name">Gemini</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 100%;"></div></div>
+        <span class="rank-score">8.5</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#2</span>
+        <span class="rank-name">Claude</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 96%;"></div></div>
+        <span class="rank-score">8.2</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#3</span>
+        <span class="rank-name">DeepSeek</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 92%;"></div></div>
+        <span class="rank-score">7.8</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#4</span>
+        <span class="rank-name">HuggingChat</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 88%;"></div></div>
+        <span class="rank-score">7.5</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#5</span>
+        <span class="rank-name">Qwen</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 85%;"></div></div>
+        <span class="rank-score">7.2</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#6</span>
+        <span class="rank-name">Grok</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 82%;"></div></div>
+        <span class="rank-score">7.0</span>
+      </div>
+      <div class="rank-item">
+        <span class="rank-pos">#7</span>
+        <span class="rank-name">Codex</span>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width: 80%;"></div></div>
+        <span class="rank-score">6.8</span>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── Ecosystem ── -->
+  <section class="section reveal">
+    <h2 class="section-title">Ecosystem</h2>
+    <table class="eco-table">
+      <thead>
+        <tr>
+          <th>Package</th>
+          <th>Role</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>aigentry-brain</td>
+          <td>Cross-LLM memory OS</td>
+        </tr>
+        <tr>
+          <td>aigentry-registry</td>
+          <td>AI agent evaluation</td>
+        </tr>
+        <tr>
+          <td>aigentry-devkit</td>
+          <td>Developer tools and hooks</td>
+        </tr>
+        <tr>
+          <td>aigentry-deliberation</td>
+          <td>Multi-AI deliberation engine</td>
+        </tr>
+        <tr class="current">
+          <td>aigentry-forum</td>
+          <td>Deliberation visualization</td>
+        </tr>
+        <tr>
+          <td>aigentry-ssot</td>
+          <td>MCP contract schemas</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="divider">
+
+  <!-- ── CTA ── -->
+  <div class="cta-section">
+    <p class="cta-cmd"><code>npx aigentry-forum</code></p>
+    <span class="cta-badge">coming soon</span>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  // Tab system
+  var btns = document.querySelectorAll('.tab-btn');
+  var panels = document.querySelectorAll('.tab-panel');
+  btns.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var t = btn.getAttribute('data-tab');
+      btns.forEach(function(b) { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
+      panels.forEach(function(p) { p.classList.remove('active'); });
+      btn.classList.add('active');
+      btn.setAttribute('aria-selected', 'true');
+      document.getElementById('tab-' + t).classList.add('active');
+    });
+  });
+
+  // Scroll reveal — subtle 8px translateY, 300ms ease
+  var reveals = document.querySelectorAll('.reveal');
+  if ('IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+    reveals.forEach(function(el) { observer.observe(el); });
+  } else {
+    // Fallback: just show everything
+    reveals.forEach(function(el) { el.classList.add('visible'); });
+  }
+})();
+</script>
+
+</body>
+</html>

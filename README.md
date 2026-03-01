@@ -53,6 +53,21 @@ cd aigentry-deliberation && npm install && node install.js
 npx @dmsdc-ai/aigentry-deliberation uninstall
 ```
 
+## Forum Demo
+
+Deliberation이 완료되면 결과를 시각화하는 Forum View를 생성합니다.
+
+> **Deliberation = 프로세스, Forum = 출력물.**
+> Deliberation이 끝나면 Forum이 생성되고, 그게 끝입니다.
+
+![Forum Demo](demo/forum/assets/hero.png)
+
+정적 데모를 브라우저에서 확인하려면:
+
+```bash
+open demo/forum/index.html
+```
+
 ## MCP Tools
 
 | Tool | Description |
@@ -71,6 +86,7 @@ npx @dmsdc-ai/aigentry-deliberation uninstall
 | `deliberation_browser_auto_turn` | Auto-send turn to browser LLM |
 | `deliberation_route_turn` | Route turn to appropriate transport |
 | `deliberation_request_review` | Request code review |
+| `deliberation_cli_auto_turn` | Auto-send turn to CLI speaker |
 | `deliberation_cli_config` | Configure CLI settings |
 
 ## Speaker Ordering Strategies
