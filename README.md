@@ -1,6 +1,10 @@
 # @dmsdc-ai/aigentry-deliberation
 
-MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles.
+Part of aigentry — the open-source engine that makes AI decisions auditable.
+
+**The only tool that lets multiple AIs debate before deciding.**
+
+MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles. No competitor has this: aigentry-deliberation is the killer feature of the aigentry platform, enabling structured multi-AI debate with full audit trails before any decision is committed.
 
 ## Features
 
@@ -86,6 +90,17 @@ npx @dmsdc-ai/aigentry-deliberation uninstall
 | `mediator` | Consensus building, synthesis |
 | `researcher` | Data, benchmarks, references |
 | `free` | No role constraint (default) |
+
+## aigentry Ecosystem
+
+aigentry-deliberation is one component of the unified aigentry platform. All packages work together to make AI decisions transparent and auditable.
+
+| Package | Description |
+|---------|-------------|
+| [`@dmsdc-ai/aigentry-brain`](https://github.com/dmsdc-ai/aigentry-brain) | Cross-LLM memory OS |
+| [`@dmsdc-ai/aigentry-devkit`](https://github.com/dmsdc-ai/aigentry-devkit) | Developer tools and hooks |
+| [`aigentry-registry`](https://github.com/dmsdc-ai/aigentry-registry) | AI agent evaluation (Python) |
+| [`aigentry-ssot`](https://github.com/dmsdc-ai/aigentry-ssot) | MCP contract schemas |
 
 ## License
 
