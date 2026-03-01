@@ -421,6 +421,10 @@ class DevToolsMcpAdapter extends BrowserControlPort {
               windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
             });
             await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+              type: "char", key: "\r", code: "Enter",
+              windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+            });
+            await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
               type: "keyUp", key: "Enter", code: "Enter",
               windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
             });
