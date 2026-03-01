@@ -10,8 +10,9 @@
  * What it does:
  *   1. Copies server files to ~/.local/lib/mcp-deliberation/
  *   2. Installs npm dependencies
- *   3. Registers MCP server in ~/.claude/.mcp.json
- *   4. Ready to use — next Claude Code session will auto-load
+ *   3. Registers MCP server in ~/.claude/.mcp.json (Claude Code)
+ *   4. Registers MCP server in ~/.gemini/settings.json (Gemini CLI)
+ *   5. Ready to use — next Claude Code or Gemini CLI session will auto-load
  */
 
 import { execSync } from "node:child_process";
@@ -26,6 +27,7 @@ const INSTALL_DIR = IS_WIN
   ? path.join(process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local"), "mcp-deliberation")
   : path.join(HOME, ".local", "lib", "mcp-deliberation");
 const MCP_CONFIG = path.join(HOME, ".claude", ".mcp.json");
+const GEMINI_CONFIG = path.join(HOME, ".gemini", "settings.json");
 
 /** Normalize path to forward slashes for JSON config (Windows backslash → forward slash) */
 function toForwardSlash(p) {
@@ -137,7 +139,34 @@ function install() {
     ? "   → 기존 등록 업데이트 완료"
     : "   → 새로 등록 완료");
 
-  // Step 5: Make session-monitor.sh executable
+  // Step 5: Register Gemini CLI MCP server
+  log("🔧 Gemini CLI MCP 서버 등록 시도...");
+  const geminiDir = path.join(HOME, ".gemini");
+  if (!fs.existsSync(geminiDir)) fs.mkdirSync(geminiDir, { recursive: true });
+
+  let geminiConfig = {};
+  if (fs.existsSync(GEMINI_CONFIG)) {
+    try {
+      geminiConfig = JSON.parse(fs.readFileSync(GEMINI_CONFIG, "utf-8"));
+    } catch {
+      geminiConfig = {};
+    }
+  }
+
+  if (!geminiConfig.mcpServers) geminiConfig.mcpServers = {};
+
+  const geminiAlreadyRegistered = !!geminiConfig.mcpServers.deliberation;
+  geminiConfig.mcpServers.deliberation = {
+    command: "node",
+    args: [toForwardSlash(path.join(INSTALL_DIR, "index.js"))],
+  };
+
+  fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
+  log(geminiAlreadyRegistered
+    ? "   → Gemini CLI 기존 등록 업데이트 완료"
+    : "   → Gemini CLI 새로 등록 완료");
+
+  // Step 6: Make session-monitor.sh executable
   const monitorScript = path.join(INSTALL_DIR, "session-monitor.sh");
   if (fs.existsSync(monitorScript)) {
     try {
@@ -154,7 +183,7 @@ function install() {
   // Done
   console.log("\n✅ 설치 완료!\n");
   console.log("  다음 단계:");
-  console.log("  1. Claude Code 세션을 재시작하세요");
+  console.log("  1. Claude Code 또는 Gemini CLI 세션을 재시작하세요");
   console.log("  2. \"토론 시작해\" 또는 deliberation_start(topic: \"...\") 호출");
   console.log("  3. 첫 사용 시 온보딩 위저드가 기본 설정을 안내합니다\n");
 }
@@ -175,18 +204,31 @@ Options:
 
 설치 경로: ${INSTALL_DIR}
 MCP 설정:  ${MCP_CONFIG}
+Gemini:    ${GEMINI_CONFIG}
 `);
 } else if (args.includes("--uninstall") || args.includes("uninstall")) {
   console.log("\n🗑️ Deliberation MCP Server 제거\n");
 
-  // Remove from MCP config
+  // Remove from Claude MCP config
   if (fs.existsSync(MCP_CONFIG)) {
     try {
       const mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, "utf-8"));
       if (mcpConfig.mcpServers?.deliberation) {
         delete mcpConfig.mcpServers.deliberation;
         fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-        log("MCP 등록 해제 완료");
+        log("Claude Code MCP 등록 해제 완료");
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Remove from Gemini CLI config
+  if (fs.existsSync(GEMINI_CONFIG)) {
+    try {
+      const geminiConfig = JSON.parse(fs.readFileSync(GEMINI_CONFIG, "utf-8"));
+      if (geminiConfig.mcpServers?.deliberation) {
+        delete geminiConfig.mcpServers.deliberation;
+        fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
+        log("Gemini CLI MCP 등록 해제 완료");
       }
     } catch { /* ignore */ }
   }
@@ -197,7 +239,7 @@ MCP 설정:  ${MCP_CONFIG}
     log("설치 디렉토리 삭제 완료");
   }
 
-  console.log("\n✅ 제거 완료. Claude Code를 재시작하세요.\n");
+  console.log("\n✅ 제거 완료. Claude Code / Gemini CLI를 재시작하세요.\n");
 } else {
   install();
 }
