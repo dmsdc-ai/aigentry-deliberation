@@ -2321,7 +2321,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
         return {
           content: [{
             type: "text",
-            text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료.\n\n🏁 **모든 라운드 종료!**\ndeliberation_synthesize(session_id: "${state.id}")로 합성 보고서를 작성하세요.`,
+            text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n🏁 **모든 라운드 종료!**\ndeliberation_synthesize(session_id: "${state.id}")로 합성 보고서를 작성하세요.`,
           }],
         };
       }
@@ -2336,7 +2336,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료.\n\n**다음:** ${state.current_speaker} (Round ${state.current_round})`,
+        text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n**다음:** ${state.current_speaker} (Round ${state.current_round})`,
       }],
     };
   });
@@ -2622,7 +2622,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Deliberation 시작!\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.`,
+        text: `✅ Deliberation 시작! Forum이 생성되었습니다.\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.\n📋 Forum 상태 조회: \`deliberation_status(session_id: "${sessionId}")\``,
       }],
     };
   })
@@ -2683,7 +2683,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `**세션:** ${state.id}\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**상태:** ${state.status}\n**라운드:** ${state.current_round}/${state.max_rounds}\n**참가자:** ${state.speakers.join(", ")}\n**현재 차례:** ${state.current_speaker}\n**응답 수:** ${state.log.length}${state.degradation ? `\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}` : ""}`,
+        text: `📋 **Forum 현황** — ${state.id}\n\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**상태:** ${state.status === "active" ? "진행 중" : state.status === "awaiting_synthesis" ? "합성 대기" : state.status === "completed" ? "완성" : state.status} (Round ${state.current_round}/${state.max_rounds})\n**참가자:** ${state.speakers.join(", ")}\n**현재 차례:** ${state.current_speaker}\n**축적 응답:** ${state.log.length}건${state.degradation ? `\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}` : ""}`,
       }],
     };
   }
@@ -3220,7 +3220,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] Deliberation 완료!\n\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**라운드:** ${state.max_rounds}\n**응답:** ${state.log.length}건\n\n📁 ${archivePath}\n🖥️ 모니터 터미널이 즉시 강제 종료되었습니다.`,
+        text: `✅ [${state.id}] Deliberation 완료! Forum이 완성되었습니다.\n\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**라운드:** ${state.max_rounds}\n**응답:** ${state.log.length}건\n\n📁 Forum 최종본: ${archivePath}\n🖥️ 모니터 터미널이 즉시 강제 종료되었습니다.`,
       }],
     };
   })
