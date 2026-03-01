@@ -281,7 +281,7 @@ const DEGRADATION_TIERS = {
     tier3: { name: "manual", description: "완전 수동 복사/붙여넣기", check: () => true },
   },
   terminal: {
-    tier1: { name: "auto_open", description: "터미널 앱 자동 오픈", check: () => process.platform === "darwin" || process.platform === "win32" },
+    tier1: { name: "auto_open", description: "터미널 앱 자동 오픈", check: () => process.platform === "darwin" || process.platform === "linux" || process.platform === "win32" },
     tier2: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
     tier3: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
   },
@@ -870,37 +870,57 @@ async function ensureCdpAvailable() {
     } catch { /* not reachable */ }
   }
 
-  // If none respond and platform is macOS, try auto-launching Chrome with CDP
-  if (process.platform === "darwin") {
+  // Auto-launch Chrome with CDP on macOS and Linux
+  if (process.platform === "darwin" || process.platform === "linux") {
+    let chromeBin, chromeUserDataDir;
+
+    if (process.platform === "darwin") {
+      chromeBin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+      chromeUserDataDir = path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
+    } else {
+      // Linux: find Chrome/Chromium binary
+      const chromeCandidates = ["google-chrome", "google-chrome-stable", "google-chrome-beta", "chromium-browser", "chromium"];
+      chromeBin = chromeCandidates.find(c => commandExistsInPath(c)) || null;
+      if (!chromeBin) {
+        return {
+          available: false,
+          reason: "Chrome/Chromium을 찾을 수 없습니다. google-chrome 또는 chromium을 설치하고 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+        };
+      }
+      const googleDir = path.join(os.homedir(), ".config", "google-chrome");
+      const chromiumDir = path.join(os.homedir(), ".config", "chromium");
+      chromeUserDataDir = fs.existsSync(googleDir) ? googleDir : fs.existsSync(chromiumDir) ? chromiumDir : null;
+    }
+
     // Chrome 145+ requires --user-data-dir for CDP to work.
     // The default data dir is rejected, so we copy the profile to ~/.chrome-cdp.
-    const chromeUserDataDir = path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
     const cdpDataDir = path.join(os.homedir(), ".chrome-cdp");
     const profileDir = "Default";
 
     try {
-      const srcProfile = path.join(chromeUserDataDir, profileDir);
-      const dstProfile = path.join(cdpDataDir, profileDir);
-      if (!fs.existsSync(dstProfile) && fs.existsSync(srcProfile)) {
-        fs.mkdirSync(cdpDataDir, { recursive: true });
-        execFileSync("cp", ["-R", srcProfile, dstProfile], { timeout: 30000, stdio: "ignore" });
-        // Create minimal Local State with single profile to avoid profile picker
-        const localStateSrc = path.join(chromeUserDataDir, "Local State");
-        if (fs.existsSync(localStateSrc)) {
-          const state = JSON.parse(fs.readFileSync(localStateSrc, "utf8"));
-          state.profile.profiles_created = 1;
-          state.profile.last_used = profileDir;
-          if (state.profile.info_cache) {
-            const kept = {};
-            if (state.profile.info_cache[profileDir]) kept[profileDir] = state.profile.info_cache[profileDir];
-            state.profile.info_cache = kept;
+      if (chromeUserDataDir) {
+        const srcProfile = path.join(chromeUserDataDir, profileDir);
+        const dstProfile = path.join(cdpDataDir, profileDir);
+        if (!fs.existsSync(dstProfile) && fs.existsSync(srcProfile)) {
+          fs.mkdirSync(cdpDataDir, { recursive: true });
+          execFileSync("cp", ["-R", srcProfile, dstProfile], { timeout: 30000, stdio: "ignore" });
+          // Create minimal Local State with single profile to avoid profile picker
+          const localStateSrc = path.join(chromeUserDataDir, "Local State");
+          if (fs.existsSync(localStateSrc)) {
+            const state = JSON.parse(fs.readFileSync(localStateSrc, "utf8"));
+            state.profile.profiles_created = 1;
+            state.profile.last_used = profileDir;
+            if (state.profile.info_cache) {
+              const kept = {};
+              if (state.profile.info_cache[profileDir]) kept[profileDir] = state.profile.info_cache[profileDir];
+              state.profile.info_cache = kept;
+            }
+            fs.writeFileSync(path.join(cdpDataDir, "Local State"), JSON.stringify(state));
           }
-          fs.writeFileSync(path.join(cdpDataDir, "Local State"), JSON.stringify(state));
         }
       }
     } catch { /* proceed with launch attempt anyway */ }
 
-    const chromeBin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     const launchArgs = [
       "--remote-debugging-port=9222",
       "--remote-allow-origins=*",
@@ -915,7 +935,7 @@ async function ensureCdpAvailable() {
     } catch {
       return {
         available: false,
-        reason: "Chrome 자동 실행에 실패했습니다. Chrome을 수동으로 --remote-debugging-port=9222 --user-data-dir=~/.chrome-cdp 옵션과 함께 실행해주세요.",
+        reason: `Chrome 자동 실행에 실패했습니다. Chrome을 수동으로 --remote-debugging-port=9222 --user-data-dir=~/.chrome-cdp 옵션과 함께 실행해주세요.`,
       };
     }
 
@@ -938,7 +958,7 @@ async function ensureCdpAvailable() {
     };
   }
 
-  // Non-macOS: cannot auto-launch
+  // Windows: cannot auto-launch yet
   return {
     available: false,
     reason: "Chrome CDP를 활성화할 수 없습니다. Chrome을 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
