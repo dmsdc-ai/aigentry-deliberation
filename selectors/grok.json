@@ -5,8 +5,8 @@
   "selectors": {
     "inputSelector": "div.tiptap.ProseMirror[contenteditable='true'], div.ProseMirror[contenteditable='true']",
     "sendButton": "button[aria-label='제출'], button[aria-label='Submit'], button[type='submit']",
-    "responseSelector": ".markdown, .prose",
-    "responseContainer": "[data-role='assistant'], .message-assistant",
+    "responseSelector": ".response-content-markdown, .markdown",
+    "responseContainer": "div[id^='response-'], .message-bubble",
     "streamingIndicator": "[data-streaming='true'], .animate-pulse"
   },
   "timing": {
@@ -15,5 +15,9 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "xAI Grok - uses tiptap ProseMirror contenteditable. Send button aria-label is locale-dependent (EN: 'Submit', KR: '제출')."
+  "modelSelector": {
+    "trigger": "button[class*='model'], [data-testid*='model']",
+    "optionSelector": "[role='option'], [role='menuitem'], [class*='model-option']"
+  },
+  "notes": "Grok verified via CDP. Container: div[id^='response-'] (unique response IDs). Response: .response-content-markdown. User messages use separate container without response- prefix. Send button locale-dependent (EN: 'Submit', KR: '제출')."
 }

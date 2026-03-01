@@ -1,19 +1,23 @@
 {
   "provider": "gemini",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["gemini.google.com"],
   "selectors": {
     "inputSelector": ".ql-editor[contenteditable='true']",
-    "sendButton": "button.send-button, button[aria-label='Send message']",
+    "sendButton": "button.send, button.send-button, button[aria-label='Send message'], button[aria-label='전송']",
     "responseSelector": ".markdown.markdown-main-panel",
     "responseContainer": ".model-response-text",
-    "streamingIndicator": ".loading-indicator, .model-response-text .loading"
+    "streamingIndicator": "button[aria-label*='중지'], button[aria-label*='Stop generating'], .loading-spinner"
   },
   "timing": {
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 45000
+    "streamingTimeoutMs": 60000
   },
-  "notes": "Gemini web selectors - verify via DOM inspection if selectors change"
+  "modelSelector": {
+    "trigger": "button.input-area-switch, button[aria-label='모드 선택 도구 열기']",
+    "optionSelector": "[role='option'], [role='menuitem'], mat-option, .option-item"
+  },
+  "notes": "Gemini verified via CDP. Container: STRUCTURED-CONTENT-CONTAINER.model-response-text. Response: DIV.markdown.markdown-main-panel. Streaming: .model-response-text[class*='processing-state']. Model: button.input-area-switch."
 }

@@ -6,3 +6,4 @@ state/
 *.bak
 .DS_Store
 .omc/
+test-*.mjs

@@ -6,7 +6,7 @@
     "inputSelector": "textarea[class*='GrowingTextArea'], textarea[class*='textArea']",
     "sendButton": "button[aria-label='메시지 전송'], button[aria-label='Send message'], button[class*='button_primary']",
     "responseSelector": "[class*='Markdown_markdownContainer'], [class*='markdownContainer']",
-    "responseContainer": "[class*='botMessageBubble'], [class*='Message_bot']",
+    "responseContainer": "[class*='leftSideMessageBubble'], [class*='Message_bot']",
     "streamingIndicator": "[class*='streamingBotMessage'], [class*='ChatMessage_streaming']"
   },
   "timing": {
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 45000
   },
-  "notes": "Poe verified via CDP. Input: textarea.GrowingTextArea_textArea__ZWQbP (hashed). Send: button[aria-label='메시지 전송'] (KR locale) / 'Send message' (EN). Hashed class names change between deployments."
+  "notes": "Poe verified via CDP. Container: Message_leftSideMessageBubble (bot only, right side is user). Response: Markdown_markdownContainer > Prose_prose. Hashed class suffixes change between deployments. Send: aria-label locale-dependent."
 }

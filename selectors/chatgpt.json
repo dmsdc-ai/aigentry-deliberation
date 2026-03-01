@@ -1,11 +1,11 @@
 {
   "provider": "chatgpt",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domains": ["chat.openai.com", "chatgpt.com"],
   "selectors": {
     "inputSelector": "#prompt-textarea",
-    "sendButton": "button[data-testid='send-button']",
-    "responseSelector": ".markdown.prose",
+    "sendButton": "button.composer-submit-button-color, button[data-testid='send-button']",
+    "responseSelector": ".markdown.prose:not(.result-thinking), .result-thinking.markdown.prose",
     "responseContainer": "[data-message-author-role='assistant']",
     "streamingIndicator": ".result-streaming",
     "conversationList": "nav[aria-label='Chat history']"
@@ -14,7 +14,11 @@
     "inputDelayMs": 100,
     "sendDelayMs": 200,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 45000
+    "streamingTimeoutMs": 120000
   },
-  "notes": "ChatGPT DOM selectors - update version when selectors change"
+  "modelSelector": {
+    "trigger": "button[data-testid='model-switcher-dropdown-button'], button[data-testid='model-selector-dropdown'], button[class*='model']",
+    "optionSelector": "[role='option'], [role='menuitem'], [data-testid*='model-selector']"
+  },
+  "notes": "ChatGPT verified via CDP 2026-03-01. Input: #prompt-textarea (ProseMirror contenteditable div). Send button: button.composer-submit-button-color (primary, aria-label='Voice 시작' in KR locale — this is the submit button despite misleading label). button[data-testid='send-button'] no longer exists. Container: [data-message-author-role='assistant'] (still valid). Response: .markdown.prose:not(.result-thinking). Streaming: .result-streaming. Note: existing conversation responses may have empty textContent due to content-visibility virtualization — only fresh/visible responses will have text."
 }

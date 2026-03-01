@@ -1,12 +1,12 @@
 {
   "provider": "claude",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "domains": ["claude.ai"],
   "selectors": {
-    "inputSelector": "div.ProseMirror[contenteditable='true'], div.tiptap.ProseMirror",
-    "sendButton": "button[aria-label='Send Message'], button[aria-label='메시지 보내기'], button[aria-label='Send message']",
-    "responseSelector": ".font-claude-message .grid-cols-1 .grid .min-w-0",
-    "responseContainer": "[data-is-streaming]",
+    "inputSelector": "div[data-testid='chat-input'], div.tiptap.ProseMirror, div.ProseMirror[contenteditable='true'], textarea[data-testid='chat-input-ssr']",
+    "sendButton": "button[aria-label='메시지 보내기'], button[aria-label='Send Message'], button[aria-label*='보내'], button[aria-label*='Send'], fieldset button[type='submit']",
+    "responseSelector": ".font-claude-response-body, .standard-markdown, .font-claude-response",
+    "responseContainer": "[data-is-streaming='false'], [data-is-streaming]",
     "streamingIndicator": "[data-is-streaming='true']"
   },
   "timing": {
@@ -15,5 +15,9 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "Claude web selectors - send button aria-label is locale-dependent (EN: 'Send Message', KR: '메시지 보내기'). Button only appears when input has text."
+  "modelSelector": {
+    "trigger": "button[data-testid='model-selector-dropdown']",
+    "optionSelector": "[role='option'], [role='menuitem'], [data-testid*='model']"
+  },
+  "notes": "Claude verified via CDP 2026-03-01. Input: div[data-testid='chat-input'] (tiptap ProseMirror contenteditable). Send button: aria-label='메시지 보내기' (KR) or 'Send Message' (EN). Container: [data-is-streaming='false'] (completed) or [data-is-streaming='true'] (streaming) — the data-is-streaming attribute is always present on the assistant message wrapper. Response text: .font-claude-response-body or .standard-markdown. Streaming indicator: [data-is-streaming='true'] only (NOT .font-claude-response which persists after completion). .font-claude-message no longer exists. data-testid='assistant-message' no longer exists. Model selector: data-testid='model-selector-dropdown'."
 }

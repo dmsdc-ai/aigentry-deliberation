@@ -5,9 +5,9 @@
   "selectors": {
     "inputSelector": "textarea.message-input-textarea, textarea[placeholder*='도와드릴까요'], textarea[placeholder*='help you']",
     "sendButton": "button.send-button, button[type='submit']",
-    "responseSelector": ".markdown-body, .message-content",
-    "responseContainer": ".message-assistant, [data-role='assistant']",
-    "streamingIndicator": ".typing-indicator, [data-streaming='true']"
+    "responseSelector": ".response-message-content, .markdown-body",
+    "responseContainer": ".qwen-chat-message-assistant, .chat-response-message",
+    "streamingIndicator": ".phase-thinking, .typing-indicator"
   },
   "timing": {
     "inputDelayMs": 100,
@@ -15,5 +15,5 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "Alibaba Qwen Chat - uses textarea.message-input-textarea. Send button has class 'send-button'."
+  "notes": "Qwen verified via CDP. Container: .qwen-chat-message-assistant or .chat-response-message. Response: .response-message-content.phase-answer. Thinking phase: .phase-thinking class. '생각이 끝났습니다' indicates thinking complete."
 }

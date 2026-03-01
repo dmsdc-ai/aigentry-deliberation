@@ -5,8 +5,8 @@
   "selectors": {
     "inputSelector": "textarea[placeholder='Ask anything'], textarea[placeholder*='Ask']",
     "sendButton": "button[aria-label='Send message'], button[type='submit']",
-    "responseSelector": ".prose, .markdown",
-    "responseContainer": ".message-assistant, [data-role='assistant']",
+    "responseSelector": ".prose",
+    "responseContainer": "[data-message-role='assistant']",
     "streamingIndicator": ".animate-pulse, [data-streaming='true']"
   },
   "timing": {
@@ -15,5 +15,9 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "HuggingChat - textarea with placeholder 'Ask anything'. Send button has aria-label='Send message'."
+  "modelSelector": {
+    "trigger": "button[class*='model'], [data-testid*='model-selector']",
+    "optionSelector": "[role='option'], [role='menuitem'], button[class*='model']"
+  },
+  "notes": "HuggingChat verified via CDP. Container: div[data-message-role='assistant'][data-message-id]. Response: DIV.prose inside container. SvelteKit-based app."
 }

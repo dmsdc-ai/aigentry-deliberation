@@ -194,6 +194,7 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       timing: selectorConfig.timing,
       pageUrl: foundTab.url,
       title: foundTab.title,
+      modelSelector: selectorConfig.modelSelector || null,
     });
 
     return makeResult(true, {
@@ -221,77 +222,290 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     }
 
     try {
-      // Step 1: Focus input and insert text via execCommand for React/ProseMirror compatibility
+      // Capture baseline response count BEFORE send (for waitTurnResult to detect NEW responses)
+      const respContSel = JSON.stringify(binding.selectors.responseContainer);
+      const respSel = JSON.stringify(binding.selectors.responseSelector);
+      const baseline = await this._cdpEvaluate(binding, `
+        (function() {
+          var cc = 0, dc = 0;
+          ${respContSel}.split(',').forEach(function(s) {
+            try { cc += document.querySelectorAll(s.trim()).length; } catch(e) {}
+          });
+          ${respSel}.split(',').forEach(function(s) {
+            try { dc += document.querySelectorAll(s.trim()).length; } catch(e) {}
+          });
+          return { containerCount: cc, directCount: dc };
+        })()
+      `);
+      binding._baselineResponseCount = baseline.data?.containerCount || 0;
+      binding._baselineDirectCount = baseline.data?.directCount || 0;
+      binding._lastSentText = text; // Store for response filtering
+
+      // Step 1: Focus input and insert text
       const inputSel = JSON.stringify(binding.selectors.inputSelector);
       const sendBtnSel = JSON.stringify(binding.selectors.sendButton);
       const escapedText = JSON.stringify(text);
 
-      const result = await this._cdpEvaluate(binding, `
+      // Focus the input element first — use click() + focus() for full framework initialization
+      const focusInput = await this._cdpEvaluate(binding, `
         (function() {
-          const input = document.querySelector(${inputSel});
-          if (!input) return { ok: false, error: 'INPUT_NOT_FOUND' };
-
-          // Focus and select all existing content
-          input.focus();
-          if (input.isContentEditable) {
-            // For contenteditable (ChatGPT ProseMirror, Claude, etc.)
-            const sel = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(input);
-            sel.removeAllRanges();
-            sel.addRange(range);
-            // execCommand triggers framework state updates (React, ProseMirror, Quill)
-            document.execCommand('insertText', false, ${escapedText});
-          } else {
-            // For regular <textarea>/<input>
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-              Object.getPrototypeOf(input), 'value'
-            )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-            if (nativeSetter) {
-              nativeSetter.call(input, ${escapedText});
-            } else {
-              input.value = ${escapedText};
+          var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+          for (var i = 0; i < sels.length; i++) {
+            var input = document.querySelector(sels[i]);
+            if (input) {
+              input.click();
+              input.focus();
+              return { ok: true, isContentEditable: input.isContentEditable, tagName: input.tagName };
             }
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          return { ok: true };
+          return { ok: false, error: 'INPUT_NOT_FOUND' };
         })()
       `);
 
-      if (!result.ok) {
+      if (!focusInput.ok || focusInput.data?.error) {
         return makeResult(false, null, {
           code: "DOM_CHANGED",
           message: `Input selector not found: ${binding.selectors.inputSelector}`,
         });
       }
 
+      const isCE = focusInput.data?.isContentEditable;
+
+      if (isCE) {
+        // For contenteditable: use CDP Input.insertText (works with tiptap/ProseMirror/Quill)
+        // First clear existing content
+        await this._cdpEvaluate(binding, `
+          (function() {
+            var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+            var input = null;
+            for (var i = 0; i < sels.length; i++) { input = document.querySelector(sels[i]); if (input) break; }
+            if (!input) return { ok: true };
+            input.click();
+            input.focus();
+            var sel = window.getSelection();
+            var range = document.createRange();
+            range.selectNodeContents(input);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('delete', false);
+            return { ok: true };
+          })()
+        `);
+        await new Promise(r => setTimeout(r, 50));
+
+        // Use CDP Input.insertText — triggers all framework handlers (tiptap, ProseMirror, Quill)
+        try {
+          await this._cdpCommand(binding, "Input.insertText", { text });
+        } catch {
+          // Fallback: execCommand (works for tiptap when properly focused via click)
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+              for (var i = 0; i < sels.length; i++) {
+                var input = document.querySelector(sels[i]);
+                if (input) { input.click(); input.focus(); document.execCommand('insertText', false, ${escapedText}); break; }
+              }
+              return { ok: true };
+            })()
+          `);
+        }
+      } else {
+        // For regular <textarea>/<input>: clear existing content, then use CDP Input.insertText
+        await this._cdpEvaluate(binding, `
+          (function() {
+            var input = document.querySelector(${inputSel});
+            if (!input) return { ok: true };
+            input.focus();
+            input.select ? input.select() : null;
+            input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            return { ok: true };
+          })()
+        `);
+        await new Promise(r => setTimeout(r, 50));
+
+        // CDP Input.insertText triggers OS-level text input
+        try {
+          await this._cdpCommand(binding, "Input.insertText", { text });
+        } catch {
+          // Fallback: nativeSetter approach
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var input = document.querySelector(${inputSel});
+              if (!input) return { ok: true };
+              var nativeSetter = Object.getOwnPropertyDescriptor(
+                Object.getPrototypeOf(input), 'value'
+              );
+              if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(input, ${escapedText});
+              } else {
+                input.value = ${escapedText};
+              }
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              return { ok: true };
+            })()
+          `);
+        }
+
+        // Sync React/Vue state: CDP Input.insertText updates DOM but may not trigger React onChange.
+        // Re-set value via nativeSetter + dispatch input event to force framework state sync.
+        await this._cdpEvaluate(binding, `
+          (function() {
+            var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+            for (var i = 0; i < sels.length; i++) {
+              var input = document.querySelector(sels[i]);
+              if (input && input.value) {
+                var proto = Object.getPrototypeOf(input);
+                var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) {
+                  desc.set.call(input, input.value);
+                }
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true };
+              }
+            }
+            return { ok: true };
+          })()
+        `);
+      }
+
       // Small delay for framework state propagation
       await new Promise(r => setTimeout(r, binding.timing?.sendDelayMs || 200));
 
-      // Step 2: Send via Enter key (primary) + button click (fallback)
-      const sendResult = await this._cdpEvaluate(binding, `
-        (function() {
-          const input = document.querySelector(${inputSel});
-          if (!input) return { ok: false, error: 'INPUT_NOT_FOUND' };
-
-          // Primary: dispatch Enter key event on the input
-          input.focus();
-          const enterEvent = new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter',
-            keyCode: 13, which: 13,
-            bubbles: true, cancelable: true
-          });
-          input.dispatchEvent(enterEvent);
-
-          // Fallback: also click send button if it exists and is enabled
-          const btn = document.querySelector(${sendBtnSel});
-          if (btn && !btn.disabled) {
-            btn.click();
+      // Step 2: Send — strategy depends on input type
+      if (isCE) {
+        // For contenteditable (ProseMirror/Quill/tiptap): click send button (Enter = newline)
+        // Retry up to 4 times with delay — send button may appear after framework state update
+        let sendAttempted = false;
+        for (let attempt = 0; attempt < 4 && !sendAttempted; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 400));
+          const sendResult = await this._cdpEvaluate(binding, `
+            (function() {
+              var btnSels = ${sendBtnSel}.split(',').map(function(s) { return s.trim(); });
+              for (var i = 0; i < btnSels.length; i++) {
+                try {
+                  var btn = document.querySelector(btnSels[i]);
+                  if (!btn) continue;
+                  var isVisible = btn.offsetParent !== null || btn.getClientRects().length > 0;
+                  var isEnabled = btn.getAttribute('aria-disabled') !== 'true' && !btn.disabled;
+                  if (isVisible && isEnabled) {
+                    // Use MouseEvent dispatch (works with React, div[role=button], etc.)
+                    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    return { ok: true, method: 'button', sel: btnSels[i], attempt: ${attempt} };
+                  }
+                } catch(e) {}
+              }
+              // Fallback: try form submit
+              var input = document.querySelector(${inputSel});
+              var form = input ? input.closest('form') : null;
+              if (form) {
+                form.requestSubmit ? form.requestSubmit() : form.submit();
+                return { ok: true, method: 'form-submit' };
+              }
+              return { ok: false, method: 'none' };
+            })()
+          `);
+          if (sendResult.data?.method !== 'none') {
+            sendAttempted = true;
           }
-          return { ok: true };
-        })()
-      `);
+        }
+        // Last resort: try Enter key via CDP (may work for some editors)
+        if (!sendAttempted) {
+          try {
+            await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+              type: "rawKeyDown", key: "Enter", code: "Enter",
+              windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+            });
+            await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+              type: "keyUp", key: "Enter", code: "Enter",
+              windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+            });
+          } catch {}
+        }
+      } else {
+        // For regular textarea/input: try send button click FIRST (more reliable), Enter as fallback
+        // Step 2a: Try clicking send button (prefer LAST match — rightmost button is typically send)
+        let textareaSendClicked = false;
+        const btnClickResult = await this._cdpEvaluate(binding, `
+          (function() {
+            var btnSels = ${sendBtnSel}.split(',').map(function(s) { return s.trim(); });
+            // Collect ALL matching buttons
+            var allBtns = [];
+            for (var i = 0; i < btnSels.length; i++) {
+              try {
+                var matches = document.querySelectorAll(btnSels[i]);
+                for (var j = 0; j < matches.length; j++) allBtns.push({ el: matches[j], sel: btnSels[i] });
+              } catch(e) {}
+            }
+            // Try in REVERSE order — last matching button near input is typically the send button
+            for (var k = allBtns.length - 1; k >= 0; k--) {
+              var btn = allBtns[k].el;
+              var isVisible = btn.offsetParent !== null || btn.getClientRects().length > 0;
+              var isEnabled = btn.getAttribute('aria-disabled') !== 'true' && !btn.disabled;
+              if (isVisible && isEnabled) {
+                btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                return { ok: true, method: 'button-reverse', sel: allBtns[k].sel, idx: k };
+              }
+            }
+            return { ok: false, method: 'none', btnCount: allBtns.length };
+          })()
+        `);
+        textareaSendClicked = btnClickResult.data?.method !== 'none';
+
+        // Step 2b: Also send Enter key (some providers need it in addition to or instead of button)
+        await new Promise(r => setTimeout(r, 100));
+        const focusResult = await this._cdpEvaluate(binding, `
+          (function() {
+            var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+            for (var i = 0; i < sels.length; i++) {
+              var input = document.querySelector(sels[i]);
+              if (input) { input.focus(); return { ok: true }; }
+            }
+            return { ok: false };
+          })()
+        `);
+
+        try {
+          await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown", key: "Enter", code: "Enter",
+            windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+          });
+          await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+            type: "char", key: "\r", code: "Enter",
+            windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+          });
+          await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+            type: "keyUp", key: "Enter", code: "Enter",
+            windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+          });
+        } catch {
+          // JS fallback
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+              for (var i = 0; i < sels.length; i++) {
+                var input = document.querySelector(sels[i]);
+                if (input) {
+                  input.focus();
+                  ['keydown','keypress','keyup'].forEach(function(t) {
+                    input.dispatchEvent(new KeyboardEvent(t, { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true }));
+                  });
+                  break;
+                }
+              }
+              return { ok: true };
+            })()
+          `);
+        }
+      }
+
+      const sendResult = { ok: true };
 
       if (!sendResult.ok) {
         return makeResult(false, null, {
@@ -323,22 +537,122 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     const streamSel = JSON.stringify(binding.selectors.streamingIndicator);
     const respContSel = JSON.stringify(binding.selectors.responseContainer);
     const respSel = JSON.stringify(binding.selectors.responseSelector);
+    const baselineContainers = binding._baselineResponseCount || 0;
+    const baselineDirect = binding._baselineDirectCount || 0;
+    const sentText = JSON.stringify(binding._lastSentText || "");
+
+    let lastSeenText = '';
+    let stableCount = 0;
 
     try {
       while (Date.now() - startTime < timeoutMs) {
-        // Check if streaming is complete
+        const elapsed = Date.now() - startTime;
         const status = await this._cdpEvaluate(binding, `
           (function() {
-            const streaming = document.querySelector(${streamSel});
-            if (streaming) return { streaming: true };
-            const responses = document.querySelectorAll(${respContSel});
-            if (responses.length === 0) return { streaming: true };
-            const last = responses[responses.length - 1];
-            const content = last.querySelector(${respSel});
-            return {
-              streaming: false,
-              text: content ? content.textContent : last.textContent,
-            };
+            var sentMsg = ${sentText};
+
+            // Helper: check if text is actually a response (not user echo, placeholder, or UI noise)
+            function isResponse(txt) {
+              if (!txt || !txt.trim()) return false;
+              var t = txt.trim();
+              // Reject if text is exact match of sent message (user echo)
+              if (sentMsg && t === sentMsg) return false;
+              // Reject if text is >80% similar to sent message (likely echo with minor formatting diff)
+              if (sentMsg && t.length > 20 && (t.includes(sentMsg) || sentMsg === t.substring(0, sentMsg.length))) return false;
+              // Reject known loading/placeholder texts
+              var placeholders = ['...', '…', '생각 중...', '생각 중', '생각이 끝났습니다',
+                '조금만 더 기다려 주세요', '조금만 더 기다려 주세요.', 'Thinking', 'Thinking...',
+                'Loading', 'Loading...', 'Generating', 'Generating...'];
+              if (placeholders.indexOf(t) >= 0) return false;
+              // Reject very short text (likely placeholder dots or single chars)
+              if (t.length < 2) return false;
+              return true;
+            }
+
+            // Helper: clean container text (strip common UI noise like button labels, timestamps)
+            function cleanContainerText(txt) {
+              if (!txt) return '';
+              // Remove common UI text patterns appended by buttons
+              return txt.replace(/\s*(Copied|Copy|복사|복사됨|공유|Share)\s*$/gi, '')
+                        .replace(/\s*(오전|오후)\s+\d{1,2}:\d{2}\s*$/g, '') // Korean timestamps
+                        .replace(/\s*\d+\.\d+초\s*$/g, '') // Duration indicators
+                        .trim();
+            }
+
+            // Step 1: Check streaming indicators
+            var isStreaming = false;
+            var streamSels = ${streamSel}.split(',').map(function(s) { return s.trim(); });
+            for (var i = 0; i < streamSels.length; i++) {
+              try { if (document.querySelector(streamSels[i])) { isStreaming = true; break; } } catch(e) {}
+            }
+
+            // Step 2: Try to extract response text (even if streaming — for stabilization)
+            var candidateText = '';
+            var candidateStrategy = '';
+
+            var contSels = ${respContSel}.split(',').map(function(s) { return s.trim(); });
+            var allContainers = [];
+            for (var i = 0; i < contSels.length; i++) {
+              try {
+                var found = document.querySelectorAll(contSels[i]);
+                for (var j = 0; j < found.length; j++) allContainers.push(found[j]);
+              } catch(e) {}
+            }
+
+            if (allContainers.length > ${baselineContainers}) {
+              var last = allContainers[allContainers.length - 1];
+              // Scroll into view to force content-visibility rendering (ChatGPT workaround)
+              try { last.scrollIntoView({ block: 'end' }); } catch(e) {}
+              var respSels = ${respSel}.split(',').map(function(s) { return s.trim(); });
+              for (var i = 0; i < respSels.length; i++) {
+                try {
+                  var content = last.querySelector(respSels[i]);
+                  // Try textContent first, then innerText as fallback for content-visibility
+                  var txt = content ? (content.textContent || content.innerText || '') : '';
+                  if (isResponse(txt)) {
+                    candidateText = txt;
+                    candidateStrategy = 'container';
+                    break;
+                  }
+                } catch(e) {}
+              }
+              if (!candidateText) {
+                var rawTxt = cleanContainerText(last.textContent);
+                if (isResponse(rawTxt)) {
+                  candidateText = rawTxt;
+                  candidateStrategy = 'container-text';
+                }
+              }
+            }
+
+            // Step 3: Fallback — try responseSelector directly (after 3s)
+            if (!candidateText && ${elapsed} >= 3000) {
+              var respSels2 = ${respSel}.split(',').map(function(s) { return s.trim(); });
+              var allDirect = [];
+              for (var i = 0; i < respSels2.length; i++) {
+                try {
+                  var found = document.querySelectorAll(respSels2[i]);
+                  for (var j = 0; j < found.length; j++) allDirect.push(found[j]);
+                } catch(e) {}
+              }
+              if (allDirect.length > ${baselineDirect}) {
+                for (var k = allDirect.length - 1; k >= ${baselineDirect}; k--) {
+                  var txt = allDirect[k].textContent?.trim();
+                  if (isResponse(txt)) {
+                    candidateText = txt;
+                    candidateStrategy = 'direct';
+                    break;
+                  }
+                }
+              }
+            }
+
+            // If not streaming and we have text, done
+            if (!isStreaming && candidateText) {
+              return { streaming: false, text: candidateText, strategy: candidateStrategy };
+            }
+            // Return streaming status + candidate text for stabilization tracking
+            return { streaming: true, candidateText: candidateText || '' };
           })()
         `);
 
@@ -347,7 +661,26 @@ class DevToolsMcpAdapter extends BrowserControlPort {
             turnId,
             response: status.data.text.trim(),
             elapsedMs: Date.now() - startTime,
+            strategy: status.data.strategy,
           });
+        }
+
+        // Text stabilization: if streaming indicator persists but text hasn't changed for 3+ polls, consider done
+        if (status.data?.candidateText) {
+          if (status.data.candidateText === lastSeenText) {
+            stableCount++;
+            if (stableCount >= 3) {
+              return makeResult(true, {
+                turnId,
+                response: status.data.candidateText.trim(),
+                elapsedMs: Date.now() - startTime,
+                strategy: 'stabilized',
+              });
+            }
+          } else {
+            lastSeenText = status.data.candidateText;
+            stableCount = 0;
+          }
         }
 
         await new Promise(r => setTimeout(r, pollInterval));
@@ -359,6 +692,120 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       });
     } catch (err) {
       return this._classifyError(err);
+    }
+  }
+
+  async switchModel(sessionId, modelName) {
+    const binding = this.bindings.get(sessionId);
+    if (!binding) {
+      return makeResult(false, null, { code: "BIND_FAILED", message: "No binding for session. Call attach() first." });
+    }
+
+    const modelSel = binding.modelSelector;
+    if (!modelSel) {
+      return makeResult(true, { skipped: true, reason: "No model selector config for this provider" });
+    }
+
+    const triggerSel = JSON.stringify(modelSel.trigger);
+    const optionSel = JSON.stringify(modelSel.optionSelector || "[role='option'], [role='menuitem'], li");
+    const escapedModel = JSON.stringify(modelName.toLowerCase());
+
+    try {
+      const result = await this._cdpEvaluate(binding, `
+        (function() {
+          var trigger = document.querySelector(${triggerSel});
+          if (!trigger) return { ok: false, error: 'TRIGGER_NOT_FOUND' };
+          trigger.click();
+
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              var optSels = ${optionSel}.split(',').map(function(s) { return s.trim(); });
+              var allOptions = [];
+              for (var i = 0; i < optSels.length; i++) {
+                try {
+                  var found = document.querySelectorAll(optSels[i]);
+                  for (var j = 0; j < found.length; j++) allOptions.push(found[j]);
+                } catch(e) {}
+              }
+
+              var target = null;
+              for (var k = 0; k < allOptions.length; k++) {
+                var text = (allOptions[k].textContent || '').toLowerCase().trim();
+                if (text.indexOf(${escapedModel}) >= 0) {
+                  target = allOptions[k];
+                  break;
+                }
+              }
+
+              if (!target) {
+                resolve({ ok: false, error: 'MODEL_OPTION_NOT_FOUND', searched: allOptions.length });
+                return;
+              }
+
+              target.click();
+
+              setTimeout(function() {
+                resolve({ ok: true, matched: target.textContent.trim() });
+              }, 200);
+            }, 300);
+          });
+        })()
+      `);
+
+      if (!result.ok || (result.data && result.data.ok === false)) {
+        var errData = result.data || {};
+        return makeResult(false, null, {
+          code: "DOM_CHANGED",
+          message: errData.error || "Model switch failed",
+          detail: errData,
+        });
+      }
+
+      return makeResult(true, { modelName, matched: result.data?.matched });
+    } catch (err) {
+      return this._classifyError(err);
+    }
+  }
+
+  async checkLogin(sessionId) {
+    const binding = this.bindings.get(sessionId);
+    if (!binding) return null;
+
+    try {
+      const inputSel = JSON.stringify(binding.selectors.inputSelector);
+      const result = await this._cdpEvaluate(binding, `
+        (function() {
+          var url = location.href.toLowerCase();
+
+          // Check for login/auth URL patterns
+          var loginUrlPatterns = ['/login', '/signin', '/sign-in', '/auth', '/oauth', '/sso', '/accounts'];
+          var isLoginUrl = loginUrlPatterns.some(function(p) { return url.indexOf(p) >= 0; });
+
+          // Check for login form indicators
+          var hasPasswordField = !!document.querySelector('input[type="password"]');
+          var loginTexts = ['sign in', 'log in', 'login', '로그인', '登录', 'continue with google', 'continue with email'];
+          var bodyText = document.body ? document.body.textContent.substring(0, 2000).toLowerCase() : '';
+          var hasLoginText = loginTexts.some(function(t) { return bodyText.indexOf(t) >= 0; }) && hasPasswordField;
+
+          // Check if chat input exists (logged-in indicator)
+          var inputSels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+          var hasInput = false;
+          for (var i = 0; i < inputSels.length; i++) {
+            if (document.querySelector(inputSels[i])) { hasInput = true; break; }
+          }
+
+          if (hasInput) return { loggedIn: true };
+          if (isLoginUrl) return { loggedIn: false, reason: 'login_page_url', url: url.substring(0, 100) };
+          if (hasPasswordField && hasLoginText) return { loggedIn: false, reason: 'login_form_detected', url: url.substring(0, 100) };
+          if (!hasInput && document.readyState === 'complete') {
+            return { loggedIn: false, reason: 'no_chat_input_found', url: url.substring(0, 100) };
+          }
+          return { loggedIn: true };
+        })()
+      `);
+      return result.data;
+    } catch {
+      return null;
     }
   }
 
@@ -559,6 +1006,10 @@ class OrchestratedBrowserPort {
 
   async waitTurnResult(sessionId, turnId, timeoutSec) {
     return this.adapter.waitTurnResult(sessionId, turnId, timeoutSec);
+  }
+
+  async checkLogin(sessionId) {
+    return this.adapter.checkLogin(sessionId);
   }
 
   async health(sessionId) {

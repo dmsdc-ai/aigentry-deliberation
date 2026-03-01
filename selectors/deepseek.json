@@ -5,9 +5,9 @@
   "selectors": {
     "inputSelector": "textarea.ds-scroll-area, textarea[placeholder*='DeepSeek'], textarea[placeholder*='Send a message']",
     "sendButton": "div[role='button'].ds-icon-button, button[type='submit']",
-    "responseSelector": ".ds-markdown, .ds-markdown--block, .markdown-body",
-    "responseContainer": ".chat-message-content, [data-role='assistant']",
-    "streamingIndicator": ".chat-message--streaming, .typing-indicator"
+    "responseSelector": ".ds-markdown, .ds-markdown--block",
+    "responseContainer": ".ds-message",
+    "streamingIndicator": ".ds-message--streaming, [class*='streaming'], .typing-indicator"
   },
   "timing": {
     "inputDelayMs": 100,
@@ -15,5 +15,9 @@
     "pollIntervalMs": 500,
     "streamingTimeoutMs": 60000
   },
-  "notes": "DeepSeek verified via CDP. Input: textarea.ds-scroll-area (placeholder locale-dependent). Send: div[role='button'].ds-icon-button (no aria-label, Enter key is primary). Hashed class names (_27c9245, _7436101) may change."
+  "modelSelector": {
+    "trigger": "div[class*='model-selector'], button[class*='model']",
+    "optionSelector": "[role='option'], [role='menuitem'], [class*='model-item']"
+  },
+  "notes": "DeepSeek verified via CDP. Container: DIV.ds-message. Response: DIV.ds-markdown > P.ds-markdown-paragraph. Input: textarea.ds-scroll-area. Send: div[role='button'].ds-icon-button (Enter key primary). Hashed class names may change."
 }

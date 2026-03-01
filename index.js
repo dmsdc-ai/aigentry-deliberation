@@ -66,6 +66,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import os from "os";
 import { OrchestratedBrowserPort } from "./browser-control-port.js";
+import { getModelSelectionForTurn } from "./model-router.js";
 
 // ── Paths ──────────────────────────────────────────────────────
 
@@ -135,7 +136,7 @@ const DEFAULT_WEB_SPEAKERS = [
   { speaker: "web-gemini", provider: "gemini", name: "Gemini", url: "https://gemini.google.com" },
   { speaker: "web-copilot", provider: "copilot", name: "Copilot", url: "https://copilot.microsoft.com" },
   { speaker: "web-perplexity", provider: "perplexity", name: "Perplexity", url: "https://perplexity.ai" },
-  { speaker: "web-deepseek", provider: "deepseek", name: "DeepSeek", url: "https://deepseek.com" },
+  { speaker: "web-deepseek", provider: "deepseek", name: "DeepSeek", url: "https://chat.deepseek.com" },
   { speaker: "web-mistral", provider: "mistral", name: "Mistral", url: "https://mistral.ai" },
   { speaker: "web-poe", provider: "poe", name: "Poe", url: "https://poe.com" },
   { speaker: "web-grok", provider: "grok", name: "Grok", url: "https://grok.com" },
@@ -1198,6 +1199,31 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
         cdp_available: cdpReachable,
       });
     }
+
+    // Second pass: match auto-registered speakers to individual CDP tabs
+    // (they were added after the first matching pass and only got the global cdpReachable flag)
+    if (cdpTabs.length > 0) {
+      for (const candidate of candidates) {
+        if (!candidate.auto_registered || candidate.cdp_tab_id) continue;
+        let candidateHost = "";
+        try {
+          candidateHost = new URL(candidate.url).hostname.toLowerCase();
+        } catch { continue; }
+        if (!candidateHost) continue;
+        const matches = cdpTabs.filter(t => {
+          try {
+            const tabHost = new URL(t.url).hostname.toLowerCase();
+            // Exact match or subdomain match (e.g., chat.deepseek.com matches deepseek.com)
+            return tabHost === candidateHost || tabHost.endsWith("." + candidateHost);
+          } catch { return false; }
+        });
+        if (matches.length >= 1) {
+          candidate.cdp_available = true;
+          candidate.cdp_tab_id = matches[0].id;
+          candidate.cdp_ws_url = matches[0].webSocketDebuggerUrl;
+        }
+      }
+    }
   }
 
   return { candidates, browserNote };
@@ -1340,11 +1366,11 @@ function resolveTransportForSpeaker(state, speaker) {
 
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
-  claude: { cmd: "claude", flags: '-p --output-format text', example: 'claude -p --output-format text "프롬프트"' },
-  codex: { cmd: "codex", flags: 'exec', example: 'codex exec "프롬프트"' },
-  gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"' },
-  aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"' },
-  cursor: { cmd: "cursor", flags: '', example: 'cursor "프롬프트"' },
+  claude: { cmd: "claude", flags: '-p --output-format text', example: 'claude -p --output-format text "프롬프트"', modelFlag: '--model', provider: 'claude' },
+  codex: { cmd: "codex", flags: 'exec', example: 'codex exec "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
+  gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"', modelFlag: '--model', provider: 'gemini' },
+  aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
+  cursor: { cmd: "cursor", flags: '', example: 'cursor "프롬프트"', modelFlag: null, provider: 'chatgpt' },
 };
 
 function formatTransportGuidance(transport, state, speaker) {
@@ -1352,18 +1378,26 @@ function formatTransportGuidance(transport, state, speaker) {
   switch (transport) {
     case "cli_respond": {
       const hint = CLI_INVOCATION_HINTS[speaker] || null;
-      const invocationGuide = hint
-        ? `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${hint.cmd} ${hint.flags}\`)`
-        : "";
-      return `CLI speaker입니다. \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 직접 응답하세요.${invocationGuide}`;
+      let invocationGuide = "";
+      let modelGuide = "";
+      if (hint) {
+        invocationGuide = `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${hint.cmd} ${hint.flags}\`)`;
+        if (hint.modelFlag && hint.provider) {
+          const cliModel = getModelSelectionForTurn(state, speaker, hint.provider);
+          if (cliModel.model !== 'default') {
+            modelGuide = `\n**추천 모델:** ${cliModel.model} (${cliModel.reason})\n**모델 플래그:** \`${hint.modelFlag} ${cliModel.model}\``;
+          }
+        }
+      }
+      return `CLI speaker입니다. \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 직접 응답하세요.${invocationGuide}${modelGuide}\n\n⛔ **API 호출 금지**: REST API, HTTP 요청, urllib, requests 등으로 LLM API를 직접 호출하지 마세요. 반드시 위 CLI 도구만 사용하세요.`;
     }
     case "clipboard":
-      return `브라우저 LLM speaker입니다. CDP 자동 연결 시도 중... Chrome이 이미 CDP 없이 실행 중이면 재시작이 필요할 수 있습니다.`;
+      return `브라우저 LLM speaker입니다. CDP 자동 연결 시도 중... Chrome이 이미 CDP 없이 실행 중이면 재시작이 필요할 수 있습니다.\n\n⛔ **API 호출 금지**: 이 speaker는 웹 브라우저로만 응답합니다. REST API, HTTP 요청으로 LLM을 호출하지 마세요.`;
     case "browser_auto":
-      return `자동 브라우저 speaker입니다. \`deliberation_browser_auto_turn(session_id: "${sid}")\`으로 자동 진행됩니다. CDP를 통해 브라우저 LLM에 직접 입력하고 응답을 읽습니다.`;
+      return `자동 브라우저 speaker입니다. \`deliberation_browser_auto_turn(session_id: "${sid}")\`으로 자동 진행됩니다. CDP를 통해 브라우저 LLM에 직접 입력하고 응답을 읽습니다.\n\n⛔ **API 호출 금지**: CDP 자동화로만 진행합니다. REST API, HTTP 요청 사용 금지.`;
     case "manual":
     default:
-      return `수동 speaker입니다. 응답을 직접 작성해 \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 제출하세요.`;
+      return `수동 speaker입니다. 해당 LLM의 **웹 UI 또는 CLI 도구**를 통해 응답을 받아 \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 제출하세요.\n\n⛔ **API 호출 절대 금지**: REST API, HTTP 요청(urllib, requests, fetch 등)으로 LLM API를 직접 호출하는 것은 금지됩니다. 반드시 웹 브라우저 UI 또는 CLI 도구만 사용하세요. API 키로 직접 호출하면 deliberation 참여가 거부됩니다.`;
   }
 }
 
@@ -2557,12 +2591,20 @@ server.tool(
         const turnSpeaker = speaker;
         const turnProvider = profile?.provider || "chatgpt";
 
+        // Dynamic model selection
+        const modelSelection = getModelSelectionForTurn(state, turnSpeaker, turnProvider);
+
         // Build prompt
         const turnPrompt = buildClipboardTurnPrompt(state, turnSpeaker, prompt, include_history_entries);
 
         // Attach
         const attachResult = await port.attach(sessionId, { provider: turnProvider, url: profile?.url });
         if (!attachResult.ok) throw new Error(`attach failed: ${attachResult.error?.message}`);
+
+        // Switch model if needed
+        if (modelSelection.model !== 'default') {
+          await port.switchModel(sessionId, modelSelection.model);
+        }
 
         // Send turn
         const autoTurnId = turnId || `auto-${Date.now()}`;
@@ -2584,7 +2626,8 @@ server.tool(
             channel_used: "browser_auto",
             fallback_reason: null,
           });
-          extra = `\n\n⚡ 자동 실행 완료! 브라우저 LLM 응답이 자동으로 제출되었습니다. (${waitResult.data.elapsedMs}ms)`;
+          const routeModelInfo = modelSelection.model !== 'default' ? ` | 모델: ${modelSelection.model}` : "";
+          extra = `\n\n⚡ 자동 실행 완료! 브라우저 LLM 응답이 자동으로 제출되었습니다. (${waitResult.data.elapsedMs}ms${routeModelInfo})`;
         } else {
           throw new Error(waitResult.error?.message || "no response received");
         }
@@ -2641,6 +2684,12 @@ server.tool(
 
     const turnId = state.pending_turn_id || generateTurnId();
     const port = getBrowserPort();
+    const effectiveProvider = (state.participant_profiles || []).find(
+      p => normalizeSpeaker(p.speaker) === normalizeSpeaker(speaker)
+    )?.provider || provider;
+
+    // Dynamic model selection based on prompt context
+    const modelSelection = getModelSelectionForTurn(state, speaker, effectiveProvider);
 
     // Step 1: Attach (pass URL from participant profile for auto-tab-creation)
     const speakerProfile = (state.participant_profiles || []).find(
@@ -2653,6 +2702,18 @@ server.tool(
     const attachResult = await port.attach(resolved, attachHint);
     if (!attachResult.ok) {
       return { content: [{ type: "text", text: `❌ 브라우저 탭 바인딩 실패: ${attachResult.error.message}\n\n**에러 코드:** ${attachResult.error.code}\n**도메인:** ${attachResult.error.domain}\n\nCDP 디버깅 포트가 활성화된 브라우저가 실행 중인지 확인하세요.\n\`google-chrome --remote-debugging-port=9222\`\n\n${PRODUCT_DISCLAIMER}` }] };
+    }
+
+    // Step 1.2: Login detection — check if user is logged in to the web LLM
+    const loginCheck = await port.checkLogin(resolved);
+    if (loginCheck && !loginCheck.loggedIn) {
+      await port.detach(resolved);
+      return { content: [{ type: "text", text: `⚠️ **${speaker} 로그인 필요** — 웹 LLM에 로그인되어 있지 않습니다.\n\n**감지된 상태:** ${loginCheck.reason}\n**URL:** ${loginCheck.url || 'N/A'}\n\n이 speaker는 건너뜁니다. 브라우저에서 해당 LLM에 로그인한 후 다시 시도하세요.\n\n⛔ **API 호출로 대체하지 마세요.** 로그인되지 않은 speaker는 건너뛰는 것이 올바른 동작입니다.` }] };
+    }
+
+    // Step 1.5: Switch model based on context analysis
+    if (modelSelection.model !== 'default') {
+      await port.switchModel(resolved, modelSelection.model);
     }
 
     // Step 2: Build turn prompt
@@ -2697,10 +2758,14 @@ server.tool(
       ? `\n**Degradation:** ${JSON.stringify(degradationState)}`
       : "";
 
+    const modelInfo = modelSelection.model !== 'default'
+      ? `\n**모델:** ${modelSelection.model} (${modelSelection.reason})\n**분석:** category=${modelSelection.category}, complexity=${modelSelection.complexity}`
+      : "";
+
     return {
       content: [{
         type: "text",
-        text: `✅ 브라우저 자동 턴 완료!\n\n**Provider:** ${provider}\n**Turn ID:** ${turnId}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${waitResult.data.elapsedMs}ms${degradationInfo}\n\n${result.content[0].text}`,
+        text: `✅ 브라우저 자동 턴 완료!\n\n**Provider:** ${effectiveProvider}\n**Turn ID:** ${turnId}${modelInfo}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${waitResult.data.elapsedMs}ms${degradationInfo}\n\n${result.content[0].text}`,
       }],
     };
   })
@@ -2712,11 +2777,24 @@ server.tool(
   {
     session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
     speaker: z.string().trim().min(1).max(64).describe("응답자 이름"),
-    content: z.string().describe("응답 내용 (마크다운)"),
+    content: z.string().optional().describe("응답 내용 (마크다운). content 또는 content_file 중 하나 필수."),
+    content_file: z.string().optional().describe("응답 내용이 담긴 파일 경로. JSON 이스케이프 문제 회피용. 파일 내용이 그대로 content로 사용됩니다."),
     turn_id: z.string().optional().describe("턴 검증 ID (deliberation_route_turn에서 받은 값)"),
   },
-  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, turn_id }) => {
-    return submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used: "cli_respond" });
+  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, turn_id }) => {
+    // Support reading content from file to avoid JSON escaping issues
+    let finalContent = content;
+    if (content_file && !content) {
+      try {
+        finalContent = fs.readFileSync(content_file, "utf-8").trim();
+      } catch (e) {
+        return { content: [{ type: "text", text: `❌ content_file 읽기 실패: ${e.message}` }] };
+      }
+    }
+    if (!finalContent) {
+      return { content: [{ type: "text", text: "❌ content 또는 content_file 중 하나를 제공해야 합니다." }] };
+    }
+    return submitDeliberationTurn({ session_id, speaker, content: finalContent, turn_id, channel_used: "cli_respond" });
   })
 );
 
