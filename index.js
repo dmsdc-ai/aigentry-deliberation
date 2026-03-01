@@ -3098,6 +3098,32 @@ server.tool(
     turn_id: z.string().optional().describe("턴 검증 ID (deliberation_route_turn에서 받은 값)"),
   },
   safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, turn_id }) => {
+    // Guard: prevent orchestrator from fabricating responses for CLI/browser speakers
+    const resolved = resolveSessionId(session_id);
+    if (resolved && resolved !== "MULTIPLE") {
+      const state = loadSession(resolved);
+      if (state) {
+        const { transport } = resolveTransportForSpeaker(state, speaker);
+        if (transport === "cli_respond" || transport === "browser_auto") {
+          // Check if caller is the same speaker (legitimate self-response) or an impersonator
+          const callerIsSpeaker = (speaker === "claude"); // orchestrator can only legitimately respond as "claude"
+          if (!callerIsSpeaker) {
+            return {
+              content: [{
+                type: "text",
+                text: `⚠️ **대리 응답 차단**: speaker "${speaker}"는 ${transport} transport입니다.\n\n` +
+                  `오케스트레이터가 다른 speaker를 대신하여 응답을 작성하는 것은 허용되지 않습니다.\n` +
+                  `대신 다음 도구를 사용하세요:\n` +
+                  `- CLI speaker → \`deliberation_route_turn\` 또는 \`deliberation_cli_auto_turn\`\n` +
+                  `- 브라우저 speaker → \`deliberation_route_turn\` 또는 \`deliberation_browser_auto_turn\`\n\n` +
+                  `이 도구들이 실제 CLI/브라우저를 실행하여 진짜 응답을 수집합니다.`,
+              }],
+            };
+          }
+        }
+      }
+    }
+
     // Support reading content from file to avoid JSON escaping issues
     let finalContent = content;
     if (content_file && !content) {

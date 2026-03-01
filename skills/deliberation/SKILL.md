@@ -54,11 +54,24 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
 - "크롬", "브라우저", "웹 LLM", "chrome", "browser LLM"
 - "{주제} 토론", "{주제} deliberation"
 
+## 절대 규칙 (MUST / NEVER)
+
+> **이 규칙은 예외 없이 반드시 지켜야 합니다.**
+
+1. **MUST** — 토론 시작 전 반드시 `deliberation_speaker_candidates`로 후보 조회 후 `AskUserQuestion(multiSelect)`으로 사용자에게 참가자 선택을 받아야 합니다.
+2. **MUST** — 각 턴 진행 시 반드시 `deliberation_route_turn`을 사용해야 합니다. 이 도구가 transport를 자동 감지합니다:
+   - CLI speaker → `deliberation_cli_auto_turn`으로 실제 CLI 실행
+   - browser_auto → CDP로 자동 전송/수집
+   - clipboard/manual → 클립보드 준비 + 사용자 안내
+3. **NEVER** — 오케스트레이터(자기 자신)가 다른 speaker를 대신하여 `deliberation_respond`에 응답을 작성하지 마세요. 이것은 "역할극"이며 실제 deliberation이 아닙니다. MCP 서버가 이를 감지하고 차단합니다.
+4. **NEVER** — `deliberation_respond`를 직접 호출하지 마세요 (자기 자신의 응답 제외). 다른 speaker의 턴은 반드시 `deliberation_route_turn` 또는 `deliberation_cli_auto_turn`/`deliberation_browser_auto_turn`을 통해 진행합니다.
+5. **MUST** — 자기 자신(오케스트레이터 역할의 claude)이 speaker인 경우에만 직접 `deliberation_respond`로 응답을 제출할 수 있습니다.
+
 ## 워크플로우
 
 ### A. 사용자 선택형 진행 (권장)
 1. `deliberation_speaker_candidates` → 참가 가능한 CLI/브라우저 speaker 확인
-2. **AskUserQuestion으로 참가자 선택** — 감지된 CLI/브라우저 speaker 목록을 `multiSelect: true`로 제시하여 사용자가 원하는 참가자만 체크. 예:
+2. **AskUserQuestion으로 참가자 선택 (필수)** — 감지된 CLI/브라우저 speaker 목록을 `multiSelect: true`로 제시하여 사용자가 원하는 참가자만 체크. 예:
    ```
    AskUserQuestion({
      questions: [{
@@ -77,9 +90,10 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
    })
    ```
 3. `deliberation_start` (선택된 speakers 전달) → session_id 획득
-4. `deliberation_route_turn` → 현재 차례 speaker transport 자동 결정
-   - CLI speaker → 자동 응답
+4. **`deliberation_route_turn` 호출 (필수)** → 현재 차례 speaker transport 자동 결정 및 실행
+   - CLI speaker → `deliberation_cli_auto_turn`이 실제 CLI를 실행하고 응답 수집
    - browser_auto → CDP로 자동 전송/수집
+   - 자기 자신(claude)이 speaker → 직접 `deliberation_respond`로 응답 제출
 5. 반복 후 `deliberation_synthesize(session_id)` → 합성 완료
 6. 구현이 필요하면 `deliberation-executor` 스킬로 handoff
    예: "session_id {id} 합의안 구현해줘"
