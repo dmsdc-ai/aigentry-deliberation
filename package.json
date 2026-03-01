@@ -29,6 +29,7 @@
   },
   "files": [
     "index.js",
+    "model-router.js",
     "install.js",
     "doctor.js",
     "observer.js",
