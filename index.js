@@ -2739,8 +2739,23 @@ server.tool(
 
     const speaker = state.current_speaker;
     const { transport, profile, reason } = resolveTransportForSpeaker(state, speaker);
-    const guidance = formatTransportGuidance(transport, state, speaker);
     const turnId = state.pending_turn_id || null;
+
+    // ── Self-speaker detection ──
+    // If the current speaker is the same CLI as the orchestrator (caller),
+    // cli_auto_turn would recursively spawn the same process and timeout.
+    // Instead, instruct the orchestrator to respond directly.
+    const callerSpeaker = detectCallerSpeaker();
+    const isSelfSpeaker = callerSpeaker && speaker === callerSpeaker && transport === "cli_respond";
+
+    let guidance;
+    if (isSelfSpeaker) {
+      guidance = `🟢 **본인 턴입니다.** 당신(${speaker})이 현재 speaker입니다.\n\n` +
+        `직접 응답을 작성하여 \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`로 제출하세요.\n\n` +
+        `⚠️ **cli_auto_turn 사용 금지**: 자기 자신을 재귀 호출하면 타임아웃이 발생합니다. 반드시 직접 deliberation_respond를 사용하세요.`;
+    } else {
+      guidance = formatTransportGuidance(transport, state, speaker);
+    }
 
     let extra = "";
 
@@ -2961,6 +2976,17 @@ server.tool(
     const { transport } = resolveTransportForSpeaker(state, speaker);
     if (transport !== "cli_respond") {
       return { content: [{ type: "text", text: `speaker "${speaker}"는 CLI 타입이 아닙니다 (transport: ${transport}). 브라우저 speaker는 deliberation_browser_auto_turn을 사용하세요.` }] };
+    }
+
+    // Block recursive self-spawn: if the speaker is the same CLI as the caller,
+    // spawning it would create infinite recursion and timeout.
+    const callerSpeaker = detectCallerSpeaker();
+    if (callerSpeaker && speaker === callerSpeaker) {
+      return { content: [{ type: "text", text:
+        `⚠️ **재귀 호출 차단**: speaker "${speaker}"는 현재 오케스트레이터와 동일한 CLI입니다.\n\n` +
+        `cli_auto_turn으로 자기 자신을 spawn하면 타임아웃이 발생합니다.\n` +
+        `직접 응답을 작성하여 \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`로 제출하세요.`
+      }] };
     }
 
     const hint = CLI_INVOCATION_HINTS[speaker];
