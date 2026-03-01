@@ -530,6 +530,37 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+function checkCliLiveness(command) {
+  const hint = CLI_INVOCATION_HINTS[command];
+  const env = { ...process.env };
+  // Unset CLAUDECODE to avoid nested session errors
+  if (hint?.envPrefix?.includes("CLAUDECODE=")) {
+    delete env.CLAUDECODE;
+  }
+  try {
+    execFileSync(command, ["--version"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 5000,
+      env,
+    });
+    return true;
+  } catch {
+    // --version failed, try --help as fallback
+    try {
+      execFileSync(command, ["--help"], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 5000,
+        env,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function discoverLocalCliSpeakers() {
   const found = [];
   for (const candidate of resolveCliCandidates()) {
@@ -1092,11 +1123,13 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
 
   if (include_cli) {
     for (const cli of discoverLocalCliSpeakers()) {
+      const live = checkCliLiveness(cli);
       add({
         speaker: cli,
         type: "cli",
         label: cli,
         command: cli,
+        live,
       });
     }
   }
@@ -1239,7 +1272,10 @@ function formatSpeakerCandidatesReport({ candidates, browserNote }) {
   if (cli.length === 0) {
     out += "- (감지된 로컬 CLI 없음)\n\n";
   } else {
-    out += `${cli.map(c => `- \`${c.speaker}\` (command: ${c.command})`).join("\n")}\n\n`;
+    out += `${cli.map(c => {
+      const status = c.live === false ? " ❌ 실행 불가" : c.live === true ? " ✅ 실행 가능" : "";
+      return `- \`${c.speaker}\` (command: ${c.command})${status}`;
+    }).join("\n")}\n\n`;
   }
 
   out += "### Browser LLM (감지됨)\n";
@@ -2421,6 +2457,29 @@ server.tool(
         content: [{
           type: "text",
           text: `⚠️ Deliberation에는 최소 2명의 speaker가 필요합니다. 현재 ${speakerOrder.length}명만 지정됨: ${speakerOrder.join(", ")}\n\n사용 가능한 스피커 후보:\n${candidateText}\n\n예시:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "web-gemini-1"])`,
+        }],
+      };
+    }
+
+    // Liveness check: verify CLI speakers are actually executable
+    const cliSpeakersInOrder = speakerOrder.filter(s => !s.startsWith("web-"));
+    const nonLiveCli = [];
+    for (const s of cliSpeakersInOrder) {
+      if (!checkCliLiveness(s)) {
+        nonLiveCli.push(s);
+      }
+    }
+    if (nonLiveCli.length > 0) {
+      const liveSpeakers = speakerOrder.filter(s => !nonLiveCli.includes(s));
+      const liveSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
+      const candidateText = formatSpeakerCandidatesReport(liveSnapshot);
+      const liveList = liveSpeakers.length > 0
+        ? `\n\n실행 가능한 스피커만으로 시작하려면:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ${JSON.stringify(liveSpeakers)})`
+        : "";
+      return {
+        content: [{
+          type: "text",
+          text: `⚠️ 일부 CLI 스피커가 현재 실행 불가합니다:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\n\n실행 가능: ${liveSpeakers.length > 0 ? liveSpeakers.map(s => `\`${s}\``).join(", ") : "(없음)"}\n\n${candidateText}${liveList}\n\n실행 불가 원인: CLI가 설치되지 않았거나, 중첩 세션 제약, 또는 인증 만료일 수 있습니다.`,
         }],
       };
     }
