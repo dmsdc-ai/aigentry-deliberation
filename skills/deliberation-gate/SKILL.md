@@ -4,6 +4,10 @@ description: |
   Use after brainstorming produces design doc, after code-review produces feedback,
   when debugging hits dead end with failed hypotheses, or when user says
   "deliberate this", "토론해줘", "검증해줘", "멀티-AI 리뷰", "multi-AI verify"
+version: 0.1.0
+prerequisites:
+  mcp: ["aigentry-deliberation"]
+fallback: self-criticism
 ---
 
 # Deliberation Gate — Multi-AI Verification for Superpowers Workflows
@@ -145,6 +149,47 @@ For explicit or general deliberation:
 2. Ask how to proceed with the consensus
 3. Follow user's direction
 
+## MCP 미설치 시 Fallback (Graceful Degradation)
+
+deliberation MCP 도구(`deliberation_start`, `deliberation_speaker_candidates` 등)가 사용 불가능할 경우:
+
+### 감지 방법
+- MCP 도구 호출 시 "tool not found" 또는 연결 실패 에러 발생
+- `deliberation_speaker_candidates` 호출이 실패하면 MCP 미설치로 판단
+
+### Fallback 프로토콜
+
+1. **안내**: AskUserQuestion으로 상황 설명
+   ```
+   question: "멀티-AI 검증 MCP 서버가 감지되지 않았습니다. 단일 모델 자가 검증으로 대체할까요?"
+   options:
+     - label: "자가 검증 진행"
+       description: "3관점 self-criticism으로 검증 (Silver 등급)"
+     - label: "MCP 설치 안내"
+       description: "npx @dmsdc-ai/aigentry-deliberation install 실행 방법 안내"
+     - label: "건너뛰기"
+       description: "검증 없이 원래 워크플로우 계속"
+   ```
+
+2. **Self-Criticism 실행** (자가 검증 선택 시):
+   - 동일 artifact에 대해 3가지 관점으로 순차 분석:
+     - **비판적 분석가**: 약점, 리스크, 누락된 고려사항
+     - **현실적 실행가**: 구현 가능성, 비용, 복잡도
+     - **리서처**: 대안, 선례, 데이터 기반 근거
+   - 3관점 결과를 종합하여 합의 포맷으로 출력
+
+3. **투명성 라벨링**:
+   - 모든 검증 결과에 출처 라벨 필수 표시:
+     - `🥇 Verification: Multi-AI Deliberation (Gold)` — 실제 멀티-AI 토론 결과
+     - `🥈 Verification: Self-Criticism (Silver)` — 단일 모델 자가 검증 결과
+   - 라벨은 합의 섹션 상단에 표시
+
+### MCP 설치 안내 (선택 시)
+```
+npx @dmsdc-ai/aigentry-deliberation install
+```
+설치 후 Claude Code 세션을 재시작하면 멀티-AI 검증이 활성화됩니다.
+
 ## Anti-Patterns (NEVER)
 
 1. **NEVER skip user approval** — Always use AskUserQuestion before starting deliberation. This is a HARD GATE.
@@ -153,6 +198,7 @@ For explicit or general deliberation:
 4. **NEVER re-ask after decline** — If user chooses "건너뛰기", respect it immediately. Do not ask again.
 5. **NEVER block on deliberation failure** — If MCP tools fail (server not running, speaker unavailable), warn the user and continue the original workflow. Deliberation is enhancement, not requirement.
 6. **NEVER modify existing superpowers skills** — This skill is purely additive. It works alongside existing skills without changing them.
+7. **NEVER omit verification source label** — 모든 검증 결과에 Gold/Silver 라벨을 반드시 표시. Self-criticism 결과를 Multi-AI 결과와 구분 없이 제시하면 신뢰도를 왜곡한다.
 
 ## Workflow Position
 

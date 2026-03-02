@@ -13,6 +13,7 @@
  *   3. Registers MCP server in ~/.claude/.mcp.json (Claude Code)
  *   4. Registers MCP server in ~/.gemini/settings.json (Gemini CLI)
  *   5. Ready to use — next Claude Code or Gemini CLI session will auto-load
+ *   6. 스킬 파일 설치 (~/.claude/skills/deliberation-gate/SKILL.md)
  */
 
 import { execSync } from "node:child_process";
@@ -28,6 +29,10 @@ const INSTALL_DIR = IS_WIN
   : path.join(HOME, ".local", "lib", "mcp-deliberation");
 const MCP_CONFIG = path.join(HOME, ".claude", ".mcp.json");
 const GEMINI_CONFIG = path.join(HOME, ".gemini", "settings.json");
+const SKILL_SRC = path.join(__dirname, "skills", "deliberation-gate", "SKILL.md");
+const SKILL_DEST_DIR = path.join(HOME, ".claude", "skills", "deliberation-gate");
+const SKILL_DEST = path.join(SKILL_DEST_DIR, "SKILL.md");
+const MANIFEST_PATH = path.join(INSTALL_DIR, ".install-manifest.json");
 
 /** Normalize path to forward slashes for JSON config (Windows backslash → forward slash) */
 function toForwardSlash(p) {
@@ -175,10 +180,51 @@ function install() {
     } catch { /* ignore on Windows */ }
   }
 
-  // Step 6: Preserve existing config
+  // Step 6b: Preserve existing config
   const configPath = path.join(INSTALL_DIR, "config.json");
   if (!fs.existsSync(configPath)) {
     fs.writeFileSync(configPath, JSON.stringify({}, null, 2));
+  }
+
+  // Step 7: Deploy deliberation-gate skill
+  log("🎓 deliberation-gate 스킬 파일 설치...");
+  if (!fs.existsSync(SKILL_SRC)) {
+    log("   ⚠️ 스킬 소스 파일 없음, 스킵: " + SKILL_SRC);
+  } else {
+    try {
+      fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
+      let shouldCopy = true;
+      if (fs.existsSync(SKILL_DEST) && !FORCE) {
+        const existing = fs.readFileSync(SKILL_DEST, "utf-8");
+        const incoming = fs.readFileSync(SKILL_SRC, "utf-8");
+        if (existing === incoming) {
+          log("   → 이미 최신 상태, 스킵");
+          shouldCopy = false;
+        } else {
+          fs.copyFileSync(SKILL_DEST, SKILL_DEST + ".backup");
+          log("   → 기존 파일 백업: SKILL.md.backup");
+        }
+      }
+      if (shouldCopy) {
+        fs.copyFileSync(SKILL_SRC, SKILL_DEST);
+        log("   → " + SKILL_DEST);
+      }
+    } catch (err) {
+      log(`   ⚠️ 스킬 설치 실패: ${err.message}`);
+    }
+  }
+
+  // Write install manifest
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf-8"));
+    const manifest = {
+      version: pkg.version,
+      installedAt: new Date().toISOString(),
+      skills: [SKILL_DEST],
+    };
+    fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+  } catch (err) {
+    log(`   ⚠️ manifest 작성 실패: ${err.message}`);
   }
 
   // Done
@@ -191,6 +237,7 @@ function install() {
 
 // Entry point
 const args = process.argv.slice(2);
+const FORCE = args.includes("--force");
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`
 Deliberation MCP Server Installer
@@ -202,10 +249,18 @@ Usage:
 Options:
   --help, -h     이 도움말 표시
   --uninstall    서버 제거
+  --force        기존 스킬 파일 비교 없이 강제 덮어쓰기
+
+기능:
+  - 서버 파일을 설치 경로에 복사
+  - npm 의존성 설치
+  - Claude Code / Gemini CLI MCP 서버 등록
+  - 스킬 파일 설치 (~/.claude/skills/deliberation-gate/SKILL.md)
 
 설치 경로: ${INSTALL_DIR}
 MCP 설정:  ${MCP_CONFIG}
 Gemini:    ${GEMINI_CONFIG}
+스킬 경로: ${SKILL_DEST}
 `);
 } else if (args.includes("--uninstall") || args.includes("uninstall")) {
   console.log("\n🗑️ Deliberation MCP Server 제거\n");
@@ -232,6 +287,39 @@ Gemini:    ${GEMINI_CONFIG}
         log("Gemini CLI MCP 등록 해제 완료");
       }
     } catch { /* ignore */ }
+  }
+
+  // Remove skill files tracked by manifest (or fall back to default path)
+  let skillsToRemove = [SKILL_DEST];
+  const manifestFile = path.join(INSTALL_DIR, ".install-manifest.json");
+  if (fs.existsSync(manifestFile)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf-8"));
+      if (Array.isArray(manifest.skills) && manifest.skills.length > 0) {
+        skillsToRemove = manifest.skills;
+      }
+    } catch { /* use default */ }
+  }
+  for (const skillPath of skillsToRemove) {
+    if (fs.existsSync(skillPath)) {
+      try {
+        fs.rmSync(skillPath, { force: true });
+        log(`스킬 파일 삭제: ${skillPath}`);
+        const backupPath = skillPath + ".backup";
+        if (fs.existsSync(backupPath)) {
+          log(`  💡 백업 파일이 남아 있습니다: ${backupPath}`);
+          log(`     복원하려면: cp "${backupPath}" "${skillPath}"`);
+        }
+        // Remove directory if empty
+        const dir = path.dirname(skillPath);
+        if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
+          fs.rmdirSync(dir);
+          log(`빈 스킬 디렉토리 삭제: ${dir}`);
+        }
+      } catch (err) {
+        log(`  ⚠️ 스킬 파일 삭제 실패: ${err.message}`);
+      }
+    }
   }
 
   // Remove install directory
