@@ -17,6 +17,12 @@ MCP Deliberation Server — Multi-session AI deliberation with smart speaker ord
 - **Cross-platform**: macOS (tmux + Terminal.app), Windows (Windows Terminal), Linux
 - **Obsidian archiving**: Auto-archive deliberation results to Obsidian vault
 - **Session monitoring**: Real-time tmux/terminal monitoring
+- **Vote enforcement**: Automatic [AGREE]/[DISAGREE]/[CONDITIONAL] vote marker requirement
+- **Dynamic CLI timeout**: Smart cold-start handling (180s first turn, 120s subsequent)
+- **Runtime logging**: Session lifecycle event logging for observability
+- **Resilient browser automation**: 5-stage degradation state machine with 60s SLO
+- **Model routing**: Dynamic per-provider model selection based on prompt analysis
+- **Role drift detection**: Structural heading markers + keyword analysis for accurate role inference
 
 ## Installation
 
@@ -121,6 +127,34 @@ Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제�
 | `researcher` | Data, benchmarks, references |
 | `free` | No role constraint (default) |
 
+### Supported CLI Speakers
+
+| CLI | Command | Status |
+|-----|---------|--------|
+| Claude Code | `claude` | ✅ Tested |
+| Codex CLI | `codex` | ✅ Tested |
+| Gemini CLI | `gemini` | ✅ Tested |
+| Aider | `aider` | 🔧 Supported |
+| Cursor Agent | `cursor` | 🔧 Supported |
+| OpenCode | `opencode` | 🔧 Supported |
+| Continue | `continue` | 🔧 Supported |
+
+### Supported Browser LLMs
+
+| Provider | Transport | Status |
+|----------|-----------|--------|
+| ChatGPT | CDP / Clipboard | ✅ Tested |
+| Claude Web | CDP / Clipboard | ✅ Tested |
+| Gemini Web | CDP / Clipboard | ✅ Tested |
+| DeepSeek | CDP / Clipboard | ✅ Tested |
+| Qwen | CDP / Clipboard | ✅ Tested |
+| Poe | CDP / Clipboard | ✅ Tested |
+| Copilot | CDP / Clipboard | 🔧 Supported |
+| Perplexity | CDP / Clipboard | 🔧 Supported |
+| Mistral | CDP / Clipboard | 🔧 Supported |
+| Grok | CDP / Clipboard | 🔧 Supported |
+| HuggingChat | CDP / Clipboard | 🔧 Supported |
+
 ### deliberation-gate (Superpowers Integration)
 
 Inserts multi-AI verification gates at key [superpowers](https://github.com/obra/superpowers) workflow decision points.
@@ -142,6 +176,24 @@ cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 ```
 
 **RFC:** [Prerequisites header for tool-dependent skills](https://github.com/obra/superpowers/issues/589)
+
+## What's New
+
+### v0.0.23
+- **Vote enforcement**: Turn prompts now require [AGREE]/[DISAGREE]/[CONDITIONAL] markers for reliable consensus measurement
+- **Dynamic CLI timeout**: First CLI invocation gets 180s (cold-start buffer), subsequent turns use default 120s
+- **Runtime logging**: INFO-level lifecycle logging (SESSION_CREATED, TURN, CLI_TURN, SYNTHESIZED) to `runtime.log`
+- **Role inference improvement**: Structural heading markers (e.g., `## 조사 결과` → researcher) with +5 weight prevent false role drift detection
+
+### v0.0.22
+- **Security**: CDP `--remote-allow-origins` restricted to `127.0.0.1:9222` (was `*`)
+- **Security**: Observer CORS restricted to localhost allowlist, server bound to `127.0.0.1`
+- **Performance**: Async sleep for Chrome CDP initialization (was blocking event loop)
+- **Bug fix**: Fabrication guard uses `detectCallerSpeaker()` instead of hardcoded `"claude"`
+- **Bug fix**: CLI reviewer uses per-CLI invocation flags via `CLI_INVOCATION_HINTS`
+- **Bug fix**: Windows monitor state directory path corrected
+- **Memory**: SSE client Map cleanup on disconnect prevents memory leak
+- **Code quality**: Removed unreachable dead code in browser-control-port
 
 ## aigentry Ecosystem
 
