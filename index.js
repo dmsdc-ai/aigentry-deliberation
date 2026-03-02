@@ -219,10 +219,10 @@ const ROLE_KEYWORDS = {
 };
 
 const ROLE_HEADING_MARKERS = {
-  critic: /^##?\s*(Critic|비판|약점|심각도|위험\s*분석)/m,
+  critic: /^##?\s*(Critic|비판|약점|심각도|위험\s*분석|검증|평가|Review)/m,
   implementer: /^##?\s*(코드\s*스케치|구현|Implementation|제안\s*코드)/m,
   mediator: /^##?\s*(합의|종합|중재|Consensus|Mediation)/m,
-  researcher: /^##?\s*(조사\s*결과|비교\s*분석|Research|사례\s*연구|근거)/m,
+  researcher: /^##?\s*(조사\s*결과|비교\s*분석|Research|사례\s*연구|근거|데이터|Data)/m,
 };
 
 function inferSuggestedRole(text) {
@@ -234,7 +234,7 @@ function inferSuggestedRole(text) {
   // Structural heading markers get extra weight (equivalent to 5 keyword matches)
   for (const [role, pattern] of Object.entries(ROLE_HEADING_MARKERS)) {
     if (pattern.test(text)) {
-      scores[role] = (scores[role] || 0) + 5;
+      scores[role] = (scores[role] || 0) + 8;
     }
   }
   if (Object.keys(scores).length === 0) return "free";
@@ -2304,6 +2304,9 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
     }
 
     const votes = parseVotes(content);
+    if (votes.length === 0) {
+      appendRuntimeLog("WARN", `INVALID_TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | reason: no_vote_marker`);
+    }
     const suggestedRole = inferSuggestedRole(content);
     const assignedRole = (state.speaker_roles || {})[normalizedSpeaker] || "free";
     const roleDrift = assignedRole !== "free" && suggestedRole !== "free" && assignedRole !== suggestedRole;
@@ -2319,7 +2322,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
       role_drift: roleDrift || undefined,
     });
-    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"}`);
+    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | suggested_role: ${suggestedRole} | role_drift: ${roleDrift || false}`);
 
     state.current_speaker = selectNextSpeaker(state);
 
@@ -3092,7 +3095,7 @@ server.tool(
       });
 
       const elapsedMs = Date.now() - startTime;
-      appendRuntimeLog("INFO", `CLI_TURN: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | elapsed: ${elapsedMs}ms | response_len: ${response.length}`);
+      appendRuntimeLog("INFO", `CLI_TURN: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | elapsed: ${elapsedMs}ms | response_len: ${response.length} | prior_turns: ${speakerPriorTurns} | effective_timeout: ${effectiveTimeout}s`);
 
       if (!response) {
         return { content: [{ type: "text", text: `⚠️ CLI "${speaker}"가 빈 응답을 반환했습니다.` }] };
