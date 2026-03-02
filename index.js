@@ -218,11 +218,24 @@ const ROLE_KEYWORDS = {
   researcher: /사례|데이터|연구|벤치마크|비교|논문|참고/,
 };
 
+const ROLE_HEADING_MARKERS = {
+  critic: /^##?\s*(Critic|비판|약점|심각도|위험\s*분석)/m,
+  implementer: /^##?\s*(코드\s*스케치|구현|Implementation|제안\s*코드)/m,
+  mediator: /^##?\s*(합의|종합|중재|Consensus|Mediation)/m,
+  researcher: /^##?\s*(조사\s*결과|비교\s*분석|Research|사례\s*연구|근거)/m,
+};
+
 function inferSuggestedRole(text) {
   const scores = {};
   for (const [role, pattern] of Object.entries(ROLE_KEYWORDS)) {
     const matches = (text.match(new RegExp(pattern, "g")) || []).length;
     if (matches > 0) scores[role] = matches;
+  }
+  // Structural heading markers get extra weight (equivalent to 5 keyword matches)
+  for (const [role, pattern] of Object.entries(ROLE_HEADING_MARKERS)) {
+    if (pattern.test(text)) {
+      scores[role] = (scores[role] || 0) + 5;
+    }
   }
   if (Object.keys(scores).length === 0) return "free";
   return Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
@@ -2237,6 +2250,7 @@ ${recent}
 [response_rule]
 - 위 토론 맥락을 반영해 ${speaker}의 이번 턴 응답만 작성
 - 마크다운 본문만 출력 (불필요한 머리말/꼬리말 금지)${speakerRole !== "free" ? `\n- 배정된 역할(${speakerRole})의 관점에서 분석하고 응답` : ""}
+- 응답 마지막에 반드시 [AGREE], [DISAGREE], 또는 [CONDITIONAL: 사유] 중 하나를 포함
 [/response_rule]
 [/deliberation_turn_request]
 `;
@@ -2305,6 +2319,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
       role_drift: roleDrift || undefined,
     });
+    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"}`);
 
     state.current_speaker = selectNextSpeaker(state);
 
@@ -2611,6 +2626,7 @@ server.tool(
       return `  - \`${p.speaker}\`: ${transport} (${p.type})`;
     }).join("\n");
 
+    appendRuntimeLog("INFO", `SESSION_CREATED: ${sessionId} | topic: ${topic.slice(0, 60)} | speakers: ${speakerOrder.join(",")} | rounds: ${rounds}`);
     return {
       content: [{
         type: "text",
@@ -2989,6 +3005,10 @@ server.tool(
       }] };
     }
 
+    // Dynamic timeout: first turn gets extra time for cold-start
+    const speakerPriorTurns = state.log.filter(e => e.speaker === speaker).length;
+    const effectiveTimeout = speakerPriorTurns === 0 ? Math.max(timeout_sec, 180) : timeout_sec;
+
     const hint = CLI_INVOCATION_HINTS[speaker];
     if (!hint) {
       return { content: [{ type: "text", text: `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.` }] };
@@ -3039,8 +3059,8 @@ server.tool(
 
         const timer = setTimeout(() => {
           child.kill("SIGTERM");
-          reject(new Error(`CLI 타임아웃 (${timeout_sec}초)`));
-        }, timeout_sec * 1000);
+          reject(new Error(`CLI 타임아웃 (${effectiveTimeout}초)`));
+        }, effectiveTimeout * 1000);
 
         child.stdout.on("data", (data) => { stdout += data.toString(); });
         child.stderr.on("data", (data) => { stderr += data.toString(); });
@@ -3072,6 +3092,7 @@ server.tool(
       });
 
       const elapsedMs = Date.now() - startTime;
+      appendRuntimeLog("INFO", `CLI_TURN: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | elapsed: ${elapsedMs}ms | response_len: ${response.length}`);
 
       if (!response) {
         return { content: [{ type: "text", text: `⚠️ CLI "${speaker}"가 빈 응답을 반환했습니다.` }] };
@@ -3232,6 +3253,8 @@ server.tool(
     if (lockedResult) {
       return lockedResult;
     }
+
+    appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
 
     // 토론 종료 즉시 모니터 터미널(물리 Terminal 포함) 강제 종료
     closeMonitorTerminal(state.id, getSessionWindowIds(state));
@@ -3758,4 +3781,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS };
