@@ -31,6 +31,8 @@ npx @dmsdc-ai/aigentry-deliberation install
 2. npm 의존성 설치
 3. `~/.claude/.mcp.json`에 MCP 서버 자동 등록
 4. Claude Code 재시작하면 바로 사용 가능
+5. Gemini CLI MCP 서버 자동 등록 (`~/.gemini/settings.json`)
+6. deliberation-gate 스킬 자동 설치 (`~/.claude/skills/deliberation-gate/`)
 
 ### 기타 설치 방법
 
@@ -53,6 +55,8 @@ cd aigentry-deliberation && npm install && node install.js
 npx @dmsdc-ai/aigentry-deliberation uninstall
 ```
 
+MCP 서버 등록 해제 + 설치 파일 삭제 + 스킬 파일 정리까지 자동 처리됩니다.
+
 ## Forum Demo
 
 Deliberation이 완료되면 결과를 시각화하는 Forum View를 생성합니다.
@@ -67,6 +71,16 @@ Deliberation이 완료되면 결과를 시각화하는 Forum View를 생성합�
 ```bash
 open demo/forum/index.html
 ```
+
+## Diagnostics
+
+MCP 연결 문제 자동 진단:
+
+```bash
+npx @dmsdc-ai/aigentry-deliberation doctor
+```
+
+Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제를 진단합니다.
 
 ## MCP Tools
 
@@ -109,7 +123,7 @@ open demo/forum/index.html
 
 ### deliberation-gate (Superpowers Integration)
 
-Inserts multi-AI verification gates at key [superpowers](https://github.com/anthropics/superpowers) workflow decision points.
+Inserts multi-AI verification gates at key [superpowers](https://github.com/obra/superpowers) workflow decision points.
 
 **Scenarios:**
 - **brainstorming** → multi-AI design validation before writing plans
@@ -118,10 +132,16 @@ Inserts multi-AI verification gates at key [superpowers](https://github.com/anth
 
 **Trigger:** Semi-automatic — skill recommends deliberation, user approves.
 
-**Install:**
+**Fallback:** MCP 미설치 시 self-criticism 기반 자가 검증으로 대체 (Silver 등급). MCP 설치 시 멀티-AI 토론 (Gold 등급).
+
+**Install:** `npx @dmsdc-ai/aigentry-deliberation install` 실행 시 자동 설치됩니다.
+
+수동 설치:
 ```bash
 cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 ```
+
+**RFC:** [Prerequisites header for tool-dependent skills](https://github.com/obra/superpowers/issues/589)
 
 ## aigentry Ecosystem
 
