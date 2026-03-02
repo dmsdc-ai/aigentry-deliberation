@@ -179,6 +179,12 @@ cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 
 ## What's New
 
+### v0.0.24
+- **Role inference**: Heading marker weight increased from +5 to +8, added critic(검증/평가/Review) and researcher(데이터/Data) patterns to reduce false positives
+- **Logging payload**: TURN log includes `suggested_role`, `role_drift`; CLI_TURN log includes `prior_turns`, `effective_timeout`
+- **Vote marker warning**: WARN-level `INVALID_TURN` logged when response lacks [AGREE]/[DISAGREE]/[CONDITIONAL] markers
+- **Auto-deploy**: `postversion` hook auto-installs to MCP server path after `npm version`
+
 ### v0.0.23
 - **Vote enforcement**: Turn prompts now require [AGREE]/[DISAGREE]/[CONDITIONAL] markers for reliable consensus measurement
 - **Dynamic CLI timeout**: First CLI invocation gets 180s (cold-start buffer), subsequent turns use default 120s
