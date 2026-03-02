@@ -261,7 +261,9 @@ function createServer(port) {
     const pathname = url.pathname;
 
     // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin || "";
+    const allowedOrigins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigins.includes(origin) ? origin : allowedOrigins[0]);
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -377,7 +379,13 @@ function createServer(port) {
 
       req.on("close", () => {
         const clients = sseClients.get(sessionId) || [];
-        sseClients.set(sessionId, clients.filter(c => c !== res));
+        const remaining = clients.filter(c => c !== res);
+        if (remaining.length === 0) {
+          sseClients.delete(sessionId);
+          sessionSnapshots.delete(sessionId);
+        } else {
+          sseClients.set(sessionId, remaining);
+        }
       });
       return;
     }
@@ -468,7 +476,7 @@ const server = createServer(port);
 // Poll every 1 second
 const pollInterval = setInterval(pollSessions, 1000);
 
-server.listen(port, () => {
+server.listen(port, "127.0.0.1", () => {
   console.log(`Deliberation Observer running at http://localhost:${port}`);
   console.log(`   Dashboard: http://localhost:${port}/`);
   console.log(`   API: http://localhost:${port}/api/sessions`);

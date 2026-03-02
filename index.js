@@ -948,7 +948,7 @@ async function ensureCdpAvailable() {
 
     const launchArgs = [
       "--remote-debugging-port=9222",
-      "--remote-allow-origins=*",
+      "--remote-allow-origins=http://127.0.0.1:9222",
       `--user-data-dir=${cdpDataDir}`,
       `--profile-directory=${profileDir}`,
       "--no-first-run",
@@ -965,7 +965,7 @@ async function ensureCdpAvailable() {
     }
 
     // Wait for Chrome to initialize CDP
-    sleepMs(5000);
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     // Retry CDP connection after launch
     for (const endpoint of endpoints) {
@@ -3124,7 +3124,8 @@ server.tool(
         const { transport } = resolveTransportForSpeaker(state, speaker);
         if (transport === "cli_respond" || transport === "browser_auto") {
           // Check if caller is the same speaker (legitimate self-response) or an impersonator
-          const callerIsSpeaker = (speaker === "claude"); // orchestrator can only legitimately respond as "claude"
+          const callerSpeaker = detectCallerSpeaker();
+          const callerIsSpeaker = callerSpeaker && (speaker === callerSpeaker);
           if (!callerIsSpeaker) {
             return {
               content: [{
@@ -3448,15 +3449,36 @@ server.tool(
 // ── Request Review (auto-review) ───────────────────────────────
 
 function invokeCliReviewer(command, prompt, timeoutMs) {
-  const args = ["-p", prompt, "--no-input"];
+  const hint = CLI_INVOCATION_HINTS[command];
+  let args;
+  let opts = { encoding: "utf-8", timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 5 * 1024 * 1024, windowsHide: true };
+  const env = { ...process.env };
+
+  switch (command) {
+    case "claude":
+      if (hint?.envPrefix?.includes("CLAUDECODE=")) delete env.CLAUDECODE;
+      args = ["-p", "--output-format", "text", "--no-input"];
+      opts.input = prompt;
+      opts.stdio = ["pipe", "pipe", "pipe"];
+      break;
+    case "codex":
+      args = ["exec", prompt];
+      opts.stdio = ["ignore", "pipe", "pipe"];
+      break;
+    case "gemini":
+      args = ["-p", prompt];
+      opts.stdio = ["ignore", "pipe", "pipe"];
+      break;
+    default: {
+      const flags = hint?.flags ? hint.flags.split(/\s+/).filter(Boolean) : ["-p"];
+      args = [...flags, prompt];
+      opts.stdio = ["ignore", "pipe", "pipe"];
+      break;
+    }
+  }
+
   try {
-    const result = execFileSync(command, args, {
-      encoding: "utf-8",
-      timeout: timeoutMs,
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 5 * 1024 * 1024,
-      windowsHide: true,
-    });
+    const result = execFileSync(command, args, { ...opts, env });
     return { ok: true, response: result.trim() };
   } catch (error) {
     if (error && error.killed) {

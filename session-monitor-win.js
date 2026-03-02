@@ -14,7 +14,7 @@ if (!sessionId) {
 }
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const stateDir = path.join(HOME, ".local", "state", "mcp-deliberation", project);
+const stateDir = path.join(HOME, ".local", "lib", "mcp-deliberation", "state", project);
 const stateFile = path.join(stateDir, `${sessionId}.json`);
 
 const BOLD = "\x1b[1m";

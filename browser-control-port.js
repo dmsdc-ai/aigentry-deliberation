@@ -509,15 +509,6 @@ class DevToolsMcpAdapter extends BrowserControlPort {
         }
       }
 
-      const sendResult = { ok: true };
-
-      if (!sendResult.ok) {
-        return makeResult(false, null, {
-          code: "SEND_FAILED",
-          message: `Send button not found: ${binding.selectors.sendButton}`,
-        });
-      }
-
       sent.add(turnId);
       return makeResult(true, { turnId, sent: true });
     } catch (err) {
