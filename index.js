@@ -1233,17 +1233,20 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
 
     // CDP auto-detection: probe endpoints for matching tabs
     const cdpEndpoints = resolveCdpEndpoints();
-    const cdpTabs = [];
+    const cdpTabsMap = new Map(); // dedupe by tab ID (multiple endpoints may return same tabs)
     for (const endpoint of cdpEndpoints) {
       try {
         const tabs = await fetchJson(endpoint, 2000);
         if (Array.isArray(tabs)) {
           for (const t of tabs) {
-            if (t.type === "page" && t.url) cdpTabs.push(t);
+            if (t.type === "page" && t.url && t.id && !cdpTabsMap.has(t.id)) {
+              cdpTabsMap.set(t.id, t);
+            }
           }
         }
       } catch { /* endpoint not reachable */ }
     }
+    const cdpTabs = [...cdpTabsMap.values()];
 
     // Match CDP tabs with discovered browser candidates
     for (const candidate of candidates) {
@@ -1257,7 +1260,7 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
             String(t.url || "").startsWith("chrome-extension://") &&
             String(t.title || "").toLowerCase().includes(candidateTitle)
           );
-          if (matches.length === 1) {
+          if (matches.length >= 1) {
             candidate.cdp_available = true;
             candidate.cdp_tab_id = matches[0].id;
             candidate.cdp_ws_url = matches[0].webSocketDebuggerUrl;
@@ -1275,7 +1278,7 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
           return new URL(t.url).hostname.toLowerCase() === candidateHost;
         } catch { return false; }
       });
-      if (matches.length === 1) {
+      if (matches.length >= 1) {
         candidate.cdp_available = true;
         candidate.cdp_tab_id = matches[0].id;
         candidate.cdp_ws_url = matches[0].webSocketDebuggerUrl;
