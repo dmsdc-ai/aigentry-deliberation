@@ -56,6 +56,12 @@ Usage:
  *   deliberation_browser_auto_turn      브라우저 LLM에 자동으로 턴을 전송하고 응답을 수집 (CDP 기반)
  *   deliberation_cli_auto_turn          CLI speaker에 자동으로 턴을 전송하고 응답을 수집
  *   deliberation_request_review         코드 리뷰 요청 (CLI 리뷰어 자동 호출, sync/async 모드)
+ *   decision_start             새 의사결정 세션 시작 (템플릿 지원)
+ *   decision_status            의사결정 세션 상태 조회
+ *   decision_respond           user_probe 갈등 질문에 대한 사용자 응답 제출
+ *   decision_resume            일시 중지된 세션 재개
+ *   decision_history           과거 의사결정 기록 조회
+ *   decision_templates         Micro-Decision 템플릿 목록
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -68,6 +74,13 @@ import { fileURLToPath } from "url";
 import os from "os";
 import { OrchestratedBrowserPort } from "./browser-control-port.js";
 import { getModelSelectionForTurn } from "./model-router.js";
+import {
+  DECISION_STAGES, STAGE_TRANSITIONS,
+  createDecisionSession, advanceStage, buildConflictMap,
+  parseOpinionFromResponse, buildOpinionPrompt,
+  generateConflictQuestions, buildSynthesis, buildActionPlan,
+  loadTemplates, matchTemplate,
+} from "./decision-engine.js";
 
 // ── Paths ──────────────────────────────────────────────────────
 
@@ -1462,7 +1475,7 @@ function resolveTransportForSpeaker(state, speaker) {
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
   claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "프롬프트"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
-  codex: { cmd: "codex", flags: 'exec', example: 'codex exec "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
+  codex: { cmd: "codex", flags: 'exec --model gpt-5.4-codex', example: 'codex exec --model gpt-5.4-codex "프롬프트"', modelFlag: '--model', defaultModel: 'gpt-5.4-codex', provider: 'chatgpt' },
   gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"', modelFlag: '--model', provider: 'gemini' },
   aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
   cursor: { cmd: "cursor", flags: '', example: 'cursor "프롬프트"', modelFlag: null, provider: 'chatgpt' },
@@ -1846,7 +1859,9 @@ function tmuxWindowCount(name) {
 
 function buildTmuxAttachCommand(sessionId) {
   const winName = tmuxWindowName(sessionId);
-  return `tmux attach -t ${shellQuote(TMUX_SESSION)} \\; select-window -t ${shellQuote(`${TMUX_SESSION}:${winName}`)}`;
+  // Use grouped session (new-session -t) so each terminal has independent active window.
+  // This prevents window-switching conflicts when multiple deliberations run concurrently.
+  return `tmux new-session -t ${shellQuote(TMUX_SESSION)} \\; select-window -t ${shellQuote(`${TMUX_SESSION}:${winName}`)}`;
 }
 
 function listPhysicalTerminalWindowIds() {
@@ -1887,16 +1902,31 @@ function listPhysicalTerminalWindowIds() {
 
 function openPhysicalTerminal(sessionId) {
   const winName = tmuxWindowName(sessionId);
-  const attachCmd = `tmux attach -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
+  // Use grouped session (new-session -t) for independent active window per client
+  const attachCmd = `tmux new-session -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
 
-  // If a terminal is already attached to this tmux session, just switch to the right window
+  // If a terminal is already attached, open a NEW grouped session instead of
+  // select-window (which would hijack all attached clients' views).
+  // Grouped sessions share windows but each has independent active window tracking.
   if (tmuxHasAttachedClients(TMUX_SESSION)) {
-    try {
-      execFileSync("tmux", ["select-window", "-t", `${TMUX_SESSION}:${winName}`], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } catch { /* window might not exist yet */ }
+    if (process.platform === "darwin") {
+      const groupAttachCmd = `tmux new-session -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
+      try {
+        execFileSync(
+          "osascript",
+          [
+            "-e", 'tell application "Terminal"',
+            "-e", "activate",
+            "-e", `do script ${appleScriptQuote(groupAttachCmd)}`,
+            "-e", "end tell",
+          ],
+          { encoding: "utf-8" }
+        );
+        return { opened: true, windowIds: [] };
+      } catch { /* fall through to default behavior */ }
+    }
+    // Non-macOS or fallback: don't force select-window, just report success
+    // The monitor window already exists in tmux; user can switch manually
     return { opened: true, windowIds: [] };
   }
 
@@ -2613,10 +2643,10 @@ server.tool(
       : physicalOpened
         ? isWin
           ? `\n🖥️ 모니터 터미널 오픈됨 (Windows Terminal)`
-          : `\n🖥️ 모니터 터미널 오픈됨: tmux attach -t ${TMUX_SESSION}`
+          : `\n🖥️ 모니터 터미널 오픈됨: tmux new-session -t ${TMUX_SESSION}`
         : isWin
           ? `\n⚠️ 모니터 터미널 자동 오픈 실패`
-          : `\n⚠️ tmux 윈도우는 생성됐지만 외부 터미널 자동 오픈 실패. 수동 실행: tmux attach -t ${TMUX_SESSION}`;
+          : `\n⚠️ tmux 윈도우는 생성됐지만 외부 터미널 자동 오픈 실패. 수동 실행: tmux new-session -t ${TMUX_SESSION}`;
     const manualNotDetected = hasManualSpeakers
       ? speakerOrder.filter(s => !candidateSnapshot.candidates.some(c => c.speaker === s))
       : [];
@@ -3047,7 +3077,7 @@ server.tool(
             child.stdin.end();
             break;
           case "codex":
-            child = spawn("codex", ["exec", turnPrompt], { env, windowsHide: true });
+            child = spawn("codex", ["exec", "--model", "gpt-5.4-codex", turnPrompt], { env, windowsHide: true });
             break;
           case "gemini":
             child = spawn("gemini", ["-p", turnPrompt], { env, windowsHide: true });
@@ -3756,6 +3786,430 @@ server.tool(
   })
 );
 
+// ── Decision Engine Tools ─────────────────────────────────────
+
+server.tool(
+  "decision_start",
+  "새 의사결정 세션을 시작합니다. 여러 LLM이 독립적으로 의견을 제시하고 갈등을 가시화합니다.",
+  {
+    problem: z.string().describe("의사결정 문제 (예: 'JWT vs Session 인증 방식 선택')"),
+    options: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.array(z.string()).optional()
+    ).describe("선택지 목록 (예: ['JWT', 'Session', 'OAuth2'])"),
+    criteria: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.array(z.string()).optional()
+    ).describe("평가 기준 (미지정 시 템플릿에서 자동 로드)"),
+    template: z.string().optional().describe("Micro-decision 템플릿 ID (lib-compare, arch-decision, pr-priority, naming-convention, tradeoff, risk-approval)"),
+    speakers: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.array(z.string().trim().min(1).max(64)).min(2).optional()
+    ).describe("참여 LLM 목록 (최소 2명, 예: ['claude', 'codex', 'gemini'])"),
+  },
+  safeToolHandler("decision_start", async ({ problem, options, criteria, template, speakers }) => {
+    // Auto-discover speakers if not provided
+    if (!speakers || speakers.length === 0) {
+      const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: false });
+      speakers = candidateSnapshot.candidates
+        .filter(c => c.type === "cli" && checkCliLiveness(c.speaker))
+        .map(c => c.speaker)
+        .slice(0, 4);
+      if (speakers.length < 2) {
+        return { content: [{ type: "text", text: "❌ 의사결정에 최소 2명의 speaker가 필요합니다. speakers를 직접 지정하세요." }] };
+      }
+    }
+
+    // Template matching
+    const templates = loadTemplates();
+    let matchedTemplate = null;
+    if (template) {
+      matchedTemplate = templates.find(t => t.id === template) || null;
+    } else {
+      matchedTemplate = matchTemplate(problem, templates);
+    }
+
+    // Use template criteria if not provided
+    if ((!criteria || criteria.length === 0) && matchedTemplate) {
+      criteria = matchedTemplate.criteria.map(c => c.name || c);
+    }
+
+    // Create session
+    const session = createDecisionSession({
+      problem,
+      options: options || [],
+      criteria: criteria || [],
+      speakers,
+      template: matchedTemplate?.id || null,
+      participant_profiles: mapParticipantProfiles(speakers, [], {}),
+    });
+
+    // Advance to parallel_opinions immediately (intake is just creation)
+    advanceStage(session);
+
+    // Save session
+    withSessionLock(session.id, () => {
+      saveSession(session);
+    });
+
+    appendRuntimeLog("INFO", `DECISION_START: ${session.id} | problem: ${problem.slice(0, 60)} | speakers: ${speakers.join(",")} | criteria: ${(criteria || []).length}`);
+
+    // Build opinion prompt for parallel execution
+    const opinionPrompt = buildOpinionPrompt(problem, options || [], criteria || [], matchedTemplate?.id);
+
+    // Run parallel independent opinions using CLI auto-turn pattern
+    const opinionResults = {};
+    const opinionPromises = speakers.map(async (speaker) => {
+      try {
+        const hint = CLI_INVOCATION_HINTS[speaker] || CLI_INVOCATION_HINTS["_generic"];
+        const cmd = hint?.cmd || speaker;
+
+        // Check liveness
+        if (!checkCliLiveness(cmd)) {
+          opinionResults[speaker] = { error: `CLI not available: ${cmd}` };
+          return;
+        }
+
+        // Spawn CLI with opinion prompt
+        const result = await new Promise((resolve, reject) => {
+          let stdout = "";
+          let stderr = "";
+
+          const args = [];
+          if (speaker === "claude") {
+            args.push("-p", "--output-format", "text", opinionPrompt);
+          } else if (speaker === "codex") {
+            args.push("exec", opinionPrompt);
+          } else if (speaker === "gemini") {
+            args.push("-p", opinionPrompt);
+          } else {
+            const flags = hint?.flags || [];
+            args.push(...flags, opinionPrompt);
+          }
+
+          const proc = spawn(cmd, args, {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: { ...process.env, NO_COLOR: "1" },
+            timeout: 180000,
+          });
+
+          proc.stdout?.on("data", (d) => { stdout += d.toString(); });
+          proc.stderr?.on("data", (d) => { stderr += d.toString(); });
+
+          const timer = setTimeout(() => {
+            proc.kill("SIGTERM");
+            reject(new Error("timeout"));
+          }, 180000);
+
+          proc.on("close", (code) => {
+            clearTimeout(timer);
+            resolve(stdout.trim() || stderr.trim());
+          });
+
+          proc.on("error", (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+
+        opinionResults[speaker] = result;
+      } catch (err) {
+        opinionResults[speaker] = { error: err.message };
+      }
+    });
+
+    // Wait for all opinions in parallel
+    await Promise.all(opinionPromises);
+
+    // Parse opinions and update session
+    withSessionLock(session.id, () => {
+      const latest = loadSession(session.id);
+      if (!latest) return;
+
+      for (const [speaker, result] of Object.entries(opinionResults)) {
+        if (typeof result === "string") {
+          latest.opinions[speaker] = parseOpinionFromResponse(speaker, result, latest.criteria);
+          latest.log.push({
+            round: 1,
+            speaker,
+            content: result,
+            timestamp: new Date().toISOString(),
+            channel_used: "cli_auto",
+            event: "opinion",
+          });
+        } else {
+          appendRuntimeLog("WARN", `DECISION_OPINION_FAIL: ${session.id} | ${speaker}: ${result?.error}`);
+        }
+      }
+
+      // Advance to conflict_map
+      latest.stage = "conflict_map";
+      latest.metadata.updated = new Date().toISOString();
+
+      // Build conflict map
+      latest.conflicts = buildConflictMap(latest.opinions, latest.criteria);
+
+      // Advance to user_probe
+      latest.stage = "user_probe";
+      latest.metadata.updated = new Date().toISOString();
+
+      saveSession(latest);
+    });
+
+    // Load updated session for response
+    const updatedSession = loadSession(session.id);
+    const conflictText = generateConflictQuestions(updatedSession?.conflicts || []);
+    const successCount = Object.keys(updatedSession?.opinions || {}).length;
+    const templateInfo = matchedTemplate ? `\n**Template:** ${matchedTemplate.name}` : "";
+
+    appendRuntimeLog("INFO", `DECISION_OPINIONS_COMPLETE: ${session.id} | opinions: ${successCount}/${speakers.length} | conflicts: ${(updatedSession?.conflicts || []).length}`);
+
+    return {
+      content: [{
+        type: "text",
+        text: `✅ **Decision Session 시작됨**\n\n**Session:** ${session.id}\n**Problem:** ${problem}\n**Speakers:** ${speakers.join(", ")}\n**Opinions collected:** ${successCount}/${speakers.length}${templateInfo}\n**Stage:** user_probe (사용자 입력 대기)\n**Conflicts:** ${(updatedSession?.conflicts || []).length}개\n\n---\n\n${conflictText}\n\n---\n\n사용자 응답을 \`decision_respond\`로 제출하세요.`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "decision_status",
+  "의사결정 세션의 현재 상태를 조회합니다.",
+  {
+    session_id: z.string().optional().describe("세션 ID (미지정 시 활성 decision 세션 자동 선택)"),
+  },
+  safeToolHandler("decision_status", async ({ session_id }) => {
+    // Find decision sessions
+    const active = listActiveSessions().filter(s => {
+      const full = loadSession(s.id);
+      return full?.type === "decision";
+    });
+
+    let resolved = session_id;
+    if (!resolved) {
+      if (active.length === 0) return { content: [{ type: "text", text: "활성 decision 세션이 없습니다." }] };
+      if (active.length === 1) resolved = active[0].id;
+      else return { content: [{ type: "text", text: `여러 decision 세션이 진행 중입니다. session_id를 지정하세요:\n${active.map(s => `- ${s.id}`).join("\n")}` }] };
+    }
+
+    const state = loadSession(resolved);
+    if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${resolved}` }] };
+
+    const opinionCount = Object.keys(state.opinions || {}).length;
+    const conflictCount = (state.conflicts || []).length;
+    const stageIdx = DECISION_STAGES.indexOf(state.stage);
+    const progress = stageIdx >= 0 ? `${stageIdx + 1}/${DECISION_STAGES.length}` : state.stage;
+
+    return {
+      content: [{
+        type: "text",
+        text: `📊 **Decision Session Status**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** ${state.stage} (${progress})\n**Status:** ${state.status}\n**Speakers:** ${(state.speakers || []).join(", ")}\n**Opinions:** ${opinionCount}/${(state.speakers || []).length}\n**Conflicts:** ${conflictCount}\n**Template:** ${state.template || "(none)"}\n**Created:** ${state.metadata?.created || ""}`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "decision_respond",
+  "user_probe 단계의 갈등 질문에 대한 사용자 응답을 제출합니다.",
+  {
+    session_id: z.string().optional().describe("세션 ID"),
+    responses: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.array(z.string()).min(1)
+    ).describe("각 갈등 질문에 대한 응답 배열 (conflict 순서대로)"),
+  },
+  safeToolHandler("decision_respond", async ({ session_id, responses }) => {
+    // Find decision session
+    const active = listActiveSessions().filter(s => {
+      const full = loadSession(s.id);
+      return full?.type === "decision";
+    });
+
+    let resolved = session_id;
+    if (!resolved) {
+      if (active.length === 1) resolved = active[0].id;
+      else if (active.length === 0) return { content: [{ type: "text", text: "활성 decision 세션이 없습니다." }] };
+      else return { content: [{ type: "text", text: `여러 decision 세션이 진행 중입니다. session_id를 지정하세요.` }] };
+    }
+
+    let synthesisText = "";
+    let actionPlan = null;
+
+    withSessionLock(resolved, () => {
+      const state = loadSession(resolved);
+      if (!state) return;
+      if (state.stage !== "user_probe") {
+        synthesisText = `❌ 현재 단계(${state.stage})에서는 응답을 받을 수 없습니다. user_probe 단계에서만 가능합니다.`;
+        return;
+      }
+
+      // Store user responses
+      state.userProbeResponses = responses;
+      state.log.push({
+        event: "user_probe_response",
+        responses,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Advance to synthesis
+      state.stage = "synthesis";
+      state.metadata.updated = new Date().toISOString();
+
+      // Build synthesis
+      state.synthesis = buildSynthesis(state);
+
+      // Advance to action_export
+      state.stage = "action_export";
+      state.metadata.updated = new Date().toISOString();
+
+      // Build action plan
+      state.actionPlan = buildActionPlan(state);
+
+      // Advance to done
+      state.stage = "done";
+      state.status = "completed";
+      state.metadata.updated = new Date().toISOString();
+
+      saveSession(state);
+
+      // Archive
+      const archivePath = archiveState(state);
+      cleanupSyncMarkdown(state);
+
+      synthesisText = state.synthesis;
+      actionPlan = state.actionPlan;
+
+      appendRuntimeLog("INFO", `DECISION_COMPLETE: ${resolved} | conflicts_resolved: ${responses.length} | decision: ${(actionPlan?.decision || "").slice(0, 60)}`);
+    });
+
+    if (synthesisText.startsWith("❌")) {
+      return { content: [{ type: "text", text: synthesisText }] };
+    }
+
+    const checklistText = actionPlan?.exportFormats?.checklist || "";
+    return {
+      content: [{
+        type: "text",
+        text: `✅ **Decision Complete**\n\n${synthesisText}\n\n---\n\n## Action Plan\n\n${checklistText}`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "decision_resume",
+  "일시 중지된 decision 세션을 재개합니다 (user_probe 단계에서 갈등 질문을 다시 표시).",
+  {
+    session_id: z.string().optional().describe("세션 ID"),
+  },
+  safeToolHandler("decision_resume", async ({ session_id }) => {
+    const active = listActiveSessions().filter(s => {
+      const full = loadSession(s.id);
+      return full?.type === "decision";
+    });
+
+    let resolved = session_id;
+    if (!resolved) {
+      if (active.length === 1) resolved = active[0].id;
+      else if (active.length === 0) return { content: [{ type: "text", text: "재개할 decision 세션이 없습니다." }] };
+      else return { content: [{ type: "text", text: `여러 세션 중 선택하세요:\n${active.map(s => `- ${s.id}`).join("\n")}` }] };
+    }
+
+    const state = loadSession(resolved);
+    if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${resolved}` }] };
+    if (state.stage !== "user_probe") {
+      return { content: [{ type: "text", text: `세션이 user_probe 단계가 아닙니다 (현재: ${state.stage}). 재개할 수 없습니다.` }] };
+    }
+
+    const conflictText = generateConflictQuestions(state.conflicts || []);
+    return {
+      content: [{
+        type: "text",
+        text: `📋 **Decision Session 재개**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** user_probe\n\n---\n\n${conflictText}\n\n---\n\n사용자 응답을 \`decision_respond\`로 제출하세요.`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "decision_history",
+  "과거 의사결정 기록을 조회합니다.",
+  {
+    session_id: z.string().optional().describe("특정 세션 ID (미지정 시 전체 목록)"),
+  },
+  safeToolHandler("decision_history", async ({ session_id }) => {
+    if (session_id) {
+      const state = loadSession(session_id);
+      if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${session_id}` }] };
+
+      const opinionSummary = Object.entries(state.opinions || {})
+        .map(([speaker, op]) => `- **${speaker}**: ${op.summary || "(none)"} (confidence: ${Math.round((op.confidence || 0.5) * 100)}%)`)
+        .join("\n");
+
+      return {
+        content: [{
+          type: "text",
+          text: `📜 **Decision History: ${state.id}**\n\n**Problem:** ${state.problem}\n**Status:** ${state.status}\n**Stage:** ${state.stage}\n**Template:** ${state.template || "(none)"}\n\n## Opinions\n${opinionSummary || "(none)"}\n\n## Synthesis\n${state.synthesis || "(not yet synthesized)"}\n\n## Action Plan\n${state.actionPlan?.exportFormats?.checklist || "(not yet generated)"}`,
+        }],
+      };
+    }
+
+    // List all decision sessions from archives
+    const projectSlug = getProjectSlug();
+    const archiveDir = path.join(GLOBAL_STATE_DIR, projectSlug, "archive");
+    let decisionArchives = [];
+    try {
+      const files = fs.readdirSync(archiveDir).filter(f => f.startsWith("decision-"));
+      decisionArchives = files.map(f => {
+        const match = f.match(/^decision-(.+)\.md$/);
+        return match ? match[1] : f;
+      });
+    } catch { /* no archives */ }
+
+    // Also list active decision sessions
+    const activeSessions = listActiveSessions().filter(s => {
+      const full = loadSession(s.id);
+      return full?.type === "decision";
+    });
+
+    const activeList = activeSessions.map(s => `- 🟢 ${s.id} (${s.status})`).join("\n");
+    const archiveList = decisionArchives.map(a => `- 📁 ${a}`).join("\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: `📜 **Decision History**\n\n## Active Sessions\n${activeList || "(none)"}\n\n## Archives\n${archiveList || "(none)"}`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "decision_templates",
+  "사용 가능한 Micro-Decision 템플릿 목록을 표시합니다.",
+  {},
+  safeToolHandler("decision_templates", async () => {
+    const templates = loadTemplates();
+    if (templates.length === 0) {
+      return { content: [{ type: "text", text: "사용 가능한 템플릿이 없습니다." }] };
+    }
+
+    const list = templates.map(t => {
+      const criteriaList = (t.criteria || []).map(c => c.name || c.label || c).join(", ");
+      return `### ${t.name} (\`${t.id}\`)\n${t.description}\n- **Criteria:** ${criteriaList}\n- **Example:** ${t.example_problem || "(none)"}`;
+    }).join("\n\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: `📋 **Decision Templates**\n\n${list}\n\n---\n\n\`decision_start(problem: "...", template: "lib-compare")\`로 사용하세요.`,
+      }],
+    };
+  })
+);
+
 // ── Start ──────────────────────────────────────────────────────
 
 // Only start server when run directly (not imported for testing)
@@ -3784,4 +4238,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate };
