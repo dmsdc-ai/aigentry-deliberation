@@ -946,16 +946,28 @@ async function ensureCdpAvailable() {
 
     // Chrome 145+ requires --user-data-dir for CDP to work.
     // The default data dir is rejected, so we copy the profile to ~/.chrome-cdp.
+    // Profile can be set via env DELIBERATION_CHROME_PROFILE or config.chrome_profile (e.g., "Profile 1").
     const cdpDataDir = path.join(os.homedir(), ".chrome-cdp");
-    const profileDir = "Default";
+    const cdpConfig = loadDeliberationConfig();
+    const profileDir = process.env.DELIBERATION_CHROME_PROFILE || cdpConfig.chrome_profile || "Default";
 
     try {
       if (chromeUserDataDir) {
         const srcProfile = path.join(chromeUserDataDir, profileDir);
         const dstProfile = path.join(cdpDataDir, profileDir);
-        if (!fs.existsSync(dstProfile) && fs.existsSync(srcProfile)) {
+        // Track which profile was copied; re-copy if profile changed
+        const profileMarker = path.join(cdpDataDir, ".cdp-profile");
+        const lastProfile = fs.existsSync(profileMarker) ? fs.readFileSync(profileMarker, "utf8").trim() : null;
+        const needsCopy = !fs.existsSync(dstProfile) || (lastProfile && lastProfile !== profileDir);
+        if (needsCopy && fs.existsSync(srcProfile)) {
+          // Clean old profile if switching
+          if (lastProfile && lastProfile !== profileDir) {
+            const oldDst = path.join(cdpDataDir, lastProfile);
+            if (fs.existsSync(oldDst)) fs.rmSync(oldDst, { recursive: true, force: true });
+          }
           fs.mkdirSync(cdpDataDir, { recursive: true });
           execFileSync("cp", ["-R", srcProfile, dstProfile], { timeout: 30000, stdio: "ignore" });
+          fs.writeFileSync(profileMarker, profileDir);
           // Create minimal Local State with single profile to avoid profile picker
           const localStateSrc = path.join(chromeUserDataDir, "Local State");
           if (fs.existsSync(localStateSrc)) {
@@ -3427,8 +3439,10 @@ server.tool(
       .describe("Default number of rounds (1-10, default 3)"),
     default_ordering: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
       .describe("Default ordering strategy: auto (automatic based on speaker count), cyclic, random, weighted-random"),
+    chrome_profile: z.string().optional()
+      .describe("Chrome profile directory name for CDP (e.g., \"Default\", \"Profile 1\"). Stored for auto-launch."),
   },
-  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, default_rounds, default_ordering }) => {
+  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, default_rounds, default_ordering, chrome_profile }) => {
     const config = loadDeliberationConfig();
 
     // Handle setup config updates
@@ -3445,6 +3459,10 @@ server.tool(
       config.default_ordering = default_ordering;
       configChanged = true;
     }
+    if (chrome_profile !== undefined && chrome_profile !== null) {
+      config.chrome_profile = chrome_profile;
+      configChanged = true;
+    }
     if (configChanged) {
       config.setup_complete = true;
       saveDeliberationConfig(config);
@@ -3459,7 +3477,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (all detected speakers join)" : "manual (user selects)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (all detected speakers join)" : "manual (user selects)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
