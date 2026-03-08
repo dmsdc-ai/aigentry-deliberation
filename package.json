@@ -29,6 +29,7 @@
   },
   "files": [
     "index.js",
+    "decision-engine.js",
     "model-router.js",
     "install.js",
     "doctor.js",
