@@ -13,7 +13,7 @@
  *   3. Registers MCP server in ~/.claude/.mcp.json (Claude Code)
  *   4. Registers MCP server in ~/.gemini/settings.json (Gemini CLI)
  *   5. Ready to use — next Claude Code or Gemini CLI session will auto-load
- *   6. 스킬 파일 설치 (~/.claude/skills/deliberation-gate/SKILL.md)
+ *   6. Installs skill file (~/.claude/skills/deliberation-gate/SKILL.md)
  */
 
 import { execSync } from "node:child_process";
@@ -81,15 +81,15 @@ function copyDirRecursive(src, dest) {
 }
 
 function install() {
-  console.log("\n🎯 Deliberation MCP Server — 설치 시작\n");
+  console.log("\n🎯 Deliberation MCP Server — Installation started\n");
 
   // Step 1: Create install directory
-  log("📁 설치 디렉토리 생성...");
+  log("📁 Creating install directory...");
   fs.mkdirSync(INSTALL_DIR, { recursive: true });
   log(`   → ${INSTALL_DIR}`);
 
   // Step 2: Copy files
-  log("📦 서버 파일 복사...");
+  log("📦 Copying server files...");
   let copied = 0;
   for (const file of FILES_TO_COPY) {
     if (copyFileIfExists(path.join(__dirname, file), path.join(INSTALL_DIR, file))) {
@@ -103,23 +103,23 @@ function install() {
       copied++;
     }
   }
-  log(`   → ${copied}개 항목 복사 완료`);
+  log(`   → ${copied} item(s) copied`);
 
   // Step 3: Install dependencies
-  log("📥 의존성 설치...");
+  log("📥 Installing dependencies...");
   try {
     execSync("npm install --production --no-audit --no-fund", {
       cwd: INSTALL_DIR,
       stdio: "pipe",
     });
-    log("   → npm install 완료");
+    log("   → npm install complete");
   } catch (err) {
-    log(`   ⚠️ npm install 실패: ${err.message}`);
-    log("   수동 실행: cd ~/.local/lib/mcp-deliberation && npm install");
+    log(`   ⚠️ npm install failed: ${err.message}`);
+    log("   Manual fix: cd ~/.local/lib/mcp-deliberation && npm install");
   }
 
   // Step 4: Register MCP server
-  log("🔧 Claude Code MCP 서버 등록...");
+  log("🔧 Registering Claude Code MCP server...");
   const claudeDir = path.join(HOME, ".claude");
   fs.mkdirSync(claudeDir, { recursive: true });
 
@@ -142,11 +142,11 @@ function install() {
 
   fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
   log(alreadyRegistered
-    ? "   → 기존 등록 업데이트 완료"
-    : "   → 새로 등록 완료");
+    ? "   → Existing registration updated"
+    : "   → Registered successfully");
 
   // Step 5: Register Gemini CLI MCP server
-  log("🔧 Gemini CLI MCP 서버 등록 시도...");
+  log("🔧 Registering Gemini CLI MCP server...");
   const geminiDir = path.join(HOME, ".gemini");
   if (!fs.existsSync(geminiDir)) fs.mkdirSync(geminiDir, { recursive: true });
 
@@ -169,8 +169,8 @@ function install() {
 
   fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
   log(geminiAlreadyRegistered
-    ? "   → Gemini CLI 기존 등록 업데이트 완료"
-    : "   → Gemini CLI 새로 등록 완료");
+    ? "   → Gemini CLI existing registration updated"
+    : "   → Gemini CLI registered successfully");
 
   // Step 6: Make session-monitor.sh executable
   const monitorScript = path.join(INSTALL_DIR, "session-monitor.sh");
@@ -187,9 +187,9 @@ function install() {
   }
 
   // Step 7: Deploy deliberation-gate skill
-  log("🎓 deliberation-gate 스킬 파일 설치...");
+  log("🎓 Installing deliberation-gate skill file...");
   if (!fs.existsSync(SKILL_SRC)) {
-    log("   ⚠️ 스킬 소스 파일 없음, 스킵: " + SKILL_SRC);
+    log("   ⚠️ Skill source file not found, skipping: " + SKILL_SRC);
   } else {
     try {
       fs.mkdirSync(SKILL_DEST_DIR, { recursive: true });
@@ -198,11 +198,11 @@ function install() {
         const existing = fs.readFileSync(SKILL_DEST, "utf-8");
         const incoming = fs.readFileSync(SKILL_SRC, "utf-8");
         if (existing === incoming) {
-          log("   → 이미 최신 상태, 스킵");
+          log("   → Already up to date, skipping");
           shouldCopy = false;
         } else {
           fs.copyFileSync(SKILL_DEST, SKILL_DEST + ".backup");
-          log("   → 기존 파일 백업: SKILL.md.backup");
+          log("   → Existing file backed up: SKILL.md.backup");
         }
       }
       if (shouldCopy) {
@@ -210,7 +210,7 @@ function install() {
         log("   → " + SKILL_DEST);
       }
     } catch (err) {
-      log(`   ⚠️ 스킬 설치 실패: ${err.message}`);
+      log(`   ⚠️ Skill installation failed: ${err.message}`);
     }
   }
 
@@ -224,15 +224,15 @@ function install() {
     };
     fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
   } catch (err) {
-    log(`   ⚠️ manifest 작성 실패: ${err.message}`);
+    log(`   ⚠️ Failed to write manifest: ${err.message}`);
   }
 
   // Done
-  console.log("\n✅ 설치 완료!\n");
-  console.log("  다음 단계:");
-  console.log("  1. Claude Code 또는 Gemini CLI 세션을 재시작하세요");
-  console.log("  2. \"토론 시작해\" 또는 deliberation_start(topic: \"...\") 호출");
-  console.log("  3. 첫 사용 시 온보딩 위저드가 기본 설정을 안내합니다\n");
+  console.log("\n✅ Installation complete!\n");
+  console.log("  Next steps:");
+  console.log("  1. Restart your Claude Code or Gemini CLI session");
+  console.log("  2. Call deliberation_start(topic: \"...\") to start a deliberation");
+  console.log("  3. On first use, the onboarding wizard will guide you through initial setup\n");
 }
 
 // Entry point
@@ -247,23 +247,23 @@ Usage:
   node install.js
 
 Options:
-  --help, -h     이 도움말 표시
-  --uninstall    서버 제거
-  --force        기존 스킬 파일 비교 없이 강제 덮어쓰기
+  --help, -h     Show this help message
+  --uninstall    Remove the server
+  --force        Overwrite existing skill file without comparison
 
-기능:
-  - 서버 파일을 설치 경로에 복사
-  - npm 의존성 설치
-  - Claude Code / Gemini CLI MCP 서버 등록
-  - 스킬 파일 설치 (~/.claude/skills/deliberation-gate/SKILL.md)
+Features:
+  - Copies server files to install directory
+  - Installs npm dependencies
+  - Registers MCP server in Claude Code / Gemini CLI
+  - Installs skill file (~/.claude/skills/deliberation-gate/SKILL.md)
 
-설치 경로: ${INSTALL_DIR}
-MCP 설정:  ${MCP_CONFIG}
-Gemini:    ${GEMINI_CONFIG}
-스킬 경로: ${SKILL_DEST}
+Install path: ${INSTALL_DIR}
+MCP config:   ${MCP_CONFIG}
+Gemini:       ${GEMINI_CONFIG}
+Skill path:   ${SKILL_DEST}
 `);
 } else if (args.includes("--uninstall") || args.includes("uninstall")) {
-  console.log("\n🗑️ Deliberation MCP Server 제거\n");
+  console.log("\n🗑️ Deliberation MCP Server — Uninstalling\n");
 
   // Remove from Claude MCP config
   if (fs.existsSync(MCP_CONFIG)) {
@@ -272,7 +272,7 @@ Gemini:    ${GEMINI_CONFIG}
       if (mcpConfig.mcpServers?.deliberation) {
         delete mcpConfig.mcpServers.deliberation;
         fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-        log("Claude Code MCP 등록 해제 완료");
+        log("Claude Code MCP server unregistered");
       }
     } catch { /* ignore */ }
   }
@@ -284,7 +284,7 @@ Gemini:    ${GEMINI_CONFIG}
       if (geminiConfig.mcpServers?.deliberation) {
         delete geminiConfig.mcpServers.deliberation;
         fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
-        log("Gemini CLI MCP 등록 해제 완료");
+        log("Gemini CLI MCP server unregistered");
       }
     } catch { /* ignore */ }
   }
@@ -304,20 +304,20 @@ Gemini:    ${GEMINI_CONFIG}
     if (fs.existsSync(skillPath)) {
       try {
         fs.rmSync(skillPath, { force: true });
-        log(`스킬 파일 삭제: ${skillPath}`);
+        log(`Skill file removed: ${skillPath}`);
         const backupPath = skillPath + ".backup";
         if (fs.existsSync(backupPath)) {
-          log(`  💡 백업 파일이 남아 있습니다: ${backupPath}`);
-          log(`     복원하려면: cp "${backupPath}" "${skillPath}"`);
+          log(`  💡 Backup file remains: ${backupPath}`);
+          log(`     To restore: cp "${backupPath}" "${skillPath}"`);
         }
         // Remove directory if empty
         const dir = path.dirname(skillPath);
         if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
           fs.rmdirSync(dir);
-          log(`빈 스킬 디렉토리 삭제: ${dir}`);
+          log(`Empty skill directory removed: ${dir}`);
         }
       } catch (err) {
-        log(`  ⚠️ 스킬 파일 삭제 실패: ${err.message}`);
+        log(`  ⚠️ Failed to remove skill file: ${err.message}`);
       }
     }
   }
@@ -325,10 +325,10 @@ Gemini:    ${GEMINI_CONFIG}
   // Remove install directory
   if (fs.existsSync(INSTALL_DIR)) {
     fs.rmSync(INSTALL_DIR, { recursive: true, force: true });
-    log("설치 디렉토리 삭제 완료");
+    log("Install directory removed");
   }
 
-  console.log("\n✅ 제거 완료. Claude Code / Gemini CLI를 재시작하세요.\n");
+  console.log("\n✅ Uninstall complete. Please restart Claude Code / Gemini CLI.\n");
 } else {
   install();
 }

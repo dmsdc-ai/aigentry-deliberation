@@ -216,25 +216,25 @@ function suggestFix(serverName, server, issue) {
       }
       if (isNpxCommand(server)) {
         const pkg = (server.args || []).find((a) => a.startsWith("@") || !a.startsWith("-"));
-        return pkg ? `npx -y ${pkg}  # npx 서버는 자동 설치됩니다` : null;
+        return pkg ? `npx -y ${pkg}  # npx server will be installed automatically` : null;
       }
-      return `# ${serverName}: 서버 파일을 올바른 경로에 설치하세요`;
+      return `# ${serverName}: install the server file to the correct path`;
 
     case "temp_path": {
       const tempArg = (server.args || []).find((a) => isTempPath(a));
       if (serverName === "deliberation" || serverName === "mcp-deliberation") {
-        return `npx @dmsdc-ai/aigentry-deliberation install  # 영구 경로로 재설치`;
+        return `npx @dmsdc-ai/aigentry-deliberation install  # reinstall to permanent path`;
       }
       if (serverName.includes("brain") || serverName.includes("aigentry-brain")) {
-        return `npx @dmsdc-ai/aigentry-brain install  # 영구 경로로 재설치`;
+        return `npx @dmsdc-ai/aigentry-brain install  # reinstall to permanent path`;
       }
-      return `# ${serverName}: 임시 경로(${tempArg}) → 영구 경로로 변경 필요`;
+      return `# ${serverName}: temporary path (${tempArg}) → change to permanent path`;
     }
 
     case "module_not_found":
       if (isNpxCommand(server)) {
         const pkg = (server.args || []).find((a) => a.startsWith("@") || !a.startsWith("-"));
-        return pkg ? `npm install -g ${pkg}` : `# ${serverName}: 패키지를 전역 설치하세요`;
+        return pkg ? `npm install -g ${pkg}` : `# ${serverName}: install the package globally`;
       }
       return `cd $(dirname "${(server.args || [])[0] || ""}") && npm install`;
 
@@ -259,7 +259,7 @@ function runDiagnostics() {
     console.log(`\n📋 ${cfg.name}: ${cfg.path}`);
 
     if (!fs.existsSync(cfg.path)) {
-      console.log("   ⚠️  설정 파일 없음 (스킵)");
+      console.log("   ⚠️  Config file not found (skipping)");
       continue;
     }
 
@@ -271,13 +271,13 @@ function runDiagnostics() {
     } else {
       servers = parseMcpServersFromJson(content);
       if (servers === null) {
-        console.log("   ❌ JSON 파싱 실패");
+        console.log("   ❌ JSON parsing failed");
         totalIssues++;
         allIssues.push({
           config: cfg.name,
-          server: "(전체)",
-          issue: "JSON 파싱 실패",
-          fix: `# ${cfg.path} 파일의 JSON 문법을 확인하세요`,
+          server: "(all)",
+          issue: "JSON parsing failed",
+          fix: `# Check the JSON syntax in ${cfg.path}`,
         });
         continue;
       }
@@ -285,7 +285,7 @@ function runDiagnostics() {
 
     const serverEntries = Object.entries(servers);
     if (serverEntries.length === 0) {
-      console.log("   (등록된 MCP 서버 없음)");
+      console.log("   (no registered MCP servers)");
       continue;
     }
 
@@ -296,7 +296,7 @@ function runDiagnostics() {
 
       // Check 1: npx command (volatile but expected)
       if (isNpxCommand(server)) {
-        console.log(`   ✅ ${name}: npx (자동 설치)`);
+        console.log(`   ✅ ${name}: npx (auto-install)`);
         continue;
       }
 
@@ -310,22 +310,22 @@ function runDiagnostics() {
       }
 
       if (issues.length === 0) {
-        console.log(`   ✅ ${name}: 정상`);
+        console.log(`   ✅ ${name}: OK`);
       } else {
         for (const issue of issues) {
           totalIssues++;
           const fix = suggestFix(name, server, issue.type);
           const label =
             issue.type === "path_missing"
-              ? "❌ 경로 없음"
-              : "⚠️  임시 경로";
+              ? "❌ Path not found"
+              : "⚠️  Temporary path";
           console.log(`   ${label}: ${name}`);
-          console.log(`      경로: ${issue.detail}`);
-          if (fix) console.log(`      복구: ${fix}`);
+          console.log(`      path: ${issue.detail}`);
+          if (fix) console.log(`      fix: ${fix}`);
           allIssues.push({
             config: cfg.name,
             server: name,
-            issue: label,
+            issue: issue.type === "path_missing" ? "Path not found" : "Temporary path",
             path: issue.detail,
             fix,
           });
@@ -336,11 +336,11 @@ function runDiagnostics() {
 
   // ── Phase 2: MODULE_NOT_FOUND log scan ──
 
-  console.log(`\n📜 로그 스캔 (MODULE_NOT_FOUND)`);
+  console.log(`\n📜 Log scan (MODULE_NOT_FOUND)`);
   const moduleFindings = scanLogsForModuleNotFound(LOG_LOCATIONS);
 
   if (moduleFindings.length === 0) {
-    console.log("   ✅ MODULE_NOT_FOUND 흔적 없음");
+    console.log("   ✅ No MODULE_NOT_FOUND traces found");
   } else {
     // Deduplicate by module path
     const seen = new Set();
@@ -355,24 +355,24 @@ function runDiagnostics() {
       const mod = f.module;
       if (isTempPath(mod)) {
         if (mod.includes("aigentry-brain") || mod.includes("brain")) {
-          fix = `npx @dmsdc-ai/aigentry-brain install  # 임시 경로 → 영구 설치`;
+          fix = `npx @dmsdc-ai/aigentry-brain install  # temporary path → reinstall to permanent path`;
         } else if (mod.includes("deliberation") || mod.includes("mcp-deliberation")) {
-          fix = `npx @dmsdc-ai/aigentry-deliberation install  # 임시 경로 → 영구 설치`;
+          fix = `npx @dmsdc-ai/aigentry-deliberation install  # temporary path → reinstall to permanent path`;
         } else {
-          fix = `# 임시 경로(${mod}) — MCP 설정에서 영구 경로로 변경 필요`;
+          fix = `# temporary path (${mod}) — change to permanent path in MCP config`;
         }
       } else {
-        fix = `# ${mod} 파일이 존재하지 않음 — 해당 MCP 서버 재설치 필요`;
+        fix = `# ${mod} file does not exist — reinstall the MCP server`;
       }
 
-      console.log(`      복구: ${fix}`);
+      console.log(`      fix: ${fix}`);
       allIssues.push({ config: "logs", server: mod, issue: "MODULE_NOT_FOUND", fix });
     }
   }
 
   // ── Phase 3: deliberation self-check ──
 
-  console.log(`\n🔍 deliberation 자체 점검`);
+  console.log(`\n🔍 deliberation self-check`);
   const installDir = IS_WIN
     ? path.join(
         process.env.LOCALAPPDATA ||
@@ -383,43 +383,43 @@ function runDiagnostics() {
 
   const selfPath = path.join(installDir, "index.js");
   if (checkPathExists(selfPath)) {
-    console.log(`   ✅ 서버 파일: ${selfPath}`);
+    console.log(`   ✅ Server file: ${selfPath}`);
   } else {
     totalIssues++;
-    console.log(`   ❌ 서버 파일 없음: ${selfPath}`);
-    console.log(`      복구: npx @dmsdc-ai/aigentry-deliberation install`);
+    console.log(`   ❌ Server file not found: ${selfPath}`);
+    console.log(`      fix: npx @dmsdc-ai/aigentry-deliberation install`);
   }
 
   // Check node_modules
   const nodeModules = path.join(installDir, "node_modules");
   if (checkPathExists(nodeModules)) {
-    console.log(`   ✅ node_modules: 설치됨`);
+    console.log(`   ✅ node_modules: installed`);
   } else {
     totalIssues++;
-    console.log(`   ❌ node_modules 없음`);
-    console.log(`      복구: cd ${installDir} && npm install`);
+    console.log(`   ❌ node_modules not found`);
+    console.log(`      fix: cd ${installDir} && npm install`);
   }
 
   // Syntax check
   try {
     execSync(`node --check "${selfPath}"`, { stdio: "pipe", timeout: 5000 });
-    console.log(`   ✅ 문법 검증: 통과`);
+    console.log(`   ✅ Syntax check: passed`);
   } catch {
     totalIssues++;
-    console.log(`   ❌ 문법 오류 감지`);
-    console.log(`      복구: npx @dmsdc-ai/aigentry-deliberation install`);
+    console.log(`   ❌ Syntax error detected`);
+    console.log(`      fix: npx @dmsdc-ai/aigentry-deliberation install`);
   }
 
   // ── Summary ──
 
   console.log("\n" + "━".repeat(60));
   if (totalIssues === 0) {
-    console.log(`\n✅ 전체 정상 — ${totalServers}개 MCP 서버 점검 완료\n`);
+    console.log(`\n✅ All OK — ${totalServers} MCP server(s) checked\n`);
   } else {
-    console.log(`\n❌ ${totalIssues}개 문제 발견 (${totalServers}개 서버 점검)\n`);
+    console.log(`\n❌ ${totalIssues} issue(s) found (${totalServers} server(s) checked)\n`);
 
     if (allIssues.length > 0) {
-      console.log("📌 즉시 복구 커맨드:\n");
+      console.log("📌 Recovery commands:\n");
       const fixSet = new Set();
       for (const issue of allIssues) {
         if (issue.fix && !fixSet.has(issue.fix)) {

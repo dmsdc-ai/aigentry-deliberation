@@ -1,27 +1,27 @@
 {
   "presets": {
     "balanced": {
-      "description": "균형 잡힌 토론 — 비판, 구현, 중재 관점",
+      "description": "Balanced discussion — critic, implementer, mediator perspectives",
       "roles": ["critic", "implementer", "mediator"]
     },
     "debate": {
-      "description": "찬반 토론 — 비판자 중심 + 중재자",
+      "description": "Pro/con debate — critic-focused with mediator",
       "roles": ["critic", "critic", "mediator"]
     },
     "research": {
-      "description": "연구 중심 — 연구자 다수 + 비판적 검증",
+      "description": "Research-driven — multiple researchers with critical validation",
       "roles": ["researcher", "researcher", "critic"]
     },
     "brainstorm": {
-      "description": "자유 브레인스토밍 — 역할 제한 없음",
+      "description": "Free brainstorming — no role constraints",
       "roles": ["free", "free", "free"]
     },
     "review": {
-      "description": "코드/설계 리뷰 — 비판, 구현, 연구 관점",
+      "description": "Code/design review — critic, implementer, researcher perspectives",
       "roles": ["critic", "implementer", "researcher"]
     },
     "consensus": {
-      "description": "합의 도출 — 중재자 중심",
+      "description": "Consensus building — mediator-focused",
       "roles": ["mediator", "critic", "implementer"]
     }
   }

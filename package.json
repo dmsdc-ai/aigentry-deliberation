@@ -29,6 +29,7 @@
   },
   "files": [
     "index.js",
+    "i18n.js",
     "decision-engine.js",
     "model-router.js",
     "install.js",

@@ -22,11 +22,11 @@ if (_cliArg === "--help" || _cliArg === "-h") {
 MCP Deliberation Server
 
 Usage:
-  npx @dmsdc-ai/aigentry-deliberation install     설치 (MCP 서버 등록)
-  npx @dmsdc-ai/aigentry-deliberation uninstall    제거
-  npx @dmsdc-ai/aigentry-deliberation              MCP 서버 실행 (stdio)
+  npx @dmsdc-ai/aigentry-deliberation install     Install (register MCP server)
+  npx @dmsdc-ai/aigentry-deliberation uninstall    Uninstall
+  npx @dmsdc-ai/aigentry-deliberation              Run MCP server (stdio)
 
-설치 후 Claude Code를 재시작하면 자동으로 사용 가능합니다.
+After installation, restart Claude Code to start using it.
 `);
   process.exit(0);
 }
@@ -34,34 +34,34 @@ Usage:
 /**
  * MCP Deliberation Server (Global) — Multi-Session + Transport Routing + Cross-Platform + BrowserControlPort
  *
- * 모든 프로젝트에서 사용 가능한 AI 간 deliberation 서버.
- * 동시에 여러 deliberation을 병렬 진행할 수 있다.
+ * A global AI deliberation server usable across all projects.
+ * Multiple deliberations can run in parallel simultaneously.
  *
- * 상태 저장: $INSTALL_DIR/state/{project-slug}/sessions/{id}.json
+ * State storage: $INSTALL_DIR/state/{project-slug}/sessions/{id}.json
  *   macOS/Linux: ~/.local/lib/mcp-deliberation/
  *   Windows:     %LOCALAPPDATA%/mcp-deliberation/
  *
  * Tools:
- *   deliberation_start        새 토론 시작 → session_id 반환
- *   deliberation_status       세션 상태 조회 (session_id 선택적)
- *   deliberation_list_active  진행 중인 모든 세션 목록
- *   deliberation_context      프로젝트 컨텍스트 로드
- *   deliberation_respond      응답 제출 (session_id 필수)
- *   deliberation_history      토론 기록 조회 (session_id 선택적)
- *   deliberation_synthesize   합성 보고서 생성 (session_id 선택적)
- *   deliberation_list         과거 아카이브 목록
- *   deliberation_reset        세션 초기화 (session_id 선택적, 없으면 전체)
- *   deliberation_speaker_candidates      선택 가능한 스피커 후보(로컬 CLI + 브라우저 LLM 탭) 조회
- *   deliberation_browser_llm_tabs      브라우저 LLM 탭 목록 조회
- *   deliberation_browser_auto_turn      브라우저 LLM에 자동으로 턴을 전송하고 응답을 수집 (CDP 기반)
- *   deliberation_cli_auto_turn          CLI speaker에 자동으로 턴을 전송하고 응답을 수집
- *   deliberation_request_review         코드 리뷰 요청 (CLI 리뷰어 자동 호출, sync/async 모드)
- *   decision_start             새 의사결정 세션 시작 (템플릿 지원)
- *   decision_status            의사결정 세션 상태 조회
- *   decision_respond           user_probe 갈등 질문에 대한 사용자 응답 제출
- *   decision_resume            일시 중지된 세션 재개
- *   decision_history           과거 의사결정 기록 조회
- *   decision_templates         Micro-Decision 템플릿 목록
+ *   deliberation_start        Start a new deliberation → returns session_id
+ *   deliberation_status       Query session status (session_id optional)
+ *   deliberation_list_active  List all active sessions
+ *   deliberation_context      Load project context
+ *   deliberation_respond      Submit a response (session_id required)
+ *   deliberation_history      Query deliberation history (session_id optional)
+ *   deliberation_synthesize   Generate synthesis report (session_id optional)
+ *   deliberation_list         List past archives
+ *   deliberation_reset        Reset session (session_id optional, resets all if omitted)
+ *   deliberation_speaker_candidates      Query available speaker candidates (local CLI + browser LLM tabs)
+ *   deliberation_browser_llm_tabs      Query browser LLM tab list
+ *   deliberation_browser_auto_turn      Auto-send turn to browser LLM and collect response (CDP-based)
+ *   deliberation_cli_auto_turn          Auto-send turn to CLI speaker and collect response
+ *   deliberation_request_review         Request code review (auto-invoke CLI reviewers, sync/async mode)
+ *   decision_start             Start a new decision session (template support)
+ *   decision_status            Query decision session status
+ *   decision_respond           Submit user responses to user_probe conflict questions
+ *   decision_resume            Resume a paused session
+ *   decision_history           Query past decision history
+ *   decision_templates         Micro-Decision template list
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -81,6 +81,7 @@ import {
   generateConflictQuestions, buildSynthesis, buildActionPlan,
   loadTemplates, matchTemplate,
 } from "./decision-engine.js";
+import { detectLang, t } from "./i18n.js";
 
 // ── Paths ──────────────────────────────────────────────────────
 
@@ -297,19 +298,19 @@ function applyRolePreset(preset, speakers) {
 
 const DEGRADATION_TIERS = {
   monitoring: {
-    tier1: { name: "tmux", description: "tmux 실시간 모니터링 윈도우", check: () => commandExistsInPath("tmux") },
-    tier2: { name: "logfile", description: "로그 파일 tail 모니터링", check: () => true },
-    tier3: { name: "silent", description: "모니터링 없음 (로그만 기록)", check: () => true },
+    tier1: { name: "tmux", description: "tmux real-time monitoring window", check: () => commandExistsInPath("tmux") },
+    tier2: { name: "logfile", description: "Log file tail monitoring", check: () => true },
+    tier3: { name: "silent", description: "No monitoring (log only)", check: () => true },
   },
   browser: {
-    tier1: { name: "cdp_auto", description: "CDP 자동 전송/수집", check: async () => { try { const res = await fetch("http://127.0.0.1:9222/json/version", { signal: AbortSignal.timeout(2000) }); return res.ok; } catch { return false; } } },
-    tier2: { name: "clipboard", description: "클립보드 기반 수동 전달", check: () => true },
-    tier3: { name: "manual", description: "완전 수동 복사/붙여넣기", check: () => true },
+    tier1: { name: "cdp_auto", description: "CDP auto send/collect", check: async () => { try { const res = await fetch("http://127.0.0.1:9222/json/version", { signal: AbortSignal.timeout(2000) }); return res.ok; } catch { return false; } } },
+    tier2: { name: "clipboard", description: "Clipboard-based manual transfer", check: () => true },
+    tier3: { name: "manual", description: "Fully manual copy/paste", check: () => true },
   },
   terminal: {
-    tier1: { name: "auto_open", description: "터미널 앱 자동 오픈", check: () => process.platform === "darwin" || process.platform === "linux" || process.platform === "win32" },
-    tier2: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
-    tier3: { name: "none", description: "터미널 자동 오픈 불가", check: () => true },
+    tier1: { name: "auto_open", description: "Auto-open terminal app", check: () => process.platform === "darwin" || process.platform === "linux" || process.platform === "win32" },
+    tier2: { name: "none", description: "Cannot auto-open terminal", check: () => true },
+    tier3: { name: "none", description: "Cannot auto-open terminal", check: () => true },
   },
 };
 
@@ -338,7 +339,7 @@ function formatDegradationReport(levels) {
   return lines.join("\n");
 }
 
-const PRODUCT_DISCLAIMER = "ℹ️ 이 도구는 외부 웹사이트를 영구 수정하지 않습니다. 브라우저 문맥을 읽기 전용으로 참조하여 발화자를 라우팅합니다.";
+const PRODUCT_DISCLAIMER = "ℹ️ This tool does not permanently modify external websites. It reads browser context in read-only mode to route speakers.";
 const LOCKS_SUBDIR = ".locks";
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 8000;
@@ -396,7 +397,7 @@ function safeToolHandler(toolName, handler) {
     } catch (error) {
       const message = formatRuntimeError(error);
       appendRuntimeLog("ERROR", `${toolName}: ${message}`);
-      return { content: [{ type: "text", text: `❌ ${toolName} 실패: ${message}` }] };
+      return { content: [{ type: "text", text: t(`❌ ${toolName} failed: ${message}`, `❌ ${toolName} 실패: ${message}`, "en") }] };
     }
   };
 }
@@ -675,7 +676,7 @@ function resolveClipboardWriter() {
 function readClipboardText() {
   const tool = resolveClipboardReader();
   if (!tool) {
-    throw new Error("지원되는 클립보드 읽기 명령이 없습니다 (pbpaste/wl-paste/xclip/xsel 등).");
+    throw new Error("No supported clipboard read command found (pbpaste/wl-paste/xclip/xsel etc).");
   }
   return execFileSync(tool.cmd, tool.args, {
     encoding: "utf-8",
@@ -687,7 +688,7 @@ function readClipboardText() {
 function writeClipboardText(text) {
   const tool = resolveClipboardWriter();
   if (!tool) {
-    throw new Error("지원되는 클립보드 쓰기 명령이 없습니다 (pbcopy/wl-copy/xclip/xsel 등).");
+    throw new Error("No supported clipboard write command found (pbcopy/wl-copy/xclip/xsel etc).");
   }
   execFileSync(tool.cmd, tool.args, {
     input: text,
@@ -739,7 +740,7 @@ function parseInjectedBrowserTabsFromEnv() {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
-      return { tabs: [], note: "DELIBERATION_BROWSER_TABS_JSON 형식 오류: JSON 배열이어야 합니다." };
+      return { tabs: [], note: "DELIBERATION_BROWSER_TABS_JSON format error: must be a JSON array." };
     }
 
     const tabs = dedupeBrowserTabs(parsed.map(item => ({
@@ -749,11 +750,11 @@ function parseInjectedBrowserTabsFromEnv() {
     })));
     return {
       tabs,
-      note: tabs.length > 0 ? `환경변수 탭 주입 사용: ${tabs.length}개` : "DELIBERATION_BROWSER_TABS_JSON에 유효한 LLM URL이 없습니다.",
+      note: tabs.length > 0 ? `Environment variable tab injection: ${tabs.length} tabs` : "No valid LLM URLs found in DELIBERATION_BROWSER_TABS_JSON.",
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown error";
-    return { tabs: [], note: `DELIBERATION_BROWSER_TABS_JSON 파싱 실패: ${reason}` };
+    return { tabs: [], note: `Failed to parse DELIBERATION_BROWSER_TABS_JSON: ${reason}` };
   }
 }
 
@@ -833,7 +834,7 @@ function inferBrowserFromCdpEndpoint(endpoint) {
 function summarizeFailures(items = [], max = 3) {
   if (!Array.isArray(items) || items.length === 0) return null;
   const shown = items.slice(0, max);
-  const suffix = items.length > max ? ` 외 ${items.length - max}개` : "";
+  const suffix = items.length > max ? ` and ${items.length - max} more` : "";
   return `${shown.join(", ")}${suffix}`;
 }
 
@@ -872,14 +873,14 @@ async function collectBrowserLlmTabsViaCdp() {
     const failSummary = summarizeFailures(failures);
     return {
       tabs: uniqTabs,
-      note: failSummary ? `일부 CDP 엔드포인트 접근 실패: ${failSummary}` : null,
+      note: failSummary ? `Some CDP endpoint access failed: ${failSummary}` : null,
     };
   }
 
   const failSummary = summarizeFailures(failures);
   return {
     tabs: [],
-    note: `CDP에서 LLM 탭을 찾지 못했습니다. 브라우저를 --remote-debugging-port=9222로 실행하거나 DELIBERATION_BROWSER_TABS_JSON으로 탭 목록을 주입하세요.${failSummary ? ` (실패: ${failSummary})` : ""}`,
+    note: `No LLM tabs found via CDP. Run browser with --remote-debugging-port=9222 or inject tab list via DELIBERATION_BROWSER_TABS_JSON.${failSummary ? ` (failed: ${failSummary})` : ""}`,
   };
 }
 
@@ -909,7 +910,7 @@ async function ensureCdpAvailable() {
       if (!chromeBin) {
         return {
           available: false,
-          reason: "Chrome/Chromium을 찾을 수 없습니다. google-chrome 또는 chromium을 설치하고 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+          reason: "Chrome/Chromium not found. Install google-chrome or chromium and run with --remote-debugging-port=9222.",
         };
       }
       const googleDir = path.join(os.homedir(), ".config", "google-chrome");
@@ -930,7 +931,7 @@ async function ensureCdpAvailable() {
       if (!chromeBin) {
         return {
           available: false,
-          reason: "Chrome/Edge를 찾을 수 없습니다. Chrome을 설치하거나 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+          reason: "Chrome/Edge not found. Install Chrome or run with --remote-debugging-port=9222.",
         };
       }
       const chromeDir = path.join(localAppData, "Google", "Chrome", "User Data");
@@ -939,7 +940,7 @@ async function ensureCdpAvailable() {
     } else {
       return {
         available: false,
-        reason: "Chrome CDP를 활성화할 수 없습니다. Chrome을 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+        reason: "Cannot activate Chrome CDP. Run Chrome with --remote-debugging-port=9222.",
       };
     }
 
@@ -986,7 +987,7 @@ async function ensureCdpAvailable() {
     } catch {
       return {
         available: false,
-        reason: `Chrome 자동 실행에 실패했습니다. Chrome을 수동으로 --remote-debugging-port=9222 --user-data-dir=~/.chrome-cdp 옵션과 함께 실행해주세요.`,
+        reason: `Failed to auto-launch Chrome. Manually run Chrome with --remote-debugging-port=9222 --user-data-dir=~/.chrome-cdp.`,
       };
     }
 
@@ -1005,20 +1006,20 @@ async function ensureCdpAvailable() {
 
     return {
       available: false,
-      reason: "Chrome을 실행했지만 CDP에 연결할 수 없습니다. Chrome을 완전히 종료한 후 다시 시도해주세요. (이미 실행 중인 Chrome이 CDP 없이 시작된 경우 재시작 필요)",
+      reason: "Chrome launched but cannot connect to CDP. Fully close Chrome and try again. (Restart required if Chrome was started without CDP)",
     };
   }
 
   // Unreachable (all platforms handled above), but keep as safety net
   return {
     available: false,
-    reason: "Chrome CDP를 활성화할 수 없습니다. Chrome을 --remote-debugging-port=9222 옵션과 함께 실행해주세요.",
+    reason: "Cannot activate Chrome CDP. Run Chrome with --remote-debugging-port=9222.",
   };
 }
 
 function collectBrowserLlmTabsViaAppleScript() {
   if (process.platform !== "darwin") {
-    return { tabs: [], note: "AppleScript 탭 스캔은 macOS에서만 지원됩니다." };
+    return { tabs: [], note: "AppleScript tab scanning is only supported on macOS." };
   }
 
   const escapedDomains = DEFAULT_LLM_DOMAINS.map(d => d.replace(/"/g, '\\"'));
@@ -1104,14 +1105,14 @@ return outText`;
     return {
       tabs,
       note: errors.length > 0
-        ? `일부 브라우저 접근 실패: ${errors.map(e => `${e.browser} (${e.url})`).join(", ")}`
+        ? `Some browser access failed: ${errors.map(e => `${e.browser} (${e.url})`).join(", ")}`
         : null,
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown error";
     return {
       tabs: [],
-      note: `브라우저 탭 스캔 실패: ${reason}. macOS 자동화 권한(터미널 -> 브라우저 제어)을 확인하세요.`,
+      note: `Browser tab scan failed: ${reason}. Check macOS automation permissions (Terminal -> Browser control).`,
     };
   }
 }
@@ -1128,7 +1129,7 @@ async function collectBrowserLlmTabs() {
   if (mode === "off") {
     return {
       tabs: dedupeBrowserTabs(tabs),
-      note: notes.length > 0 ? notes.join(" | ") : "브라우저 탭 자동 스캔이 비활성화되었습니다.",
+      note: notes.length > 0 ? notes.join(" | ") : "Browser tab auto-scanning is disabled.",
     };
   }
 
@@ -1138,7 +1139,7 @@ async function collectBrowserLlmTabs() {
     tabs.push(...mac.tabs);
     if (mac.note) notes.push(mac.note);
   } else if (mode === "applescript" && process.platform !== "darwin") {
-    notes.push("AppleScript 스캔은 macOS 전용입니다. CDP 스캔으로 전환하세요.");
+    notes.push("AppleScript scanning is macOS only. Switch to CDP scanning.");
   }
 
   const shouldUseCdp = mode === "auto" || mode === "cdp";
@@ -1211,7 +1212,7 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
     // Ensure CDP is available before probing browser tabs
     const cdpStatus = await ensureCdpAvailable();
     if (cdpStatus.launched) {
-      browserNote = "Chrome CDP 자동 실행됨 (--remote-debugging-port=9222)";
+      browserNote = "Chrome CDP auto-launched (--remote-debugging-port=9222)";
     }
 
     const { tabs, note } = await collectBrowserLlmTabs();
@@ -1345,28 +1346,28 @@ function formatSpeakerCandidatesReport({ candidates, browserNote }) {
   let out = "## Selectable Speakers\n\n";
   out += "### CLI\n";
   if (cli.length === 0) {
-    out += "- (감지된 로컬 CLI 없음)\n\n";
+    out += "- (No local CLI detected)\n\n";
   } else {
     out += `${cli.map(c => {
-      const status = c.live === false ? " ❌ 실행 불가" : c.live === true ? " ✅ 실행 가능" : "";
+      const status = c.live === false ? " ❌ not executable" : c.live === true ? " ✅ executable" : "";
       return `- \`${c.speaker}\` (command: ${c.command})${status}`;
     }).join("\n")}\n\n`;
   }
 
-  out += "### Browser LLM (감지됨)\n";
+  out += "### Browser LLM (detected)\n";
   if (detected.length === 0) {
-    out += "- (브라우저에서 감지된 LLM 탭 없음)\n";
+    out += "- (No LLM tabs detected in browser)\n";
   } else {
     out += `${detected.map(c => {
-      const icon = c.cdp_available ? "⚡자동" : "📋클립보드";
+      const icon = c.cdp_available ? "⚡auto" : "📋clipboard";
       const extTag = String(c.url || "").startsWith("chrome-extension://") ? " [Extension]" : "";
       return `- \`${c.speaker}\` [${icon}]${extTag} [${c.browser}] ${c.title}\n  ${c.url}`;
     }).join("\n")}\n`;
   }
 
-  out += "\n### Web LLM (자동 등록)\n";
+  out += "\n### Web LLM (auto-registered)\n";
   out += `${autoReg.map(c => {
-    const icon = c.cdp_available ? "⚡자동" : "📋클립보드";
+    const icon = c.cdp_available ? "⚡auto" : "📋clipboard";
     return `- \`${c.speaker}\` [${icon}] — ${c.title} (${c.url})`;
   }).join("\n")}\n`;
 
@@ -1477,11 +1478,11 @@ function resolveTransportForSpeaker(state, speaker) {
 
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
-  claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "프롬프트"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
-  codex: { cmd: "codex", flags: 'exec --model gpt-5.4-codex', example: 'codex exec --model gpt-5.4-codex "프롬프트"', modelFlag: '--model', defaultModel: 'gpt-5.4-codex', provider: 'chatgpt' },
-  gemini: { cmd: "gemini", flags: '', example: 'gemini "프롬프트"', modelFlag: '--model', provider: 'gemini' },
-  aider: { cmd: "aider", flags: '--message', example: 'aider --message "프롬프트"', modelFlag: '--model', provider: 'chatgpt' },
-  cursor: { cmd: "cursor", flags: '', example: 'cursor "프롬프트"', modelFlag: null, provider: 'chatgpt' },
+  claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "prompt"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
+  codex: { cmd: "codex", flags: 'exec --model gpt-5.4-codex', example: 'codex exec --model gpt-5.4-codex "prompt"', modelFlag: '--model', defaultModel: 'gpt-5.4-codex', provider: 'chatgpt' },
+  gemini: { cmd: "gemini", flags: '', example: 'gemini "prompt"', modelFlag: '--model', provider: 'gemini' },
+  aider: { cmd: "aider", flags: '--message', example: 'aider --message "prompt"', modelFlag: '--model', provider: 'chatgpt' },
+  cursor: { cmd: "cursor", flags: '', example: 'cursor "prompt"', modelFlag: null, provider: 'chatgpt' },
 };
 
 function formatTransportGuidance(transport, state, speaker) {
@@ -1493,23 +1494,23 @@ function formatTransportGuidance(transport, state, speaker) {
       let modelGuide = "";
       if (hint) {
         const prefix = hint.envPrefix || '';
-        invocationGuide = `\n\n**CLI 호출 방법:** \`${hint.example}\`\n(플래그: \`${prefix}${hint.cmd} ${hint.flags}\`)`;
+        invocationGuide = `\n\n**CLI invocation:** \`${hint.example}\`\n(flags: \`${prefix}${hint.cmd} ${hint.flags}\`)`;
         if (hint.modelFlag && hint.provider) {
           const cliModel = getModelSelectionForTurn(state, speaker, hint.provider);
           if (cliModel.model !== 'default') {
-            modelGuide = `\n**추천 모델:** ${cliModel.model} (${cliModel.reason})\n**모델 플래그:** \`${hint.modelFlag} ${cliModel.model}\``;
+            modelGuide = `\n**Recommended model:** ${cliModel.model} (${cliModel.reason})\n**Model flag:** \`${hint.modelFlag} ${cliModel.model}\``;
           }
         }
       }
-      return `CLI speaker입니다. \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 직접 응답하세요.${invocationGuide}${modelGuide}\n\n⛔ **API 호출 금지**: REST API, HTTP 요청, urllib, requests 등으로 LLM API를 직접 호출하지 마세요. 반드시 위 CLI 도구만 사용하세요.`;
+      return `CLI speaker. Respond directly via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.${invocationGuide}${modelGuide}\n\n⛔ **No API calls**: Do not call LLM APIs directly via REST API, HTTP requests, urllib, requests, etc. Only use the CLI tools above.`;
     }
     case "clipboard":
-      return `브라우저 LLM speaker입니다. CDP 자동 연결 시도 중... Chrome이 이미 CDP 없이 실행 중이면 재시작이 필요할 수 있습니다.\n\n⛔ **API 호출 금지**: 이 speaker는 웹 브라우저로만 응답합니다. REST API, HTTP 요청으로 LLM을 호출하지 마세요.`;
+      return `Browser LLM speaker. Attempting CDP auto-connect... Chrome may need to be restarted if already running without CDP.\n\n⛔ **No API calls**: This speaker responds only via web browser. Do not call LLMs via REST API or HTTP requests.`;
     case "browser_auto":
-      return `자동 브라우저 speaker입니다. \`deliberation_browser_auto_turn(session_id: "${sid}")\`으로 자동 진행됩니다. CDP를 통해 브라우저 LLM에 직접 입력하고 응답을 읽습니다.\n\n⛔ **API 호출 금지**: CDP 자동화로만 진행합니다. REST API, HTTP 요청 사용 금지.`;
+      return `Auto browser speaker. Proceed automatically with \`deliberation_browser_auto_turn(session_id: "${sid}")\`. Inputs directly to browser LLM via CDP and reads responses.\n\n⛔ **No API calls**: Proceeds only via CDP automation. No REST API or HTTP requests.`;
     case "manual":
     default:
-      return `수동 speaker입니다. 해당 LLM의 **웹 UI 또는 CLI 도구**를 통해 응답을 받아 \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`로 제출하세요.\n\n⛔ **API 호출 절대 금지**: REST API, HTTP 요청(urllib, requests, fetch 등)으로 LLM API를 직접 호출하는 것은 금지됩니다. 반드시 웹 브라우저 UI 또는 CLI 도구만 사용하세요. API 키로 직접 호출하면 deliberation 참여가 거부됩니다.`;
+      return `Manual speaker. Get a response from the LLM's **web UI or CLI tool** and submit via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.\n\n⛔ **Absolutely no API calls**: Calling LLM APIs directly via REST API, HTTP requests (urllib, requests, fetch, etc.) is forbidden. Only use web browser UI or CLI tools. Direct API key calls will result in deliberation participation being rejected.`;
   }
 }
 
@@ -1641,7 +1642,7 @@ function readContextFromDirs(dirs, maxChars = 15000) {
       }
     }
   }
-  return context || "(컨텍스트 파일을 찾을 수 없습니다)";
+  return context || "(No context files found)";
 }
 
 // ── State helpers ──────────────────────────────────────────────
@@ -1681,15 +1682,15 @@ function listActiveSessions() {
 }
 
 function resolveSessionId(sessionId) {
-  // session_id가 주어지면 그대로 사용
+  // Use session_id directly if provided
   if (sessionId) return sessionId;
 
-  // 없으면 활성 세션이 1개일 때 자동 선택
+  // Auto-select when only one active session
   const active = listActiveSessions();
   if (active.length === 0) return null;
   if (active.length === 1) return active[0].id;
 
-  // 여러 개면 null (목록 표시 필요)
+  // null if multiple (need to show list)
   return "MULTIPLE";
 }
 
@@ -1775,7 +1776,7 @@ const MONITOR_SCRIPT = path.join(INSTALL_DIR, "session-monitor.sh");
 const MONITOR_SCRIPT_WIN = path.join(INSTALL_DIR, "session-monitor-win.js");
 
 function tmuxWindowName(sessionId) {
-  // tmux 윈도우 이름은 짧게 (마지막 부분 제거하고 20자)
+  // Keep tmux window name short (remove last part, 20 chars)
   return sessionId.replace(/[^a-zA-Z0-9가-힣-]/g, "").slice(0, 25);
 }
 
@@ -2243,13 +2244,13 @@ function closeAllMonitorTerminals() {
 function multipleSessionsError() {
   const active = listActiveSessions();
   const list = active.map(s => `- **${s.id}**: "${s.topic}" (Round ${s.current_round}/${s.max_rounds}, next: ${s.current_speaker})`).join("\n");
-  return `여러 활성 세션이 있습니다. session_id를 지정하세요:\n\n${list}`;
+  return t(`Multiple active sessions found. Please specify session_id:\n\n${list}`, `여러 활성 세션이 있습니다. session_id를 지정하세요:\n\n${list}`, "en");
 }
 
 function formatRecentLogForPrompt(state, maxEntries = 4) {
   const entries = Array.isArray(state.log) ? state.log.slice(-Math.max(0, maxEntries)) : [];
   if (entries.length === 0) {
-    return "(아직 이전 응답 없음)";
+    return "(No previous responses yet)";
   }
   return entries.map(e => {
     const content = String(e.content || "").trim();
@@ -2259,7 +2260,7 @@ function formatRecentLogForPrompt(state, maxEntries = 4) {
 
 function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries = 4) {
   const recent = formatRecentLogForPrompt(state, includeHistoryEntries);
-  const extraPrompt = prompt ? `\n[추가 지시]\n${prompt}\n` : "";
+  const extraPrompt = prompt ? `\n[Additional instructions]\n${prompt}\n` : "";
 
   // Role prompt injection
   const speakerRole = (state.speaker_roles || {})[speaker] || "free";
@@ -2281,9 +2282,9 @@ ${recent}
 [/recent_log]${extraPrompt}
 
 [response_rule]
-- 위 토론 맥락을 반영해 ${speaker}의 이번 턴 응답만 작성
-- 마크다운 본문만 출력 (불필요한 머리말/꼬리말 금지)${speakerRole !== "free" ? `\n- 배정된 역할(${speakerRole})의 관점에서 분석하고 응답` : ""}
-- 응답 마지막에 반드시 [AGREE], [DISAGREE], 또는 [CONDITIONAL: 사유] 중 하나를 포함
+- Write only ${speaker}'s response for this turn reflecting the discussion context above
+- Output markdown body only (no unnecessary headers/footers)${speakerRole !== "free" ? `\n- Analyze and respond from the perspective of assigned role (${speakerRole})` : ""}
+- Must include one of [AGREE], [DISAGREE], or [CONDITIONAL: reason] at the end of response
 [/response_rule]
 [/deliberation_turn_request]
 `;
@@ -2292,7 +2293,7 @@ ${recent}
 function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason }) {
   const resolved = resolveSessionId(session_id);
   if (!resolved) {
-    return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+    return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
   }
   if (resolved === "MULTIPLE") {
     return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2301,12 +2302,12 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
   return withSessionLock(resolved, () => {
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: `세션 "${resolved}"이 활성 상태가 아닙니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
     }
 
     const normalizedSpeaker = normalizeSpeaker(speaker);
     if (!normalizedSpeaker) {
-      return { content: [{ type: "text", text: "speaker 값이 비어 있습니다. 응답자 이름을 지정하세요." }] };
+      return { content: [{ type: "text", text: t("Speaker value is empty. Please specify a speaker name.", "speaker 값이 비어 있습니다. 응답자 이름을 지정하세요.", "en") }] };
     }
 
     state.speakers = buildSpeakerOrder(state.speakers, state.current_speaker, "end");
@@ -2321,17 +2322,17 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       return {
         content: [{
           type: "text",
-          text: `[${state.id}] 지금은 **${state.current_speaker}** 차례입니다. ${normalizedSpeaker}는 대기하세요.`,
+          text: t(`[${state.id}] It is currently **${state.current_speaker}**'s turn. ${normalizedSpeaker} please wait.`, `[${state.id}] 지금은 **${state.current_speaker}** 차례입니다. ${normalizedSpeaker}는 대기하세요.`, state?.lang),
         }],
       };
     }
 
-    // turn_id 검증 (선택적 — 제공 시 반드시 일치해야 함)
+    // turn_id validation (optional — must match if provided)
     if (turn_id && state.pending_turn_id && turn_id !== state.pending_turn_id) {
       return {
         content: [{
           type: "text",
-          text: `[${state.id}] turn_id 불일치. 예상: "${state.pending_turn_id}", 수신: "${turn_id}". 오래된 요청이거나 중복 제출일 수 있습니다.`,
+          text: t(`[${state.id}] turn_id mismatch. Expected: "${state.pending_turn_id}", received: "${turn_id}". May be a stale request or duplicate submission.`, `[${state.id}] turn_id 불일치. 예상: "${state.pending_turn_id}", 수신: "${turn_id}". 오래된 요청이거나 중복 제출일 수 있습니다.`, state?.lang),
         }],
       };
     }
@@ -2372,7 +2373,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
         return {
           content: [{
             type: "text",
-            text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n🏁 **모든 라운드 종료!**\ndeliberation_synthesize(session_id: "${state.id}")로 합성 보고서를 작성하세요.`,
+            text: t(`✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} complete. Forum updated (${state.log.length} responses accumulated).\n\n🏁 **All rounds complete!**\nCreate a synthesis report with deliberation_synthesize(session_id: "${state.id}").`, `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n🏁 **모든 라운드 종료!**\ndeliberation_synthesize(session_id: "${state.id}")로 합성 보고서를 작성하세요.`, state?.lang),
           }],
         };
       }
@@ -2387,7 +2388,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n**다음:** ${state.current_speaker} (Round ${state.current_round})`,
+        text: t(`✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} complete. Forum updated (${state.log.length} responses accumulated).\n\n**Next:** ${state.current_speaker} (Round ${state.current_round})`, `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n**다음:** ${state.current_speaker} (Round ${state.current_round})`, state?.lang),
       }],
     };
   });
@@ -2426,11 +2427,11 @@ const server = new McpServer({
 
 server.tool(
   "deliberation_start",
-  "새 deliberation을 시작합니다. 여러 토론을 동시에 진행할 수 있습니다.",
+  "Start a new deliberation. Multiple deliberations can run simultaneously.",
   {
-    topic: z.string().describe("토론 주제"),
-    rounds: z.coerce.number().optional().describe("라운드 수 (미지정 시 config 설정 따름, 기본 3)"),
-    first_speaker: z.string().trim().min(1).max(64).optional().describe("첫 발언자 이름 (미지정 시 speakers의 첫 항목)"),
+    topic: z.string().describe("Discussion topic"),
+    rounds: z.coerce.number().optional().describe("Number of rounds (defaults to config setting, default 3)"),
+    first_speaker: z.string().trim().min(1).max(64).optional().describe("First speaker name (defaults to first item in speakers)"),
     speakers: z.preprocess(
       (v) => {
         const parsed = typeof v === "string" ? JSON.parse(v) : v;
@@ -2439,31 +2440,31 @@ server.tool(
         return parsed.map(item => (typeof item === "object" && item !== null && item.name) ? item.name : item);
       },
       z.array(z.string().trim().min(1).max(64)).min(1).optional()
-    ).describe("참가자 이름 목록. 문자열 배열 또는 {name, role, instructions} 객체 배열 모두 지원"),
+    ).describe("Participant name list. Supports both string arrays and {name, role, instructions} object arrays"),
     speaker_instructions: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.string()).optional()
-    ).describe("speaker별 추가 지시사항 (예: {\"claude\": \"비판적으로 검토\"})"),
+    ).describe("Per-speaker additional instructions (e.g., {\"claude\": \"review critically\"})"),
     require_manual_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("true면 speakers를 반드시 직접 지정해야 시작 (미지정 시 config 설정 따름)"),
+    ).describe("If true, speakers must be explicitly specified to start (defaults to config setting)"),
     auto_discover_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("speakers 생략 시 자동 탐색 여부 (미지정 시 config 설정 따름)"),
+    ).describe("Whether to auto-discover speakers when omitted (defaults to config setting)"),
     participant_types: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["cli", "browser", "browser_auto", "manual"])).optional()
-    ).describe("speaker별 타입 오버라이드 (예: {\"chatgpt\": \"browser_auto\"})"),
+    ).describe("Per-speaker type override (e.g., {\"chatgpt\": \"browser_auto\"})"),
     ordering_strategy: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
-      .describe("발언 순서 전략: auto(스피커 수에 따라 자동), cyclic(순서대로), random(매턴 무작위), weighted-random(덜 말한 사람 우선)"),
+      .describe("Ordering strategy: auto (automatic based on speaker count), cyclic (sequential), random (random each turn), weighted-random (less spoken speakers first)"),
     speaker_roles: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["critic", "implementer", "mediator", "researcher", "free"])).optional()
-    ).describe("speaker별 역할 배정 (예: {\"claude\": \"critic\", \"codex\": \"implementer\"})"),
+    ).describe("Per-speaker role assignment (e.g., {\"claude\": \"critic\", \"codex\": \"implementer\"})"),
     role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
-      .describe("역할 프리셋 (balanced/debate/research/brainstorm/review/consensus). speaker_roles가 명시되면 무시됨"),
+      .describe("Role preset (balanced/debate/research/brainstorm/review/consensus). Ignored if speaker_roles is specified"),
   },
   safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
     // ── First-time onboarding guard ──
@@ -2474,7 +2475,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `🎉 **Deliberation 첫 사용을 환영합니다!**\n\n시작 전에 기본 설정을 해주세요.\n\n**현재 감지된 스피커:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n아래 설정을 한 번에 지정할 수 있습니다:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. 스피커 참여 모드** (\`require_speaker_selection\`)\n   - \`true\` — 매번 참여할 스피커를 직접 선택\n   - \`false\` — 감지된 CLI + 브라우저 LLM 전부 자동 참여\n\n**2. 기본 라운드 수** (\`default_rounds\`)\n   - \`1\` — 빠른 의견 수렴\n   - \`3\` — 기본 (권장)\n   - \`5\` — 심층 토론\n\n**3. 발언 순서 전략** (\`default_ordering\`)\n   - \`"auto"\` — 2명이면 cyclic, 3명 이상이면 weighted-random (권장)\n   - \`"cyclic"\` — 고정 순서\n   - \`"random"\` — 매턴 무작위\n   - \`"weighted-random"\` — 덜 발언한 사람 우선`,
+          text: `🎉 **Welcome to Deliberation!**\n\nPlease configure basic settings before starting.\n\n**Currently detected speakers:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou can set all options at once:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. Speaker participation mode** (\`require_speaker_selection\`)\n   - \`true\` — Select participating speakers each time\n   - \`false\` — All detected CLI + browser LLMs auto-join\n\n**2. Default rounds** (\`default_rounds\`)\n   - \`1\` — Quick consensus\n   - \`3\` — Default (recommended)\n   - \`5\` — Deep discussion\n\n**3. Ordering strategy** (\`default_ordering\`)\n   - \`"auto"\` — cyclic for 2 speakers, weighted-random for 3+ (recommended)\n   - \`"cyclic"\` — Fixed order\n   - \`"random"\` — Random each turn\n   - \`"weighted-random"\` — Less spoken speakers first`,
         }],
       };
     }
@@ -2501,15 +2502,15 @@ server.tool(
     if (!hasManualSpeakers && effectiveRequireManual) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
       const llmSuggested = Array.isArray(speakers) && speakers.length > 0
-        ? `\n\n💡 **LLM이 제안한 스피커:** ${speakers.join(", ")}\n위 제안을 사용하려면 \`require_manual_speakers: true\`와 함께 speakers를 다시 전달하세요.`
+        ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nTo use this suggestion, pass speakers again with \`require_manual_speakers: true\`.`
         : "";
       const configNote = configRequiresSelection
-        ? "\n\n⚙️ `require_speaker_selection: true` 설정에 의해 사용자가 직접 스피커를 선택해야 합니다."
+        ? "\n\n⚙️ `require_speaker_selection: true` setting requires you to manually select speakers."
         : "";
       return {
         content: [{
           type: "text",
-          text: `스피커를 직접 선택해야 deliberation을 시작할 수 있습니다.${configNote}${llmSuggested}\n\n${candidateText}\n\n예시:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["codex", "web-claude-1", "web-chatgpt-1"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\n먼저 deliberation_speaker_candidates를 호출해 현재 선택 가능한 스피커를 확인하세요.`,
+          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["codex", "web-claude-1", "web-chatgpt-1"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
         }],
       };
     }
@@ -2553,7 +2554,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `⚠️ Deliberation에는 최소 2명의 speaker가 필요합니다. 현재 ${speakerOrder.length}명만 지정됨: ${speakerOrder.join(", ")}\n\n사용 가능한 스피커 후보:\n${candidateText}\n\n예시:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "web-gemini-1"])`,
+          text: `⚠️ Deliberation requires at least 2 speakers. Currently only ${speakerOrder.length} specified: ${speakerOrder.join(", ")}\n\nAvailable speaker candidates:\n${candidateText}\n\nExample:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "web-gemini-1"])`,
         }],
       };
     }
@@ -2570,12 +2571,12 @@ server.tool(
     // cli_auto_turn will handle runtime errors per-turn.
     let detectWarningLiveness = "";
     if (nonLiveCli.length > 0) {
-      detectWarningLiveness = `\n\n⚠️ 일부 CLI가 현재 실행 불가 상태이지만 사용자 선택을 존중하여 진행합니다:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\n턴 진행 시 CLI 실행을 재시도합니다. 실패 시 해당 턴에서 오류가 보고됩니다.`;
+      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
     }
 
     const participantMode = hasManualSpeakers
-      ? "수동 지정"
-      : (autoDiscoveredSpeakers.length > 0 ? "자동 탐색(PATH)" : "기본값");
+      ? "manually specified"
+      : (autoDiscoveredSpeakers.length > 0 ? "auto-discovered (PATH)" : "default");
 
     const degradationLevels = await detectDegradationLevels();
 
@@ -2583,6 +2584,7 @@ server.tool(
       id: sessionId,
       project: getProjectSlug(),
       topic,
+      lang: detectLang(topic),
       status: "active",
       max_rounds: rounds,
       current_round: 1,
@@ -2610,7 +2612,7 @@ server.tool(
         return {
           content: [{
             type: "text",
-            text: `❌ 브라우저 LLM speaker가 포함되어 있지만 CDP에 연결할 수 없습니다.\n\n${cdpReady.reason}\n\nCDP 연결 후 다시 deliberation_start를 호출하세요.`,
+            text: `❌ Browser LLM speakers included but cannot connect to CDP.\n\n${cdpReady.reason}\n\nCall deliberation_start again after establishing CDP connection.`,
           }],
         };
       }
@@ -2641,20 +2643,20 @@ server.tool(
     const isWin = process.platform === "win32";
     const terminalMsg = !tmuxOpened
       ? isWin
-        ? `\n⚠️ Windows Terminal을 찾을 수 없어 모니터 터미널 미생성`
-        : `\n⚠️ tmux를 찾을 수 없어 모니터 터미널 미생성`
+        ? `\n⚠️ Windows Terminal not found, monitor terminal not created`
+        : `\n⚠️ tmux not found, monitor terminal not created`
       : physicalOpened
         ? isWin
-          ? `\n🖥️ 모니터 터미널 오픈됨 (Windows Terminal)`
-          : `\n🖥️ 모니터 터미널 오픈됨: tmux new-session -t ${TMUX_SESSION}`
+          ? `\n🖥️ Monitor terminal opened (Windows Terminal)`
+          : `\n🖥️ Monitor terminal opened: tmux new-session -t ${TMUX_SESSION}`
         : isWin
-          ? `\n⚠️ 모니터 터미널 자동 오픈 실패`
-          : `\n⚠️ tmux 윈도우는 생성됐지만 외부 터미널 자동 오픈 실패. 수동 실행: tmux new-session -t ${TMUX_SESSION}`;
+          ? `\n⚠️ Monitor terminal auto-open failed`
+          : `\n⚠️ tmux window created but external terminal auto-open failed. Manual run: tmux new-session -t ${TMUX_SESSION}`;
     const manualNotDetected = hasManualSpeakers
       ? speakerOrder.filter(s => !candidateSnapshot.candidates.some(c => c.speaker === s))
       : [];
     const detectWarning = manualNotDetected.length > 0
-      ? `\n\n⚠️ 현재 환경에서 즉시 검출되지 않은 speaker: ${manualNotDetected.join(", ")}\n(수동 지정으로는 참가 가능)`
+      ? `\n\n⚠️ Speakers not immediately detected in current environment: ${manualNotDetected.join(", ")}\n(Can still participate via manual specification)`
       : "";
 
     const transportSummary = state.participant_profiles.map(p => {
@@ -2666,7 +2668,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Deliberation 시작! Forum이 생성되었습니다.\n\n**세션:** ${sessionId}\n**프로젝트:** ${state.project}\n**주제:** ${topic}\n**라운드:** ${rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n**참가자 구성:** ${participantMode}\n**참가자:** ${speakerOrder.join(", ")}\n**첫 발언:** ${state.current_speaker}\n**동시 진행 세션:** ${active.length}개${terminalMsg}${detectWarning}${detectWarningLiveness}\n\n**역할 배정:**${role_preset ? ` (프리셋: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}\n\n**Transport 라우팅:**\n${transportSummary}\n\n💡 이후 도구 호출 시 session_id: "${sessionId}" 를 사용하세요.\n📋 Forum 상태 조회: \`deliberation_status(session_id: "${sessionId}")\``,
+        text: `✅ Deliberation started! Forum created.\n\n**Session:** ${sessionId}\n**Project:** ${state.project}\n**Topic:** ${topic}\n**Rounds:** ${rounds}\n**Ordering:** ${state.ordering_strategy || "cyclic"}\n**Participant mode:** ${participantMode}\n**Participants:** ${speakerOrder.join(", ")}\n**First speaker:** ${state.current_speaker}\n**Concurrent sessions:** ${active.length}${terminalMsg}${detectWarning}${detectWarningLiveness}\n\n**Role assignments:**${role_preset ? ` (preset: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}\n\n**Transport routing:**\n${transportSummary}\n\n💡 Use session_id: "${sessionId}" for subsequent tool calls.\n📋 Check forum status: \`deliberation_status(session_id: "${sessionId}")\``,
       }],
     };
   })
@@ -2674,10 +2676,10 @@ server.tool(
 
 server.tool(
   "deliberation_speaker_candidates",
-  "사용자가 선택 가능한 스피커 후보(로컬 CLI + 브라우저 LLM 탭)를 조회합니다.",
+  "Query available speaker candidates (local CLI + browser LLM tabs).",
   {
-    include_cli: z.boolean().default(true).describe("로컬 CLI 후보 포함"),
-    include_browser: z.boolean().default(true).describe("브라우저 LLM 탭 후보 포함"),
+    include_cli: z.boolean().default(true).describe("Include local CLI candidates"),
+    include_browser: z.boolean().default(true).describe("Include browser LLM tab candidates"),
   },
   async ({ include_cli, include_browser }) => {
     const snapshot = await collectSpeakerCandidates({ include_cli, include_browser });
@@ -2688,17 +2690,17 @@ server.tool(
 
 server.tool(
   "deliberation_list_active",
-  "현재 프로젝트에서 진행 중인 모든 deliberation 세션 목록을 반환합니다.",
+  "List all active deliberation sessions in the current project.",
   {},
   async () => {
     const active = listActiveSessions();
     if (active.length === 0) {
-      return { content: [{ type: "text", text: "진행 중인 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberations.", "진행 중인 deliberation이 없습니다.", "en") }] };
     }
 
-    let list = `## 진행 중인 Deliberation (${getProjectSlug()}) — ${active.length}개\n\n`;
+    let list = `## Active Deliberations (${getProjectSlug()}) — ${active.length}\n\n`;
     for (const s of active) {
-      list += `### ${s.id}\n- **주제:** ${s.topic}\n- **상태:** ${s.status} | Round ${s.current_round}/${s.max_rounds} | Next: ${s.current_speaker}\n- **응답 수:** ${s.log.length}\n\n`;
+      list += `### ${s.id}\n- **Topic:** ${s.topic}\n- **Status:** ${s.status} | Round ${s.current_round}/${s.max_rounds} | Next: ${s.current_speaker}\n- **Responses:** ${s.log.length}\n\n`;
     }
     return { content: [{ type: "text", text: list }] };
   }
@@ -2706,14 +2708,14 @@ server.tool(
 
 server.tool(
   "deliberation_status",
-  "deliberation 상태를 조회합니다. 활성 세션이 1개면 자동 선택, 여러 개면 session_id 필요.",
+  "Query deliberation status. Auto-selects if only one active session, requires session_id for multiple.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
   },
   async ({ session_id }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다. deliberation_start로 시작하세요." }] };
+      return { content: [{ type: "text", text: t("No active deliberation. Start one with deliberation_start.", "활성 deliberation이 없습니다. deliberation_start로 시작하세요.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2721,13 +2723,13 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state) {
-      return { content: [{ type: "text", text: `세션 "${resolved}"을 찾을 수 없습니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
     }
 
     return {
       content: [{
         type: "text",
-        text: `📋 **Forum 현황** — ${state.id}\n\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**상태:** ${state.status === "active" ? "진행 중" : state.status === "awaiting_synthesis" ? "합성 대기" : state.status === "completed" ? "완성" : state.status} (Round ${state.current_round}/${state.max_rounds})\n**참가자:** ${state.speakers.join(", ")}\n**현재 차례:** ${state.current_speaker}\n**축적 응답:** ${state.log.length}건${state.degradation ? `\n\n**환경 상태:**\n${formatDegradationReport(state.degradation)}` : ""}`,
+        text: `📋 **Forum Status** — ${state.id}\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Status:** ${state.status === "active" ? "active" : state.status === "awaiting_synthesis" ? "awaiting synthesis" : state.status === "completed" ? "completed" : state.status} (Round ${state.current_round}/${state.max_rounds})\n**Participants:** ${state.speakers.join(", ")}\n**Current turn:** ${state.current_speaker}\n**Accumulated responses:** ${state.log.length}${state.degradation ? `\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}` : ""}`,
       }],
     };
   }
@@ -2735,7 +2737,7 @@ server.tool(
 
 server.tool(
   "deliberation_context",
-  "현재 프로젝트의 컨텍스트(md 파일들)를 로드합니다. CWD + Obsidian 자동 감지.",
+  "Load project context (markdown files). Auto-detects CWD + Obsidian.",
   {},
   async () => {
     const dirs = detectContextDirs();
@@ -2743,7 +2745,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `## 프로젝트 컨텍스트 (${getProjectSlug()})\n\n**소스:** ${dirs.join(", ")}\n\n${context}`,
+        text: `## Project Context (${getProjectSlug()})\n\n**Source:** ${dirs.join(", ")}\n\n${context}`,
       }],
     };
   }
@@ -2751,13 +2753,13 @@ server.tool(
 
 server.tool(
   "deliberation_browser_llm_tabs",
-  "현재 브라우저에서 열려 있는 LLM 탭(chatgpt/claude/gemini 등)을 조회합니다.",
+  "Query LLM tabs currently open in the browser (chatgpt/claude/gemini etc).",
   {},
   async () => {
     const { tabs, note } = await collectBrowserLlmTabs();
     if (tabs.length === 0) {
       const suffix = note ? `\n\n${note}` : "";
-      return { content: [{ type: "text", text: `감지된 LLM 탭이 없습니다.${suffix}` }] };
+      return { content: [{ type: "text", text: t(`No LLM tabs detected.${suffix}`, `감지된 LLM 탭이 없습니다.${suffix}`, "en") }] };
     }
 
     const lines = tabs.map((t, i) => `${i + 1}. [${t.browser}] ${t.title}\n   ${t.url}`).join("\n");
@@ -2768,17 +2770,17 @@ server.tool(
 
 server.tool(
   "deliberation_route_turn",
-  "현재 턴의 speaker에 맞는 transport를 자동 결정하고 안내합니다. CLI speaker는 자동 응답 경로, 브라우저 speaker는 클립보드 경로로 라우팅합니다.",
+  "Auto-determine and guide the transport for the current turn's speaker. Routes CLI speakers to auto-response and browser speakers to clipboard.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
-    auto_prepare_clipboard: z.boolean().default(true).describe("브라우저 speaker일 때 자동으로 클립보드 prepare 실행"),
-    prompt: z.string().optional().describe("브라우저 LLM에 추가로 전달할 지시"),
-    include_history_entries: z.number().int().min(0).max(12).default(4).describe("프롬프트에 포함할 최근 로그 개수"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    auto_prepare_clipboard: z.boolean().default(true).describe("Auto-run clipboard prepare for browser speakers"),
+    prompt: z.string().optional().describe("Additional instructions to pass to browser LLM"),
+    include_history_entries: z.number().int().min(0).max(12).default(4).describe("Number of recent log entries to include in prompt"),
   },
   safeToolHandler("deliberation_route_turn", async ({ session_id, auto_prepare_clipboard, prompt, include_history_entries }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2786,7 +2788,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: `세션 "${resolved}"이 활성 상태가 아닙니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
     }
 
     const speaker = state.current_speaker;
@@ -2802,9 +2804,9 @@ server.tool(
 
     let guidance;
     if (isSelfSpeaker) {
-      guidance = `🟢 **본인 턴입니다.** 당신(${speaker})이 현재 speaker입니다.\n\n` +
-        `직접 응답을 작성하여 \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`로 제출하세요.\n\n` +
-        `⚠️ **cli_auto_turn 사용 금지**: 자기 자신을 재귀 호출하면 타임아웃이 발생합니다. 반드시 직접 deliberation_respond를 사용하세요.`;
+      guidance = `🟢 **It's your turn.** You (${speaker}) are the current speaker.\n\n` +
+        `Write your response and submit via \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`.\n\n` +
+        `⚠️ **Do not use cli_auto_turn**: Recursively calling yourself will cause a timeout. You must use deliberation_respond directly.`;
     } else {
       guidance = formatTransportGuidance(transport, state, speaker);
     }
@@ -2854,25 +2856,25 @@ server.tool(
             channel_used: "browser_auto",
             fallback_reason: null,
           });
-          const routeModelInfo = modelSelection.model !== 'default' ? ` | 모델: ${modelSelection.model}` : "";
-          extra = `\n\n⚡ 자동 실행 완료! 브라우저 LLM 응답이 자동으로 제출되었습니다. (${waitResult.data.elapsedMs}ms${routeModelInfo})`;
+          const routeModelInfo = modelSelection.model !== 'default' ? ` | model: ${modelSelection.model}` : "";
+          extra = `\n\n⚡ Auto-execution complete! Browser LLM response was automatically submitted. (${waitResult.data.elapsedMs}ms${routeModelInfo})`;
         } else {
           throw new Error(waitResult.error?.message || "no response received");
         }
       } catch (autoErr) {
         const errMsg = autoErr instanceof Error ? autoErr.message : String(autoErr);
-        extra = `\n\n⚠️ 자동 실행 실패 (${errMsg}). Chrome을 --remote-debugging-port=9222로 재시작하세요.`;
+        extra = `\n\n⚠️ Auto-execution failed (${errMsg}). Restart Chrome with --remote-debugging-port=9222.`;
       }
     }
 
     const profileInfo = profile
-      ? `\n**프로필:** ${profile.type}${profile.url ? ` | ${profile.url}` : ""}${profile.command ? ` | command: ${profile.command}` : ""}`
+      ? `\n**Profile:** ${profile.type}${profile.url ? ` | ${profile.url}` : ""}${profile.command ? ` | command: ${profile.command}` : ""}`
       : "";
 
     return {
       content: [{
         type: "text",
-        text: `## 턴 라우팅 — ${state.id}\n\n**현재 speaker:** ${speaker}\n**Transport:** ${transport}${reason ? ` (fallback: ${reason})` : ""}${profileInfo}\n**역할:** ${(state.speaker_roles || {})[speaker] || "free"}\n**Turn ID:** ${turnId || "(없음)"}\n**라운드:** ${state.current_round}/${state.max_rounds}\n**발언 순서:** ${state.ordering_strategy || "cyclic"}\n\n${guidance}${extra}\n\n${PRODUCT_DISCLAIMER}`,
+        text: `## Turn Routing — ${state.id}\n\n**Current speaker:** ${speaker}\n**Transport:** ${transport}${reason ? ` (fallback: ${reason})` : ""}${profileInfo}\n**Role:** ${(state.speaker_roles || {})[speaker] || "free"}\n**Turn ID:** ${turnId || "(none)"}\n**Round:** ${state.current_round}/${state.max_rounds}\n**Ordering:** ${state.ordering_strategy || "cyclic"}\n\n${guidance}${extra}\n\n${PRODUCT_DISCLAIMER}`,
       }],
     };
   })
@@ -2880,16 +2882,16 @@ server.tool(
 
 server.tool(
   "deliberation_browser_auto_turn",
-  "브라우저 LLM에 자동으로 턴을 전송하고 응답을 수집합니다 (CDP 기반).",
+  "Automatically send a turn to a browser LLM and collect the response (CDP-based).",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
-    provider: z.string().optional().default("chatgpt").describe("LLM 프로바이더 (chatgpt, claude, gemini)"),
-    timeout_sec: z.number().optional().default(45).describe("응답 대기 타임아웃 (초)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    provider: z.string().optional().default("chatgpt").describe("LLM provider (chatgpt, claude, gemini)"),
+    timeout_sec: z.number().optional().default(45).describe("Response wait timeout (seconds)"),
   },
   safeToolHandler("deliberation_browser_auto_turn", async ({ session_id, provider, timeout_sec }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2897,17 +2899,17 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: `세션 "${resolved}"이 활성 상태가 아닙니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
     }
 
     const speaker = state.current_speaker;
     if (speaker === "none") {
-      return { content: [{ type: "text", text: "현재 발언 차례인 speaker가 없습니다." }] };
+      return { content: [{ type: "text", text: t("No speaker currently has the turn.", "현재 발언 차례인 speaker가 없습니다.", state?.lang) }] };
     }
 
     const { transport } = resolveTransportForSpeaker(state, speaker);
     if (transport !== "browser_auto" && transport !== "clipboard") {
-      return { content: [{ type: "text", text: `speaker "${speaker}"는 브라우저 타입이 아닙니다 (transport: ${transport}). CLI speaker는 deliberation_respond를 사용하세요.` }] };
+      return { content: [{ type: "text", text: t(`Speaker "${speaker}" is not a browser type (transport: ${transport}). CLI speakers should use deliberation_respond.`, `speaker "${speaker}"는 브라우저 타입이 아닙니다 (transport: ${transport}). CLI speaker는 deliberation_respond를 사용하세요.`, state?.lang) }] };
     }
 
     const turnId = state.pending_turn_id || generateTurnId();
@@ -2929,14 +2931,14 @@ server.tool(
     };
     const attachResult = await port.attach(resolved, attachHint);
     if (!attachResult.ok) {
-      return { content: [{ type: "text", text: `❌ 브라우저 탭 바인딩 실패: ${attachResult.error.message}\n\n**에러 코드:** ${attachResult.error.code}\n**도메인:** ${attachResult.error.domain}\n\nCDP 디버깅 포트가 활성화된 브라우저가 실행 중인지 확인하세요.\n\`google-chrome --remote-debugging-port=9222\`\n\n${PRODUCT_DISCLAIMER}` }] };
+      return { content: [{ type: "text", text: `❌ Browser tab binding failed: ${attachResult.error.message}\n\n**Error code:** ${attachResult.error.code}\n**Domain:** ${attachResult.error.domain}\n\nEnsure a browser with CDP debugging port is running.\n\`google-chrome --remote-debugging-port=9222\`\n\n${PRODUCT_DISCLAIMER}` }] };
     }
 
     // Step 1.2: Login detection — check if user is logged in to the web LLM
     const loginCheck = await port.checkLogin(resolved);
     if (loginCheck && !loginCheck.loggedIn) {
       await port.detach(resolved);
-      return { content: [{ type: "text", text: `⚠️ **${speaker} 로그인 필요** — 웹 LLM에 로그인되어 있지 않습니다.\n\n**감지된 상태:** ${loginCheck.reason}\n**URL:** ${loginCheck.url || 'N/A'}\n\n이 speaker는 건너뜁니다. 브라우저에서 해당 LLM에 로그인한 후 다시 시도하세요.\n\n⛔ **API 호출로 대체하지 마세요.** 로그인되지 않은 speaker는 건너뛰는 것이 올바른 동작입니다.` }] };
+      return { content: [{ type: "text", text: `⚠️ **${speaker} login required** — Not logged in to web LLM.\n\n**Detected status:** ${loginCheck.reason}\n**URL:** ${loginCheck.url || 'N/A'}\n\nThis speaker will be skipped. Log in to the LLM in the browser and try again.\n\n⛔ **Do not substitute with API calls.** Skipping unlogged-in speakers is the correct behavior.` }] };
     }
 
     // Step 1.5: Switch model based on context analysis
@@ -2954,7 +2956,7 @@ server.tool(
       return submitDeliberationTurn({
         session_id: resolved,
         speaker,
-        content: `[browser_auto 실패 — fallback] ${sendResult.error.message}`,
+        content: `[browser_auto failed — fallback] ${sendResult.error.message}`,
         turn_id: turnId,
         channel_used: "browser_auto_fallback",
         fallback_reason: sendResult.error.code,
@@ -2964,7 +2966,7 @@ server.tool(
     // Step 4: Wait for response
     const waitResult = await port.waitTurnResult(resolved, turnId, timeout_sec);
     if (!waitResult.ok) {
-      return { content: [{ type: "text", text: `⏱️ 브라우저 LLM 응답 대기 타임아웃 (${timeout_sec}초)\n\n**에러:** ${waitResult.error.message}\n\n자동 실행이 타임아웃되었습니다. Chrome이 --remote-debugging-port=9222로 실행 중인지 확인하세요.\n\n${PRODUCT_DISCLAIMER}` }] };
+      return { content: [{ type: "text", text: `⏱️ Browser LLM response timeout (${timeout_sec}s)\n\n**Error:** ${waitResult.error.message}\n\nAuto-execution timed out. Ensure Chrome is running with --remote-debugging-port=9222.\n\n${PRODUCT_DISCLAIMER}` }] };
     }
 
     // Step 5: Submit the response
@@ -2987,13 +2989,13 @@ server.tool(
       : "";
 
     const modelInfo = modelSelection.model !== 'default'
-      ? `\n**모델:** ${modelSelection.model} (${modelSelection.reason})\n**분석:** category=${modelSelection.category}, complexity=${modelSelection.complexity}`
+      ? `\n**Model:** ${modelSelection.model} (${modelSelection.reason})\n**Analysis:** category=${modelSelection.category}, complexity=${modelSelection.complexity}`
       : "";
 
     return {
       content: [{
         type: "text",
-        text: `✅ 브라우저 자동 턴 완료!\n\n**Provider:** ${effectiveProvider}\n**Turn ID:** ${turnId}${modelInfo}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${waitResult.data.elapsedMs}ms${degradationInfo}\n\n${result.content[0].text}`,
+        text: `✅ Browser auto-turn complete!\n\n**Provider:** ${effectiveProvider}\n**Turn ID:** ${turnId}${modelInfo}\n**Response length:** ${response.length} chars\n**Elapsed:** ${waitResult.data.elapsedMs}ms${degradationInfo}\n\n${result.content[0].text}`,
       }],
     };
   })
@@ -3001,15 +3003,15 @@ server.tool(
 
 server.tool(
   "deliberation_cli_auto_turn",
-  "CLI speaker에 자동으로 턴을 전송하고 응답을 수집합니다.",
+  "Automatically send a turn to a CLI speaker and collect the response.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
-    timeout_sec: z.number().optional().default(120).describe("CLI 응답 대기 타임아웃 (초)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    timeout_sec: z.number().optional().default(120).describe("CLI response wait timeout (seconds)"),
   },
   safeToolHandler("deliberation_cli_auto_turn", async ({ session_id, timeout_sec }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -3017,27 +3019,27 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: `세션 "${resolved}"이 활성 상태가 아닙니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
     }
 
     const speaker = state.current_speaker;
     if (speaker === "none") {
-      return { content: [{ type: "text", text: "현재 발언 차례인 speaker가 없습니다." }] };
+      return { content: [{ type: "text", text: t("No speaker currently has the turn.", "현재 발언 차례인 speaker가 없습니다.", state?.lang) }] };
     }
 
     const { transport } = resolveTransportForSpeaker(state, speaker);
     if (transport !== "cli_respond") {
-      return { content: [{ type: "text", text: `speaker "${speaker}"는 CLI 타입이 아닙니다 (transport: ${transport}). 브라우저 speaker는 deliberation_browser_auto_turn을 사용하세요.` }] };
+      return { content: [{ type: "text", text: t(`Speaker "${speaker}" is not a CLI type (transport: ${transport}). Browser speakers should use deliberation_browser_auto_turn.`, `speaker "${speaker}"는 CLI 타입이 아닙니다 (transport: ${transport}). 브라우저 speaker는 deliberation_browser_auto_turn을 사용하세요.`, state?.lang) }] };
     }
 
     // Block recursive self-spawn: if the speaker is the same CLI as the caller,
     // spawning it would create infinite recursion and timeout.
     const callerSpeaker = detectCallerSpeaker();
     if (callerSpeaker && speaker === callerSpeaker) {
-      return { content: [{ type: "text", text:
-        `⚠️ **재귀 호출 차단**: speaker "${speaker}"는 현재 오케스트레이터와 동일한 CLI입니다.\n\n` +
-        `cli_auto_turn으로 자기 자신을 spawn하면 타임아웃이 발생합니다.\n` +
-        `직접 응답을 작성하여 \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`로 제출하세요.`
+      return { content: [{ type: "text", text: t(
+        `⚠️ **Recursive call blocked**: Speaker "${speaker}" is the same CLI as the current orchestrator.\n\nSpawning yourself with cli_auto_turn will cause a timeout.\nWrite your response and submit via \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`.`,
+        `⚠️ **재귀 호출 차단**: speaker "${speaker}"는 현재 오케스트레이터와 동일한 CLI입니다.\n\ncli_auto_turn으로 자기 자신을 spawn하면 타임아웃이 발생합니다.\n직접 응답을 작성하여 \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`로 제출하세요.`,
+        state?.lang)
       }] };
     }
 
@@ -3047,12 +3049,12 @@ server.tool(
 
     const hint = CLI_INVOCATION_HINTS[speaker];
     if (!hint) {
-      return { content: [{ type: "text", text: `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.` }] };
+      return { content: [{ type: "text", text: t(`No CLI invocation info for speaker "${speaker}". This speaker is not registered in CLI_INVOCATION_HINTS.`, `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.`, state?.lang) }] };
     }
 
     // Check CLI liveness
     if (!checkCliLiveness(hint.cmd)) {
-      return { content: [{ type: "text", text: `❌ CLI "${hint.cmd}"가 설치되어 있지 않거나 실행할 수 없습니다.` }] };
+      return { content: [{ type: "text", text: t(`❌ CLI "${hint.cmd}" is not installed or cannot be executed.`, `❌ CLI "${hint.cmd}"가 설치되어 있지 않거나 실행할 수 없습니다.`, state?.lang) }] };
     }
 
     const turnId = state.pending_turn_id || generateTurnId();
@@ -3095,7 +3097,7 @@ server.tool(
 
         const timer = setTimeout(() => {
           child.kill("SIGTERM");
-          reject(new Error(`CLI 타임아웃 (${effectiveTimeout}초)`));
+          reject(new Error(`CLI timeout (${effectiveTimeout}s)`));
         }, effectiveTimeout * 1000);
 
         child.stdout.on("data", (data) => { stdout += data.toString(); });
@@ -3131,7 +3133,7 @@ server.tool(
       appendRuntimeLog("INFO", `CLI_TURN: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | elapsed: ${elapsedMs}ms | response_len: ${response.length} | prior_turns: ${speakerPriorTurns} | effective_timeout: ${effectiveTimeout}s`);
 
       if (!response) {
-        return { content: [{ type: "text", text: `⚠️ CLI "${speaker}"가 빈 응답을 반환했습니다.` }] };
+        return { content: [{ type: "text", text: t(`⚠️ CLI "${speaker}" returned an empty response.`, `⚠️ CLI "${speaker}"가 빈 응답을 반환했습니다.`, state?.lang) }] };
       }
 
       // Submit the response
@@ -3147,7 +3149,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `✅ CLI 자동 턴 완료!\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n**Turn ID:** ${turnId}\n**응답 길이:** ${response.length}자\n**소요 시간:** ${elapsedMs}ms\n\n${result.content[0].text}`,
+          text: `✅ CLI auto-turn complete!\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n**Turn ID:** ${turnId}\n**Response length:** ${response.length} chars\n**Elapsed:** ${elapsedMs}ms\n\n${result.content[0].text}`,
         }],
       };
 
@@ -3155,7 +3157,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `❌ CLI 자동 턴 실패: ${err.message}\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n\ndeliberation_respond(speaker: "${speaker}", content: "...")로 수동 응답을 제출할 수 있습니다.`,
+          text: `❌ CLI auto-turn failed: ${err.message}\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n\nYou can submit a manual response via deliberation_respond(speaker: "${speaker}", content: "...").`,
         }],
       };
     }
@@ -3164,13 +3166,13 @@ server.tool(
 
 server.tool(
   "deliberation_respond",
-  "현재 턴의 응답을 제출합니다.",
+  "Submit a response for the current turn.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
-    speaker: z.string().trim().min(1).max(64).describe("응답자 이름"),
-    content: z.string().optional().describe("응답 내용 (마크다운). content 또는 content_file 중 하나 필수."),
-    content_file: z.string().optional().describe("응답 내용이 담긴 파일 경로. JSON 이스케이프 문제 회피용. 파일 내용이 그대로 content로 사용됩니다."),
-    turn_id: z.string().optional().describe("턴 검증 ID (deliberation_route_turn에서 받은 값)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    speaker: z.string().trim().min(1).max(64).describe("Responder name"),
+    content: z.string().optional().describe("Response content (markdown). Either content or content_file is required."),
+    content_file: z.string().optional().describe("File path containing response content. For avoiding JSON escape issues. File content is used as-is for content."),
+    turn_id: z.string().optional().describe("Turn verification ID (value received from deliberation_route_turn)"),
   },
   safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, turn_id }) => {
     // Guard: prevent orchestrator from fabricating responses for CLI/browser speakers
@@ -3187,12 +3189,10 @@ server.tool(
             return {
               content: [{
                 type: "text",
-                text: `⚠️ **대리 응답 차단**: speaker "${speaker}"는 ${transport} transport입니다.\n\n` +
-                  `오케스트레이터가 다른 speaker를 대신하여 응답을 작성하는 것은 허용되지 않습니다.\n` +
-                  `대신 다음 도구를 사용하세요:\n` +
-                  `- CLI speaker → \`deliberation_route_turn\` 또는 \`deliberation_cli_auto_turn\`\n` +
-                  `- 브라우저 speaker → \`deliberation_route_turn\` 또는 \`deliberation_browser_auto_turn\`\n\n` +
-                  `이 도구들이 실제 CLI/브라우저를 실행하여 진짜 응답을 수집합니다.`,
+                text: t(
+                  `⚠️ **Proxy response blocked**: Speaker "${speaker}" has ${transport} transport.\n\nThe orchestrator is not allowed to write responses on behalf of other speakers.\nUse the following tools instead:\n- CLI speaker → \`deliberation_route_turn\` or \`deliberation_cli_auto_turn\`\n- Browser speaker → \`deliberation_route_turn\` or \`deliberation_browser_auto_turn\`\n\nThese tools run the actual CLI/browser to collect genuine responses.`,
+                  `⚠️ **대리 응답 차단**: speaker "${speaker}"는 ${transport} transport입니다.\n\n오케스트레이터가 다른 speaker를 대신하여 응답을 작성하는 것은 허용되지 않습니다.\n대신 다음 도구를 사용하세요:\n- CLI speaker → \`deliberation_route_turn\` 또는 \`deliberation_cli_auto_turn\`\n- 브라우저 speaker → \`deliberation_route_turn\` 또는 \`deliberation_browser_auto_turn\`\n\n이 도구들이 실제 CLI/브라우저를 실행하여 진짜 응답을 수집합니다.`,
+                  state?.lang),
               }],
             };
           }
@@ -3206,11 +3206,11 @@ server.tool(
       try {
         finalContent = fs.readFileSync(content_file, "utf-8").trim();
       } catch (e) {
-        return { content: [{ type: "text", text: `❌ content_file 읽기 실패: ${e.message}` }] };
+        return { content: [{ type: "text", text: t(`❌ Failed to read content_file: ${e.message}`, `❌ content_file 읽기 실패: ${e.message}`, state?.lang) }] };
       }
     }
     if (!finalContent) {
-      return { content: [{ type: "text", text: "❌ content 또는 content_file 중 하나를 제공해야 합니다." }] };
+      return { content: [{ type: "text", text: t("❌ Either content or content_file must be provided.", "❌ content 또는 content_file 중 하나를 제공해야 합니다.", "en") }] };
     }
     return submitDeliberationTurn({ session_id, speaker, content: finalContent, turn_id, channel_used: "cli_respond" });
   })
@@ -3218,14 +3218,14 @@ server.tool(
 
 server.tool(
   "deliberation_history",
-  "토론 기록을 반환합니다.",
+  "Return the deliberation history.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
   },
   async ({ session_id }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -3233,19 +3233,19 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state) {
-      return { content: [{ type: "text", text: `세션 "${resolved}"을 찾을 수 없습니다.` }] };
+      return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
     }
 
     if (state.log.length === 0) {
       return {
         content: [{
           type: "text",
-          text: `**세션:** ${state.id}\n**주제:** ${state.topic}\n\n아직 응답이 없습니다. **${state.current_speaker}**가 먼저 응답하세요.`,
+          text: t(`**Session:** ${state.id}\n**Topic:** ${state.topic}\n\nNo responses yet. **${state.current_speaker}** should respond first.`, `**세션:** ${state.id}\n**주제:** ${state.topic}\n\n아직 응답이 없습니다. **${state.current_speaker}**가 먼저 응답하세요.`, state?.lang),
         }],
       };
     }
 
-    let history = `**세션:** ${state.id}\n**주제:** ${state.topic} | **상태:** ${state.status}\n\n`;
+    let history = `**Session:** ${state.id}\n**Topic:** ${state.topic} | **Status:** ${state.status}\n\n`;
     for (const e of state.log) {
       history += `### ${e.speaker} — Round ${e.round}\n\n${e.content}\n\n---\n\n`;
     }
@@ -3255,15 +3255,15 @@ server.tool(
 
 server.tool(
   "deliberation_synthesize",
-  "토론을 종료하고 합성 보고서를 제출합니다.",
+  "End the deliberation and submit a synthesis report.",
   {
-    session_id: z.string().optional().describe("세션 ID (여러 세션 진행 중이면 필수)"),
-    synthesis: z.string().describe("합성 보고서 (마크다운)"),
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    synthesis: z.string().describe("Synthesis report (markdown)"),
   },
   safeToolHandler("deliberation_synthesize", async ({ session_id, synthesis }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: "활성 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -3274,7 +3274,7 @@ server.tool(
     const lockedResult = withSessionLock(resolved, () => {
       const loaded = loadSession(resolved);
       if (!loaded) {
-        return { content: [{ type: "text", text: `세션 "${resolved}"을 찾을 수 없습니다.` }] };
+        return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
       }
 
       loaded.synthesis = synthesis;
@@ -3292,13 +3292,13 @@ server.tool(
 
     appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
 
-    // 토론 종료 즉시 모니터 터미널(물리 Terminal 포함) 강제 종료
+    // Immediately force-close monitor terminal (including physical Terminal) on deliberation end
     closeMonitorTerminal(state.id, getSessionWindowIds(state));
 
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] Deliberation 완료! Forum이 완성되었습니다.\n\n**프로젝트:** ${state.project}\n**주제:** ${state.topic}\n**라운드:** ${state.max_rounds}\n**응답:** ${state.log.length}건\n\n📁 Forum 최종본: ${archivePath}\n🖥️ 모니터 터미널이 즉시 강제 종료되었습니다.`,
+        text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.`,
       }],
     };
   })
@@ -3306,13 +3306,13 @@ server.tool(
 
 server.tool(
   "deliberation_list",
-  "과거 deliberation 아카이브 목록을 반환합니다.",
+  "Return the list of past deliberation archives.",
   {},
   async () => {
     ensureDirs();
     const archiveDir = getArchiveDir();
     if (!fs.existsSync(archiveDir)) {
-      return { content: [{ type: "text", text: "과거 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No past deliberations.", "과거 deliberation이 없습니다.", "en") }] };
     }
 
     const files = fs.readdirSync(archiveDir)
@@ -3320,31 +3320,31 @@ server.tool(
       .sort().reverse();
 
     if (files.length === 0) {
-      return { content: [{ type: "text", text: "과거 deliberation이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No past deliberations.", "과거 deliberation이 없습니다.", "en") }] };
     }
 
     const list = files.map((f, i) => `${i + 1}. ${f.replace(".md", "")}`).join("\n");
-    return { content: [{ type: "text", text: `## 과거 Deliberation (${getProjectSlug()})\n\n${list}` }] };
+    return { content: [{ type: "text", text: `## Past Deliberations (${getProjectSlug()})\n\n${list}` }] };
   }
 );
 
 server.tool(
   "deliberation_reset",
-  "deliberation을 초기화합니다. session_id 지정 시 해당 세션만, 미지정 시 전체 초기화.",
+  "Reset deliberation. Resets specific session if session_id provided, otherwise resets all.",
   {
-    session_id: z.string().optional().describe("초기화할 세션 ID (미지정 시 전체 초기화)"),
+    session_id: z.string().optional().describe("Session ID to reset (resets all if omitted)"),
   },
   safeToolHandler("deliberation_reset", async ({ session_id }) => {
     ensureDirs();
     const sessionsDir = getSessionsDir();
 
     if (session_id) {
-      // 특정 세션만 초기화
+      // Reset specific session only
       let toCloseIds = [];
       const result = withSessionLock(session_id, () => {
         const file = getSessionFile(session_id);
         if (!fs.existsSync(file)) {
-          return { content: [{ type: "text", text: `세션 "${session_id}"을 찾을 수 없습니다.` }] };
+          return { content: [{ type: "text", text: t(`Session "${session_id}" not found.`, `세션 "${session_id}"을 찾을 수 없습니다.`, "en") }] };
         }
         const state = loadSession(session_id);
         if (state && state.log.length > 0) {
@@ -3353,7 +3353,7 @@ server.tool(
         if (state) cleanupSyncMarkdown(state);
         toCloseIds = getSessionWindowIds(state);
         fs.unlinkSync(file);
-        return { content: [{ type: "text", text: `✅ 세션 "${session_id}" 초기화 완료. 🖥️ 모니터 터미널 닫힘.` }] };
+        return { content: [{ type: "text", text: t(`✅ Session "${session_id}" reset complete. 🖥️ Monitor terminal closed.`, `✅ 세션 "${session_id}" 초기화 완료. 🖥️ 모니터 터미널 닫힘.`, "en") }] };
       });
       if (toCloseIds.length > 0) {
         closeMonitorTerminal(session_id, toCloseIds);
@@ -3361,7 +3361,7 @@ server.tool(
       return result;
     }
 
-    // 전체 초기화
+    // Reset all
     const resetResult = withProjectLock(() => {
       if (!fs.existsSync(sessionsDir)) {
         return { files: [], archived: 0, terminalWindowIds: [], noSessions: true };
@@ -3397,7 +3397,7 @@ server.tool(
     });
 
     if (resetResult.noSessions) {
-      return { content: [{ type: "text", text: "초기화할 세션이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No sessions to reset.", "초기화할 세션이 없습니다.", "en") }] };
     }
 
     for (const windowId of resetResult.terminalWindowIds) {
@@ -3408,7 +3408,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ 전체 초기화 완료. ${resetResult.files.length}개 세션 삭제, ${resetResult.archived}개 아카이브됨. 🖥️ 모든 모니터 터미널 닫힘.`,
+        text: `✅ Full reset complete. ${resetResult.files.length} sessions deleted, ${resetResult.archived} archived. 🖥️ All monitor terminals closed.`,
       }],
     };
   })
@@ -3416,17 +3416,17 @@ server.tool(
 
 server.tool(
   "deliberation_cli_config",
-  "딜리버레이션 참가자 CLI 설정을 조회하거나 변경합니다. enabled_clis를 지정하면 저장합니다.",
+  "Query or update deliberation participant CLI settings. Saves when enabled_clis is provided.",
   {
-    enabled_clis: z.array(z.string()).optional().describe("활성화할 CLI 목록 (예: [\"claude\", \"codex\", \"gemini\"]). 미지정 시 현재 설정 조회"),
+    enabled_clis: z.array(z.string()).optional().describe("CLI list to enable (e.g., [\"claude\", \"codex\", \"gemini\"]). Shows current settings if omitted"),
     require_speaker_selection: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("true: 매번 사용자가 스피커 선택 후 시작, false: 감지된 스피커 전체 자동 참여"),
+    ).describe("true: user selects speakers before each start, false: all detected speakers auto-join"),
     default_rounds: z.coerce.number().int().min(1).max(10).optional()
-      .describe("기본 라운드 수 (1-10, 기본 3)"),
+      .describe("Default number of rounds (1-10, default 3)"),
     default_ordering: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
-      .describe("기본 발언 순서 전략: auto(스피커 수에 따라 자동), cyclic, random, weighted-random"),
+      .describe("Default ordering strategy: auto (automatic based on speaker count), cyclic, random, weighted-random"),
   },
   safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, default_rounds, default_ordering }) => {
     const config = loadDeliberationConfig();
@@ -3459,7 +3459,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI 설정\n\n**모드:** ${mode}\n**스피커 선택:** ${config.require_speaker_selection === false ? "자동 (감지된 스피커 전체 참여)" : "수동 (사용자가 직접 선택)"}\n**기본 라운드:** ${config.default_rounds || 3}\n**발언 순서:** ${config.default_ordering || "auto"}\n**설정된 CLI:** ${configured.length > 0 ? configured.join(", ") : "(없음 — 전체 자동 감지)"}\n**현재 감지된 CLI:** ${detected.join(", ") || "(없음)"}\n**지원 CLI 전체:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\n변경하려면:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\n전체 자동 감지로 되돌리려면:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (all detected speakers join)" : "manual (user selects)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
@@ -3472,7 +3472,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `✅ CLI 설정 초기화 완료. 전체 자동 감지 모드로 전환되었습니다.\n감지 대상: ${DEFAULT_CLI_CANDIDATES.join(", ")}`,
+          text: `✅ CLI settings reset. Switched to full auto-detection mode.\nDetection targets: ${DEFAULT_CLI_CANDIDATES.join(", ")}`,
         }],
       };
     }
@@ -3497,9 +3497,9 @@ server.tool(
     });
     const notInstalled = valid.filter(cli => !installed.includes(cli));
 
-    let result = `✅ CLI 설정 저장 완료!\n\n**활성화된 CLI:** ${valid.join(", ")}`;
-    if (installed.length > 0) result += `\n**설치 확인됨:** ${installed.join(", ")}`;
-    if (notInstalled.length > 0) result += `\n**⚠️ 미설치:** ${notInstalled.join(", ")} (PATH에서 찾을 수 없음)`;
+    let result = `✅ CLI settings saved!\n\n**Enabled CLIs:** ${valid.join(", ")}`;
+    if (installed.length > 0) result += `\n**Installed:** ${installed.join(", ")}`;
+    if (notInstalled.length > 0) result += `\n**⚠️ Not installed:** ${notInstalled.join(", ")} (not found in PATH)`;
 
     return { content: [{ type: "text", text: result }] };
   })
@@ -3585,15 +3585,15 @@ function synthesizeReviews(context, question, reviews) {
 
 server.tool(
   "deliberation_request_review",
-  "코드 리뷰를 요청합니다. 여러 CLI 리뷰어에게 동시에 리뷰를 요청하고 결과를 종합합니다.",
+  "Request a code review. Sends review requests to multiple CLI reviewers simultaneously and synthesizes results.",
   {
-    context: z.string().describe("리뷰할 변경사항 설명 (코드, diff, 설계 등)"),
-    question: z.string().describe("리뷰 질문 (예: 'Is this error handling sufficient?')"),
-    reviewers: z.array(z.string().trim().min(1).max(64)).min(1).describe("리뷰어 CLI 목록 (예: [\"claude\", \"codex\"])"),
-    mode: z.enum(["sync", "async"]).default("sync").describe("sync: 결과 대기 후 반환, async: session_id 즉시 반환"),
-    deadline_ms: z.number().int().min(5000).max(600000).default(60000).describe("전체 타임아웃 (밀리초, 기본 60초)"),
-    min_reviews: z.number().int().min(1).default(1).describe("최소 필요 리뷰 수 (기본 1)"),
-    on_timeout: z.enum(["partial", "fail"]).default("partial").describe("타임아웃 시 동작: partial=부분 결과 반환, fail=에러"),
+    context: z.string().describe("Description of changes to review (code, diff, design, etc.)"),
+    question: z.string().describe("Review question (e.g., 'Is this error handling sufficient?')"),
+    reviewers: z.array(z.string().trim().min(1).max(64)).min(1).describe("Reviewer CLI list (e.g., [\"claude\", \"codex\"])"),
+    mode: z.enum(["sync", "async"]).default("sync").describe("sync: wait for results then return, async: return session_id immediately"),
+    deadline_ms: z.number().int().min(5000).max(600000).default(60000).describe("Total timeout (milliseconds, default 60s)"),
+    min_reviews: z.number().int().min(1).default(1).describe("Minimum required reviews (default 1)"),
+    on_timeout: z.enum(["partial", "fail"]).default("partial").describe("Timeout behavior: partial=return partial results, fail=error"),
   },
   safeToolHandler("deliberation_request_review", async ({ context, question, reviewers, mode, deadline_ms, min_reviews, on_timeout }) => {
     // Validate reviewers exist in PATH
@@ -3613,7 +3613,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `❌ 유효한 리뷰어가 없습니다. PATH에서 찾을 수 없는 CLI: ${invalidReviewers.join(", ")}\n\n사용 가능한 CLI를 확인하려면 deliberation_speaker_candidates를 호출하세요.`,
+          text: `❌ No valid reviewers. CLIs not found in PATH: ${invalidReviewers.join(", ")}\n\nCall deliberation_speaker_candidates to check available CLIs.`,
         }],
       };
     }
@@ -3657,12 +3657,12 @@ server.tool(
     // Async mode: return immediately
     if (mode === "async") {
       const warn = invalidReviewers.length > 0
-        ? `\n⚠️ PATH에서 찾을 수 없는 리뷰어 (제외됨): ${invalidReviewers.join(", ")}`
+        ? `\n⚠️ Reviewers not found in PATH (excluded): ${invalidReviewers.join(", ")}`
         : "";
       return {
         content: [{
           type: "text",
-          text: `✅ 비동기 리뷰 세션 생성됨\n\n**Session ID:** ${sessionId}\n**리뷰어:** ${validReviewers.join(", ")}\n**모드:** async${warn}\n\n진행 상태는 \`deliberation_status(session_id: "${sessionId}")\`로 확인하세요.`,
+          text: `✅ Async review session created\n\n**Session ID:** ${sessionId}\n**Reviewers:** ${validReviewers.join(", ")}\n**Mode:** async${warn}\n\nCheck progress with \`deliberation_status(session_id: "${sessionId}")\`.`,
         }],
       };
     }
@@ -3734,7 +3734,7 @@ server.tool(
         return {
           content: [{
             type: "text",
-            text: `❌ 리뷰 실패: 최소 ${min_reviews}개 리뷰 필요, ${completedReviews.length}개만 완료\n\n**Session:** ${sessionId}\n**완료:** ${completedReviews.map(r => r.reviewer).join(", ") || "(없음)"}\n**타임아웃:** ${timedOutReviewers.join(", ") || "(없음)"}\n**실패:** ${failedReviewers.map(r => `${r.reviewer}: ${r.error}`).join(", ") || "(없음)"}`,
+            text: `❌ Review failed: minimum ${min_reviews} reviews required, only ${completedReviews.length} completed\n\n**Session:** ${sessionId}\n**Completed:** ${completedReviews.map(r => r.reviewer).join(", ") || "(none)"}\n**Timed out:** ${timedOutReviewers.join(", ") || "(none)"}\n**Failed:** ${failedReviewers.map(r => `${r.reviewer}: ${r.error}`).join(", ") || "(none)"}`,
           }],
         };
       }
@@ -3760,13 +3760,13 @@ server.tool(
     const totalMs = Date.now() - globalStart;
     const coverage = `${completedReviews.length}/${validReviewers.length}`;
     const warn = invalidReviewers.length > 0
-      ? `\n**제외된 리뷰어 (미설치):** ${invalidReviewers.join(", ")}`
+      ? `\n**Excluded reviewers (not installed):** ${invalidReviewers.join(", ")}`
       : "";
     const timeoutInfo = timedOutReviewers.length > 0
-      ? `\n**타임아웃 리뷰어:** ${timedOutReviewers.join(", ")}`
+      ? `\n**Timed out reviewers:** ${timedOutReviewers.join(", ")}`
       : "";
     const failInfo = failedReviewers.length > 0
-      ? `\n**실패 리뷰어:** ${failedReviewers.map(r => `${r.reviewer}: ${r.error}`).join(", ")}`
+      ? `\n**Failed reviewers:** ${failedReviewers.map(r => `${r.reviewer}: ${r.error}`).join(", ")}`
       : "";
 
     const resultPayload = {
@@ -3783,7 +3783,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `## Review 완료\n\n**Session:** ${sessionId}\n**Coverage:** ${coverage}\n**소요 시간:** ${totalMs}ms\n**완료 리뷰어:** ${completedReviews.map(r => r.reviewer).join(", ") || "(없음)"}${timeoutInfo}${failInfo}${warn}\n\n${synthesis}\n\n---\n\n\`\`\`json\n${JSON.stringify(resultPayload, null, 2)}\n\`\`\``,
+        text: `## Review Complete\n\n**Session:** ${sessionId}\n**Coverage:** ${coverage}\n**Elapsed:** ${totalMs}ms\n**Completed reviewers:** ${completedReviews.map(r => r.reviewer).join(", ") || "(none)"}${timeoutInfo}${failInfo}${warn}\n\n${synthesis}\n\n---\n\n\`\`\`json\n${JSON.stringify(resultPayload, null, 2)}\n\`\`\``,
       }],
     };
   })
@@ -3793,22 +3793,22 @@ server.tool(
 
 server.tool(
   "decision_start",
-  "새 의사결정 세션을 시작합니다. 여러 LLM이 독립적으로 의견을 제시하고 갈등을 가시화합니다.",
+  "Start a new decision session. Multiple LLMs provide independent opinions and conflicts are visualized.",
   {
-    problem: z.string().describe("의사결정 문제 (예: 'JWT vs Session 인증 방식 선택')"),
+    problem: z.string().describe("Decision problem (e.g., 'JWT vs Session authentication method')"),
     options: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.array(z.string()).optional()
-    ).describe("선택지 목록 (예: ['JWT', 'Session', 'OAuth2'])"),
+    ).describe("Options list (e.g., ['JWT', 'Session', 'OAuth2'])"),
     criteria: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.array(z.string()).optional()
-    ).describe("평가 기준 (미지정 시 템플릿에서 자동 로드)"),
-    template: z.string().optional().describe("Micro-decision 템플릿 ID (lib-compare, arch-decision, pr-priority, naming-convention, tradeoff, risk-approval)"),
+    ).describe("Evaluation criteria (auto-loaded from template if omitted)"),
+    template: z.string().optional().describe("Micro-decision template ID (lib-compare, arch-decision, pr-priority, naming-convention, tradeoff, risk-approval)"),
     speakers: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.array(z.string().trim().min(1).max(64)).min(2).optional()
-    ).describe("참여 LLM 목록 (최소 2명, 예: ['claude', 'codex', 'gemini'])"),
+    ).describe("Participating LLM list (minimum 2, e.g., ['claude', 'codex', 'gemini'])"),
   },
   safeToolHandler("decision_start", async ({ problem, options, criteria, template, speakers }) => {
     // Auto-discover speakers if not provided
@@ -3819,7 +3819,7 @@ server.tool(
         .map(c => c.speaker)
         .slice(0, 4);
       if (speakers.length < 2) {
-        return { content: [{ type: "text", text: "❌ 의사결정에 최소 2명의 speaker가 필요합니다. speakers를 직접 지정하세요." }] };
+        return { content: [{ type: "text", text: t("❌ Decision requires at least 2 speakers. Please specify speakers directly.", "❌ 의사결정에 최소 2명의 speaker가 필요합니다. speakers를 직접 지정하세요.", "en") }] };
       }
     }
 
@@ -3970,7 +3970,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ **Decision Session 시작됨**\n\n**Session:** ${session.id}\n**Problem:** ${problem}\n**Speakers:** ${speakers.join(", ")}\n**Opinions collected:** ${successCount}/${speakers.length}${templateInfo}\n**Stage:** user_probe (사용자 입력 대기)\n**Conflicts:** ${(updatedSession?.conflicts || []).length}개\n\n---\n\n${conflictText}\n\n---\n\n사용자 응답을 \`decision_respond\`로 제출하세요.`,
+        text: `✅ **Decision Session Started**\n\n**Session:** ${session.id}\n**Problem:** ${problem}\n**Speakers:** ${speakers.join(", ")}\n**Opinions collected:** ${successCount}/${speakers.length}${templateInfo}\n**Stage:** user_probe (awaiting user input)\n**Conflicts:** ${(updatedSession?.conflicts || []).length}\n\n---\n\n${conflictText}\n\n---\n\nSubmit user responses via \`decision_respond\`.`,
       }],
     };
   })
@@ -3978,9 +3978,9 @@ server.tool(
 
 server.tool(
   "decision_status",
-  "의사결정 세션의 현재 상태를 조회합니다.",
+  "Query the current status of a decision session.",
   {
-    session_id: z.string().optional().describe("세션 ID (미지정 시 활성 decision 세션 자동 선택)"),
+    session_id: z.string().optional().describe("Session ID (auto-selects active decision session if omitted)"),
   },
   safeToolHandler("decision_status", async ({ session_id }) => {
     // Find decision sessions
@@ -3991,13 +3991,13 @@ server.tool(
 
     let resolved = session_id;
     if (!resolved) {
-      if (active.length === 0) return { content: [{ type: "text", text: "활성 decision 세션이 없습니다." }] };
+      if (active.length === 0) return { content: [{ type: "text", text: t("No active decision sessions.", "활성 decision 세션이 없습니다.", "en") }] };
       if (active.length === 1) resolved = active[0].id;
-      else return { content: [{ type: "text", text: `여러 decision 세션이 진행 중입니다. session_id를 지정하세요:\n${active.map(s => `- ${s.id}`).join("\n")}` }] };
+      else return { content: [{ type: "text", text: t(`Multiple decision sessions are active. Please specify session_id:\n${active.map(s => `- ${s.id}`).join("\n")}`, `여러 decision 세션이 진행 중입니다. session_id를 지정하세요:\n${active.map(s => `- ${s.id}`).join("\n")}`, "en") }] };
     }
 
     const state = loadSession(resolved);
-    if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${resolved}` }] };
+    if (!state) return { content: [{ type: "text", text: t(`Session not found: ${resolved}`, `세션을 찾을 수 없습니다: ${resolved}`, "en") }] };
 
     const opinionCount = Object.keys(state.opinions || {}).length;
     const conflictCount = (state.conflicts || []).length;
@@ -4015,13 +4015,13 @@ server.tool(
 
 server.tool(
   "decision_respond",
-  "user_probe 단계의 갈등 질문에 대한 사용자 응답을 제출합니다.",
+  "Submit user responses to conflict questions in the user_probe stage.",
   {
-    session_id: z.string().optional().describe("세션 ID"),
+    session_id: z.string().optional().describe("Session ID"),
     responses: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.array(z.string()).min(1)
-    ).describe("각 갈등 질문에 대한 응답 배열 (conflict 순서대로)"),
+    ).describe("Response array for each conflict question (in conflict order)"),
   },
   safeToolHandler("decision_respond", async ({ session_id, responses }) => {
     // Find decision session
@@ -4033,8 +4033,8 @@ server.tool(
     let resolved = session_id;
     if (!resolved) {
       if (active.length === 1) resolved = active[0].id;
-      else if (active.length === 0) return { content: [{ type: "text", text: "활성 decision 세션이 없습니다." }] };
-      else return { content: [{ type: "text", text: `여러 decision 세션이 진행 중입니다. session_id를 지정하세요.` }] };
+      else if (active.length === 0) return { content: [{ type: "text", text: t("No active decision sessions.", "활성 decision 세션이 없습니다.", "en") }] };
+      else return { content: [{ type: "text", text: t(`Multiple decision sessions are active. Please specify session_id.`, `여러 decision 세션이 진행 중입니다. session_id를 지정하세요.`, "en") }] };
     }
 
     let synthesisText = "";
@@ -4044,7 +4044,7 @@ server.tool(
       const state = loadSession(resolved);
       if (!state) return;
       if (state.stage !== "user_probe") {
-        synthesisText = `❌ 현재 단계(${state.stage})에서는 응답을 받을 수 없습니다. user_probe 단계에서만 가능합니다.`;
+        synthesisText = t(`❌ Cannot accept responses at current stage (${state.stage}). Only possible during user_probe stage.`, `❌ 현재 단계(${state.stage})에서는 응답을 받을 수 없습니다. user_probe 단계에서만 가능합니다.`, state?.lang);
         return;
       }
 
@@ -4103,9 +4103,9 @@ server.tool(
 
 server.tool(
   "decision_resume",
-  "일시 중지된 decision 세션을 재개합니다 (user_probe 단계에서 갈등 질문을 다시 표시).",
+  "Resume a paused decision session (re-displays conflict questions from the user_probe stage).",
   {
-    session_id: z.string().optional().describe("세션 ID"),
+    session_id: z.string().optional().describe("Session ID"),
   },
   safeToolHandler("decision_resume", async ({ session_id }) => {
     const active = listActiveSessions().filter(s => {
@@ -4116,21 +4116,21 @@ server.tool(
     let resolved = session_id;
     if (!resolved) {
       if (active.length === 1) resolved = active[0].id;
-      else if (active.length === 0) return { content: [{ type: "text", text: "재개할 decision 세션이 없습니다." }] };
-      else return { content: [{ type: "text", text: `여러 세션 중 선택하세요:\n${active.map(s => `- ${s.id}`).join("\n")}` }] };
+      else if (active.length === 0) return { content: [{ type: "text", text: t("No decision sessions to resume.", "재개할 decision 세션이 없습니다.", "en") }] };
+      else return { content: [{ type: "text", text: t(`Select from multiple sessions:\n${active.map(s => `- ${s.id}`).join("\n")}`, `여러 세션 중 선택하세요:\n${active.map(s => `- ${s.id}`).join("\n")}`, "en") }] };
     }
 
     const state = loadSession(resolved);
-    if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${resolved}` }] };
+    if (!state) return { content: [{ type: "text", text: t(`Session not found: ${resolved}`, `세션을 찾을 수 없습니다: ${resolved}`, "en") }] };
     if (state.stage !== "user_probe") {
-      return { content: [{ type: "text", text: `세션이 user_probe 단계가 아닙니다 (현재: ${state.stage}). 재개할 수 없습니다.` }] };
+      return { content: [{ type: "text", text: t(`Session is not at user_probe stage (current: ${state.stage}). Cannot resume.`, `세션이 user_probe 단계가 아닙니다 (현재: ${state.stage}). 재개할 수 없습니다.`, state?.lang) }] };
     }
 
     const conflictText = generateConflictQuestions(state.conflicts || []);
     return {
       content: [{
         type: "text",
-        text: `📋 **Decision Session 재개**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** user_probe\n\n---\n\n${conflictText}\n\n---\n\n사용자 응답을 \`decision_respond\`로 제출하세요.`,
+        text: `📋 **Decision Session Resumed**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** user_probe\n\n---\n\n${conflictText}\n\n---\n\nSubmit user responses via \`decision_respond\`.`,
       }],
     };
   })
@@ -4138,14 +4138,14 @@ server.tool(
 
 server.tool(
   "decision_history",
-  "과거 의사결정 기록을 조회합니다.",
+  "Query past decision history.",
   {
-    session_id: z.string().optional().describe("특정 세션 ID (미지정 시 전체 목록)"),
+    session_id: z.string().optional().describe("Specific session ID (shows full list if omitted)"),
   },
   safeToolHandler("decision_history", async ({ session_id }) => {
     if (session_id) {
       const state = loadSession(session_id);
-      if (!state) return { content: [{ type: "text", text: `세션을 찾을 수 없습니다: ${session_id}` }] };
+      if (!state) return { content: [{ type: "text", text: t(`Session not found: ${session_id}`, `세션을 찾을 수 없습니다: ${session_id}`, "en") }] };
 
       const opinionSummary = Object.entries(state.opinions || {})
         .map(([speaker, op]) => `- **${speaker}**: ${op.summary || "(none)"} (confidence: ${Math.round((op.confidence || 0.5) * 100)}%)`)
@@ -4191,12 +4191,12 @@ server.tool(
 
 server.tool(
   "decision_templates",
-  "사용 가능한 Micro-Decision 템플릿 목록을 표시합니다.",
+  "Display available Micro-Decision templates.",
   {},
   safeToolHandler("decision_templates", async () => {
     const templates = loadTemplates();
     if (templates.length === 0) {
-      return { content: [{ type: "text", text: "사용 가능한 템플릿이 없습니다." }] };
+      return { content: [{ type: "text", text: t("No available templates.", "사용 가능한 템플릿이 없습니다.", "en") }] };
     }
 
     const list = templates.map(t => {
@@ -4207,7 +4207,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `📋 **Decision Templates**\n\n${list}\n\n---\n\n\`decision_start(problem: "...", template: "lib-compare")\`로 사용하세요.`,
+        text: `📋 **Decision Templates**\n\n${list}\n\n---\n\nUse with \`decision_start(problem: "...", template: "lib-compare")\`.`,
       }],
     };
   })

@@ -1,1 +1,1 @@
-자유롭게 의견을 제시하세요. 특정 역할에 구애받지 않고 토론 주제에 대해 자신의 관점을 공유합니다.
+Share your thoughts freely. Without being constrained by a specific role, contribute your own perspective on the discussion topic.
