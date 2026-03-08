@@ -719,7 +719,10 @@ function dedupeBrowserTabs(tabs = []) {
     const title = String(tab?.title || "").trim();
     const url = String(tab?.url || "").trim();
     if (!url || (!isLlmUrl(url) && !isExtensionLlmTab(url, title))) continue;
-    const key = `${browser}\t${title}\t${url}`;
+    // Dedup by title+url (ignore browser name) so that the same tab detected
+    // via both AppleScript and CDP is not duplicated. The first occurrence wins,
+    // so callers should add preferred sources first (e.g., CDP before AppleScript).
+    const key = `${title}\t${url}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
@@ -1145,6 +1148,16 @@ async function collectBrowserLlmTabs() {
     };
   }
 
+  // CDP first: CDP-detected tabs are preferred over AppleScript-detected ones
+  // because they carry CDP metadata (tab ID, WebSocket URL) for browser_auto transport.
+  // Since dedupeBrowserTabs keeps the first occurrence, CDP entries win the dedup.
+  const shouldUseCdp = mode === "auto" || mode === "cdp";
+  if (shouldUseCdp) {
+    const cdp = await collectBrowserLlmTabsViaCdp();
+    tabs.push(...cdp.tabs);
+    if (cdp.note) notes.push(cdp.note);
+  }
+
   const shouldUseAppleScript = mode === "auto" || mode === "applescript";
   if (shouldUseAppleScript && process.platform === "darwin") {
     const mac = collectBrowserLlmTabsViaAppleScript();
@@ -1152,13 +1165,6 @@ async function collectBrowserLlmTabs() {
     if (mac.note) notes.push(mac.note);
   } else if (mode === "applescript" && process.platform !== "darwin") {
     notes.push("AppleScript scanning is macOS only. Switch to CDP scanning.");
-  }
-
-  const shouldUseCdp = mode === "auto" || mode === "cdp";
-  if (shouldUseCdp) {
-    const cdp = await collectBrowserLlmTabsViaCdp();
-    tabs.push(...cdp.tabs);
-    if (cdp.note) notes.push(cdp.note);
   }
 
   const uniqTabs = dedupeBrowserTabs(tabs);
@@ -1343,6 +1349,17 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
           candidate.cdp_tab_id = matches[0].id;
           candidate.cdp_ws_url = matches[0].webSocketDebuggerUrl;
         }
+      }
+    }
+
+    // Third pass: upgrade browser-detected candidates that missed the first hostname match.
+    // When CDP is reachable, AppleScript-detected speakers should also get browser_auto
+    // transport. The OrchestratedBrowserPort will create/navigate tabs on demand if needed.
+    if (cdpReachable) {
+      for (const candidate of candidates) {
+        if (candidate.type !== "browser" || candidate.auto_registered) continue;
+        if (candidate.cdp_available) continue; // already matched
+        candidate.cdp_available = true;
       }
     }
   }
