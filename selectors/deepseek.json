@@ -13,7 +13,8 @@
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 60000
+    "streamingTimeoutMs": 60000,
+    "stabilizationMinWaitMs": 5000
   },
   "modelSelector": {
     "trigger": "div[class*='model-selector'], button[class*='model']",

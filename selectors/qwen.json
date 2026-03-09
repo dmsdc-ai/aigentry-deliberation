@@ -5,15 +5,16 @@
   "selectors": {
     "inputSelector": "textarea.message-input-textarea, textarea[placeholder*='도와드릴까요'], textarea[placeholder*='help you']",
     "sendButton": "button.send-button, button[type='submit']",
-    "responseSelector": ".response-message-content, .markdown-body",
+    "responseSelector": ".response-message-content.phase-answer, .phase-answer .markdown-body, .phase-answer, .response-message-content, .markdown-body",
     "responseContainer": ".qwen-chat-message-assistant, .chat-response-message",
-    "streamingIndicator": ".phase-thinking, .typing-indicator"
+    "streamingIndicator": ".phase-thinking, .typing-indicator, .phase-answer.streaming, [data-streaming='true']"
   },
   "timing": {
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 60000
+    "streamingTimeoutMs": 60000,
+    "stabilizationMinWaitMs": 4000
   },
   "notes": "Qwen verified via CDP. Container: .qwen-chat-message-assistant or .chat-response-message. Response: .response-message-content.phase-answer. Thinking phase: .phase-thinking class. '생각이 끝났습니다' indicates thinking complete."
 }

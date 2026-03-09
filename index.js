@@ -74,6 +74,7 @@ import { fileURLToPath } from "url";
 import os from "os";
 import { OrchestratedBrowserPort } from "./browser-control-port.js";
 import { getModelSelectionForTurn } from "./model-router.js";
+import { readClipboardText, writeClipboardText, hasClipboardImage, captureClipboardImage } from "./clipboard.js";
 import {
   DECISION_STAGES, STAGE_TRANSITIONS,
   createDecisionSession, advanceStage, buildConflictMap,
@@ -383,6 +384,18 @@ function formatRuntimeError(error) {
 function appendRuntimeLog(level, message) {
   try {
     fs.mkdirSync(path.dirname(GLOBAL_RUNTIME_LOG), { recursive: true });
+    
+    // Simple rotation: if log > 1MB, truncate it
+    try {
+      if (fs.existsSync(GLOBAL_RUNTIME_LOG)) {
+        const stats = fs.statSync(GLOBAL_RUNTIME_LOG);
+        if (stats.size > 1024 * 1024) { // 1MB
+          const oldLog = GLOBAL_RUNTIME_LOG + ".old";
+          fs.renameSync(GLOBAL_RUNTIME_LOG, oldLog);
+        }
+      }
+    } catch { /* ignore rotation failures */ }
+
     const line = `${new Date().toISOString()} [${level}] ${message}\n`;
     fs.appendFileSync(GLOBAL_RUNTIME_LOG, line, "utf-8");
   } catch {
@@ -622,80 +635,6 @@ function detectCallerSpeaker() {
   }
 
   return null;
-}
-
-function resolveClipboardReader() {
-  if (process.platform === "darwin" && commandExistsInPath("pbpaste")) {
-    return { cmd: "pbpaste", args: [] };
-  }
-  if (process.platform === "win32") {
-    const windowsShell = ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
-      .find(cmd => commandExistsInPath(cmd));
-    if (windowsShell) {
-      return { cmd: windowsShell, args: ["-NoProfile", "-Command", "Get-Clipboard -Raw"] };
-    }
-  }
-  if (commandExistsInPath("wl-paste")) {
-    return { cmd: "wl-paste", args: ["-n"] };
-  }
-  if (commandExistsInPath("xclip")) {
-    return { cmd: "xclip", args: ["-selection", "clipboard", "-o"] };
-  }
-  if (commandExistsInPath("xsel")) {
-    return { cmd: "xsel", args: ["--clipboard", "--output"] };
-  }
-  return null;
-}
-
-function resolveClipboardWriter() {
-  if (process.platform === "darwin" && commandExistsInPath("pbcopy")) {
-    return { cmd: "pbcopy", args: [] };
-  }
-  if (process.platform === "win32") {
-    if (commandExistsInPath("clip.exe") || commandExistsInPath("clip")) {
-      return { cmd: "clip", args: [] };
-    }
-    const windowsShell = ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
-      .find(cmd => commandExistsInPath(cmd));
-    if (windowsShell) {
-      return { cmd: windowsShell, args: ["-NoProfile", "-Command", "[Console]::In.ReadToEnd() | Set-Clipboard"] };
-    }
-  }
-  if (commandExistsInPath("wl-copy")) {
-    return { cmd: "wl-copy", args: [] };
-  }
-  if (commandExistsInPath("xclip")) {
-    return { cmd: "xclip", args: ["-selection", "clipboard"] };
-  }
-  if (commandExistsInPath("xsel")) {
-    return { cmd: "xsel", args: ["--clipboard", "--input"] };
-  }
-  return null;
-}
-
-function readClipboardText() {
-  const tool = resolveClipboardReader();
-  if (!tool) {
-    throw new Error("No supported clipboard read command found (pbpaste/wl-paste/xclip/xsel etc).");
-  }
-  return execFileSync(tool.cmd, tool.args, {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 5 * 1024 * 1024,
-  });
-}
-
-function writeClipboardText(text) {
-  const tool = resolveClipboardWriter();
-  if (!tool) {
-    throw new Error("No supported clipboard write command found (pbcopy/wl-copy/xclip/xsel etc).");
-  }
-  execFileSync(tool.cmd, tool.args, {
-    input: text,
-    encoding: "utf-8",
-    stdio: ["pipe", "ignore", "pipe"],
-    maxBuffer: 5 * 1024 * 1024,
-  });
 }
 
 function isLlmUrl(url = "") {
@@ -1423,10 +1362,16 @@ function mapParticipantProfiles(speakers, candidates, typeOverrides) {
     // Check for explicit type override
     const overrideType = overrides[speaker] || overrides[raw];
     if (overrideType) {
+      const candidate = bySpeaker.get(speaker);
       profiles.push({
         speaker,
         type: overrideType,
-        ...(overrideType === "browser_auto" ? { provider: "chatgpt" } : {}),
+        ...(overrideType === "browser_auto" || overrideType === "browser" ? {
+          provider: candidate?.provider || null,
+          browser: candidate?.browser || null,
+          title: candidate?.title || null,
+          url: candidate?.url || null,
+        } : {}),
       });
       continue;
     }
@@ -1508,7 +1453,7 @@ function resolveTransportForSpeaker(state, speaker) {
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
   claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "prompt"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
-  codex: { cmd: "codex", flags: 'exec --model gpt-5.4-codex', example: 'codex exec --model gpt-5.4-codex "prompt"', modelFlag: '--model', defaultModel: 'gpt-5.4-codex', provider: 'chatgpt' },
+  codex: { cmd: "codex", flags: 'exec -', example: 'echo "prompt" | codex exec -', stdinMode: true, modelFlag: '--model', defaultModel: 'gpt-5.4', provider: 'chatgpt' },
   gemini: { cmd: "gemini", flags: '', example: 'gemini "prompt"', modelFlag: '--model', provider: 'gemini' },
   aider: { cmd: "aider", flags: '--message', example: 'aider --message "prompt"', modelFlag: '--model', provider: 'chatgpt' },
   cursor: { cmd: "cursor", flags: '', example: 'cursor "prompt"', modelFlag: null, provider: 'chatgpt' },
@@ -1534,12 +1479,18 @@ function formatTransportGuidance(transport, state, speaker) {
       return `CLI speaker. Respond directly via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.${invocationGuide}${modelGuide}\n\n⛔ **No API calls**: Do not call LLM APIs directly via REST API, HTTP requests, urllib, requests, etc. Only use the CLI tools above.`;
     }
     case "clipboard":
-      return `Browser LLM speaker. Attempting CDP auto-connect... Chrome may need to be restarted if already running without CDP.\n\n⛔ **No API calls**: This speaker responds only via web browser. Do not call LLMs via REST API or HTTP requests.`;
+      return `Browser LLM speaker. Copy the prompt below and paste it into the browser LLM using **Cmd+V (ㅍ)**, then submit the response via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", use_clipboard: true)\` after copying the LLM's response with **Cmd+C (ㅊ)**.\n\n` +
+             `📋 **Prompt has been copied to your clipboard.** (If not, copy the [turn_prompt] section below manually).\n` +
+             `🖼️ **To include an image:** Copy the image to your clipboard and use \`include_clipboard_image: true\` in \`deliberation_respond\`.\n\n` +
+             `⛔ **No API calls**: This speaker responds only via web browser. Do not call LLMs via REST API or HTTP requests.`;
     case "browser_auto":
       return `Auto browser speaker. Proceed automatically with \`deliberation_browser_auto_turn(session_id: "${sid}")\`. Inputs directly to browser LLM via CDP and reads responses.\n\n⛔ **No API calls**: Proceeds only via CDP automation. No REST API or HTTP requests.`;
     case "manual":
     default:
-      return `Manual speaker. Get a response from the LLM's **web UI or CLI tool** and submit via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.\n\n⛔ **Absolutely no API calls**: Calling LLM APIs directly via REST API, HTTP requests (urllib, requests, fetch, etc.) is forbidden. Only use web browser UI or CLI tools. Direct API key calls will result in deliberation participation being rejected.`;
+      return `Manual speaker. Get a response from the LLM's **web UI or CLI tool** and submit via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.\n\n` +
+             `📋 **Copy the [turn_prompt] section below** to the web UI.\n` +
+             `🖼️ **To include an image:** Copy the image to your clipboard and use \`include_clipboard_image: true\` in \`deliberation_respond\`.\n\n` +
+             `⛔ **Absolutely no API calls**: Calling LLM APIs directly via REST API, HTTP requests (urllib, requests, fetch, etc.) is forbidden. Only use web browser UI or CLI tools. Direct API key calls will result in deliberation participation being rejected.`;
   }
 }
 
@@ -1780,7 +1731,15 @@ tags: [deliberation]
       if (entry.fallback_reason) parts.push(`fallback: ${entry.fallback_reason}`);
       md += `> _${parts.join(" | ")}_\n\n`;
     }
-    md += `${entry.content}\n\n---\n\n`;
+    md += `${entry.content}\n\n`;
+    if (entry.attachments && entry.attachments.length > 0) {
+      for (const att of entry.attachments) {
+        if (att.type === "image") {
+          md += `![Attachment](${att.path})\n\n`;
+        }
+      }
+    }
+    md += `---\n\n`;
   }
   return md;
 }
@@ -1873,6 +1832,22 @@ function tmuxHasAttachedClients(sessionName) {
   }
 }
 
+function isTmuxWindowViewed(sessionName, windowName) {
+  try {
+    // List all clients and check for matching window name.
+    // Grouped sessions (created via 'new-session -t') share the same windows,
+    // so checking for the window name anywhere in the client list is sufficient.
+    const output = execFileSync("tmux", ["list-clients", "-F", "#{window_name}"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return String(output).split("\n").map(s => s.trim()).filter(Boolean).includes(windowName);
+  } catch {
+    return false;
+  }
+}
+
 function tmuxWindowCount(name) {
   try {
     const output = execFileSync("tmux", ["list-windows", "-t", name], {
@@ -1938,9 +1913,20 @@ function openPhysicalTerminal(sessionId) {
   // Use grouped session (new-session -t) for independent active window per client
   const attachCmd = `tmux new-session -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
 
-  // If a terminal is already attached, open a NEW grouped session instead of
-  // select-window (which would hijack all attached clients' views).
-  // Grouped sessions share windows but each has independent active window tracking.
+  // Prevent duplicate windows for the SAME session:
+  // If a client is already viewing this specific window, just activate Terminal.app
+  if (isTmuxWindowViewed(TMUX_SESSION, winName)) {
+    appendRuntimeLog("INFO", `TMUX_WINDOW_ALREADY_VIEWED: ${winName}. Activating existing Terminal.`);
+    if (process.platform === "darwin") {
+      try {
+        execFileSync("osascript", ["-e", 'tell application "Terminal" to activate'], { stdio: "ignore" });
+      } catch { /* ignore */ }
+    }
+    return { opened: true, windowIds: [] };
+  }
+
+  // If a terminal is already attached to OTHER windows, open a NEW grouped session
+  // instead of select-window (which would hijack all attached clients' views).
   if (tmuxHasAttachedClients(TMUX_SESSION)) {
     if (process.platform === "darwin") {
       const groupAttachCmd = `tmux new-session -t "${TMUX_SESSION}" \\; select-window -t "${TMUX_SESSION}:${winName}"`;
@@ -2072,17 +2058,20 @@ function spawnMonitorTerminal(sessionId) {
     if (hasTmuxSession(TMUX_SESSION)) {
       // Skip if a window with the same name already exists (prevents duplicates)
       if (hasTmuxWindow(TMUX_SESSION, winName)) {
+        appendRuntimeLog("INFO", `TMUX_WINDOW_EXISTS: ${winName} in ${TMUX_SESSION}`);
         return true;
       }
       execFileSync("tmux", ["new-window", "-t", TMUX_SESSION, "-n", winName, cmd], {
         stdio: "ignore",
         windowsHide: true,
       });
+      appendRuntimeLog("INFO", `TMUX_WINDOW_CREATED: ${winName} in existing ${TMUX_SESSION}`);
     } else {
       execFileSync("tmux", ["new-session", "-d", "-s", TMUX_SESSION, "-n", winName, cmd], {
         stdio: "ignore",
         windowsHide: true,
       });
+      appendRuntimeLog("INFO", `TMUX_SESSION_CREATED: ${TMUX_SESSION} with window ${winName}`);
     }
     return true;
   } catch {
@@ -2319,7 +2308,7 @@ ${recent}
 `;
 }
 
-function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason }) {
+function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason, attachments }) {
   const resolved = resolveSessionId(session_id);
   if (!resolved) {
     return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
@@ -2384,8 +2373,9 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       votes: votes.length > 0 ? votes : undefined,
       suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
       role_drift: roleDrift || undefined,
+      attachments: attachments || undefined,
     });
-    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | suggested_role: ${suggestedRole} | role_drift: ${roleDrift || false}`);
+    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | attachments: ${attachments ? attachments.length : 0}`);
 
     state.current_speaker = selectNextSpeaker(state);
 
@@ -2821,7 +2811,7 @@ server.tool(
     }
 
     const speaker = state.current_speaker;
-    const { transport, profile, reason } = resolveTransportForSpeaker(state, speaker);
+    let { transport, profile, reason } = resolveTransportForSpeaker(state, speaker);
     const turnId = state.pending_turn_id || null;
 
     // ── Self-speaker detection ──
@@ -2841,6 +2831,7 @@ server.tool(
     }
 
     let extra = "";
+    let turnPrompt = "";
 
     if (transport === "browser_auto") {
       // Auto-execute browser_auto_turn
@@ -2854,7 +2845,7 @@ server.tool(
         const modelSelection = getModelSelectionForTurn(state, turnSpeaker, turnProvider);
 
         // Build prompt
-        const turnPrompt = buildClipboardTurnPrompt(state, turnSpeaker, prompt, include_history_entries);
+        turnPrompt = buildClipboardTurnPrompt(state, turnSpeaker, prompt, include_history_entries);
 
         // Attach
         const attachResult = await port.attach(sessionId, { provider: turnProvider, url: profile?.url });
@@ -2893,7 +2884,28 @@ server.tool(
       } catch (autoErr) {
         const errMsg = autoErr instanceof Error ? autoErr.message : String(autoErr);
         extra = `\n\n⚠️ Auto-execution failed (${errMsg}). Restart Chrome with --remote-debugging-port=9222.`;
+        // Fallback to clipboard preparation
+        transport = "clipboard";
+        // Re-generate guidance for the new transport
+        if (!isSelfSpeaker) {
+          guidance = formatTransportGuidance(transport, state, speaker);
+        }
       }
+    }
+
+    if (transport === "clipboard" || transport === "manual") {
+      // Prepare prompt for manual/clipboard transport
+      turnPrompt = buildClipboardTurnPrompt(state, speaker, prompt, include_history_entries);
+
+      if (auto_prepare_clipboard) {
+        try {
+          writeClipboardText(turnPrompt);
+        } catch (clipErr) {
+          extra += `\n\n⚠️ Failed to copy to clipboard: ${clipErr.message}`;
+        }
+      }
+
+      extra += `\n\n### [turn_prompt]\n\`\`\`markdown\n${turnPrompt}\n\`\`\``;
     }
 
     const profileInfo = profile
@@ -3111,7 +3123,9 @@ server.tool(
             child.stdin.end();
             break;
           case "codex":
-            child = spawn("codex", ["exec", "--model", "gpt-5.4-codex", turnPrompt], { env, windowsHide: true });
+            child = spawn("codex", ["exec", "-"], { env, windowsHide: true });
+            child.stdin.write(turnPrompt);
+            child.stdin.end();
             break;
           case "gemini":
             child = spawn("gemini", ["-p", turnPrompt], { env, windowsHide: true });
@@ -3201,9 +3215,11 @@ server.tool(
     speaker: z.string().trim().min(1).max(64).describe("Responder name"),
     content: z.string().optional().describe("Response content (markdown). Either content or content_file is required."),
     content_file: z.string().optional().describe("File path containing response content. For avoiding JSON escape issues. File content is used as-is for content."),
+    use_clipboard: z.boolean().optional().describe("Read content from system clipboard (alternative to content/content_file)"),
+    include_clipboard_image: z.boolean().optional().describe("Capture and include image from system clipboard"),
     turn_id: z.string().optional().describe("Turn verification ID (value received from deliberation_route_turn)"),
   },
-  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, turn_id }) => {
+  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, use_clipboard, include_clipboard_image, turn_id }) => {
     // Guard: prevent orchestrator from fabricating responses for CLI/browser speakers
     const resolved = resolveSessionId(session_id);
     if (resolved && resolved !== "MULTIPLE") {
@@ -3229,20 +3245,79 @@ server.tool(
       }
     }
 
-    // Support reading content from file to avoid JSON escaping issues
+    // Support reading content from file or clipboard to avoid JSON escaping issues
     let finalContent = content;
-    if (content_file && !content) {
+    if (use_clipboard && !content) {
+      try {
+        finalContent = readClipboardText();
+      } catch (e) {
+        return { content: [{ type: "text", text: t(`❌ Failed to read from clipboard: ${e.message}`, `❌ 클립보드 읽기 실패: ${e.message}`, state?.lang) }] };
+      }
+    } else if (content_file && !content) {
       try {
         finalContent = fs.readFileSync(content_file, "utf-8").trim();
       } catch (e) {
         return { content: [{ type: "text", text: t(`❌ Failed to read content_file: ${e.message}`, `❌ content_file 읽기 실패: ${e.message}`, state?.lang) }] };
       }
     }
-    if (!finalContent) {
-      return { content: [{ type: "text", text: t("❌ Either content or content_file must be provided.", "❌ content 또는 content_file 중 하나를 제공해야 합니다.", "en") }] };
+    if (!finalContent && !include_clipboard_image) {
+      return { content: [{ type: "text", text: t("❌ Either content, content_file, or include_clipboard_image must be provided.", "❌ content, content_file 또는 include_clipboard_image 중 하나를 제공해야 합니다.", "en") }] };
     }
-    return submitDeliberationTurn({ session_id, speaker, content: finalContent, turn_id, channel_used: "cli_respond" });
+
+    const attachments = [];
+    if (include_clipboard_image) {
+      if (process.platform !== "darwin") {
+        return { content: [{ type: "text", text: "❌ Clipboard image capture is currently only supported on macOS." }] };
+      }
+      if (!hasClipboardImage()) {
+        return { content: [{ type: "text", text: t("❌ No image found on clipboard.", "❌ 클립보드에서 이미지를 찾을 수 없습니다.", state?.lang) }] };
+      }
+
+      const attachmentsDir = path.join(getSessionsDir(), `${resolved}_attachments`);
+      if (!fs.existsSync(attachmentsDir)) fs.mkdirSync(attachmentsDir, { recursive: true });
+      
+      const imgName = `img_${Date.now()}.png`;
+      const imgPath = path.join(attachmentsDir, imgName);
+      
+      if (captureClipboardImage(imgPath)) {
+        attachments.push({ type: "image", path: `attachments/${imgName}`, localPath: imgPath });
+      } else {
+        return { content: [{ type: "text", text: "❌ Failed to capture image from clipboard." }] };
+      }
+    }
+
+    return submitDeliberationTurn({ session_id, speaker, content: finalContent || "(Image response)", turn_id, channel_used: "cli_respond", attachments });
   })
+);
+
+server.tool(
+  "deliberation_copy_last_turn",
+  "Copy the last turn's response to the system clipboard.",
+  {
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+  },
+  async ({ session_id }) => {
+    const resolved = resolveSessionId(session_id);
+    if (!resolved || resolved === "MULTIPLE") {
+      return { content: [{ type: "text", text: t("No unique active deliberation found.", "고유한 활성 deliberation을 찾을 수 없습니다.", "en") }] };
+    }
+    const state = loadSession(resolved);
+    if (!state || state.log.length === 0) {
+      return { content: [{ type: "text", text: t("No responses yet.", "아직 응답이 없습니다.", "en") }] };
+    }
+    const last = state.log[state.log.length - 1];
+    try {
+      writeClipboardText(last.content);
+      let imgMsg = "";
+      if (last.attachments && last.attachments.length > 0) {
+        const hasImg = last.attachments.some(a => a.type === "image");
+        if (hasImg) imgMsg = "\n\n⚠️ Note: This response included images, but only text was copied to the clipboard.";
+      }
+      return { content: [{ type: "text", text: `📋 **[${last.speaker}]'s response copied to clipboard.** (Round ${last.round})${imgMsg}\n\nYou can now paste it into other tools using Cmd+V (ㅍ).` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `❌ Failed to copy to clipboard: ${e.message}` }] };
+    }
+  }
 );
 
 server.tool(
@@ -3312,6 +3387,9 @@ server.tool(
       saveSession(loaded);
       archivePath = archiveState(loaded);
       cleanupSyncMarkdown(loaded);
+      // Clean up the active session JSON file upon completion
+      const sessionFile = getSessionFile(loaded.id);
+      try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch { /* ignore */ }
       state = loaded;
       return null;
     });

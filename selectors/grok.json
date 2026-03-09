@@ -7,13 +7,15 @@
     "sendButton": "button[aria-label='제출'], button[aria-label='Submit'], button[type='submit']",
     "responseSelector": ".response-content-markdown, .markdown",
     "responseContainer": "div[id^='response-'], .message-bubble",
-    "streamingIndicator": "[data-streaming='true'], .animate-pulse"
+    "streamingIndicator": "[data-streaming='true'], .animate-pulse, [class*='thinking'], [class*='reasoning']"
   },
   "timing": {
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 60000
+    "streamingTimeoutMs": 60000,
+    "stabilizationMinWaitMs": 6000,
+    "stabilizationThreshold": 8
   },
   "modelSelector": {
     "trigger": "button[class*='model'], [data-testid*='model']",

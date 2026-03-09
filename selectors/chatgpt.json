@@ -14,7 +14,9 @@
     "inputDelayMs": 100,
     "sendDelayMs": 200,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 120000
+    "streamingTimeoutMs": 120000,
+    "stabilizationMinWaitMs": 8000,
+    "stabilizationThreshold": 10
   },
   "modelSelector": {
     "trigger": "button[data-testid='model-switcher-dropdown-button'], button[data-testid='model-selector-dropdown'], button[class*='model']",

@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DegradationStateMachine, makeResult, ERROR_CODES } from "./degradation-state-machine.js";
+import { writeClipboardText } from "./clipboard.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -103,6 +104,33 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     this._cmdId = 0;
     /** @type {Map<string, Set<string>>} dedupe: sessionId → Set<turnId> */
     this.sentTurns = new Map();
+    /** @type {Map<string, any>} wsUrl -> WebSocket connection promise */
+    this._connections = new Map();
+  }
+
+  async _getConnection(wsUrl) {
+    if (this._connections.has(wsUrl)) {
+      const conn = await this._connections.get(wsUrl);
+      if (conn.readyState === 1 || conn.readyState === 0) return conn; // OPEN or CONNECTING
+      this._connections.delete(wsUrl);
+    }
+
+    const connPromise = this._connectWs(wsUrl);
+    this._connections.set(wsUrl, connPromise);
+    
+    try {
+      const ws = await connPromise;
+      // Handle cleanup if closed externally
+      if (ws.on) {
+        ws.on("close", () => this._connections.delete(wsUrl));
+      } else if (ws.addEventListener) {
+        ws.addEventListener("close", () => this._connections.delete(wsUrl));
+      }
+      return ws;
+    } catch (err) {
+      this._connections.delete(wsUrl);
+      throw err;
+    }
   }
 
   async attach(sessionId, targetHint = {}) {
@@ -241,6 +269,19 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       binding._baselineDirectCount = baseline.data?.directCount || 0;
       binding._lastSentText = text; // Store for response filtering
 
+      // Mark existing containers with data-dlb-baseline for robust new-response detection
+      // (immune to content-visibility CSS count fluctuations)
+      await this._cdpEvaluate(binding, `
+        (function() {
+          var contSels = ${respContSel}.split(',').map(function(s) { return s.trim(); });
+          try { document.querySelectorAll('[data-dlb-baseline]').forEach(function(el) { el.removeAttribute('data-dlb-baseline'); }); } catch(e) {}
+          for (var i = 0; i < contSels.length; i++) {
+            try { document.querySelectorAll(contSels[i]).forEach(function(el) { el.setAttribute('data-dlb-baseline', '1'); }); } catch(e) {}
+          }
+          return { ok: true };
+        })()
+      `);
+
       // Step 1: Focus input and insert text
       const inputSel = JSON.stringify(binding.selectors.inputSelector);
       const sendBtnSel = JSON.stringify(binding.selectors.sendButton);
@@ -270,105 +311,194 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       }
 
       const isCE = focusInput.data?.isContentEditable;
+      const isMac = process.platform === "darwin";
 
-      if (isCE) {
-        // For contenteditable: use CDP Input.insertText (works with tiptap/ProseMirror/Quill)
-        // First clear existing content
-        await this._cdpEvaluate(binding, `
-          (function() {
-            var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
-            var input = null;
-            for (var i = 0; i < sels.length; i++) { input = document.querySelector(sels[i]); if (input) break; }
-            if (!input) return { ok: true };
-            input.click();
-            input.focus();
-            var sel = window.getSelection();
-            var range = document.createRange();
-            range.selectNodeContents(input);
-            sel.removeAllRanges();
-            sel.addRange(range);
-            document.execCommand('delete', false);
-            return { ok: true };
-          })()
-        `);
-        await new Promise(r => setTimeout(r, 50));
-
-        // Use CDP Input.insertText — triggers all framework handlers (tiptap, ProseMirror, Quill)
-        try {
-          await this._cdpCommand(binding, "Input.insertText", { text });
-        } catch {
-          // Fallback: execCommand (works for tiptap when properly focused via click)
-          await this._cdpEvaluate(binding, `
-            (function() {
-              var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
-              for (var i = 0; i < sels.length; i++) {
-                var input = document.querySelector(sels[i]);
-                if (input) { input.click(); input.focus(); document.execCommand('insertText', false, ${escapedText}); break; }
-              }
-              return { ok: true };
-            })()
-          `);
-        }
-      } else {
-        // For regular <textarea>/<input>: clear existing content, then use CDP Input.insertText
-        await this._cdpEvaluate(binding, `
-          (function() {
-            var input = document.querySelector(${inputSel});
-            if (!input) return { ok: true };
-            input.focus();
-            input.select ? input.select() : null;
-            input.value = '';
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            return { ok: true };
-          })()
-        `);
-        await new Promise(r => setTimeout(r, 50));
-
-        // CDP Input.insertText triggers OS-level text input
-        try {
-          await this._cdpCommand(binding, "Input.insertText", { text });
-        } catch {
-          // Fallback: nativeSetter approach
-          await this._cdpEvaluate(binding, `
-            (function() {
-              var input = document.querySelector(${inputSel});
-              if (!input) return { ok: true };
-              var nativeSetter = Object.getOwnPropertyDescriptor(
-                Object.getPrototypeOf(input), 'value'
-              );
-              if (nativeSetter && nativeSetter.set) {
-                nativeSetter.set.call(input, ${escapedText});
-              } else {
-                input.value = ${escapedText};
-              }
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-              return { ok: true };
-            })()
-          `);
-        }
-
-        // Sync React/Vue state: CDP Input.insertText updates DOM but may not trigger React onChange.
-        // Re-set value via nativeSetter + dispatch input event to force framework state sync.
+      // ── Step 1.1: Insert text ──
+      // For IME-heavy languages (Korean, Japanese, etc.) or complex editors (tiptap, ProseMirror),
+      // Input.insertText is the canonical CDP way to inject text while bypassing IME.
+      let insertionSuccess = false;
+      
+      try {
+        // Strategy 1: Clear and insert via CDP (Reliable for most web apps)
         await this._cdpEvaluate(binding, `
           (function() {
             var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
             for (var i = 0; i < sels.length; i++) {
               var input = document.querySelector(sels[i]);
-              if (input && input.value) {
-                var proto = Object.getPrototypeOf(input);
-                var desc = Object.getOwnPropertyDescriptor(proto, 'value');
-                if (desc && desc.set) {
-                  desc.set.call(input, input.value);
+              if (input) {
+                input.click();
+                input.focus();
+                if (input.isContentEditable) {
+                  var sel = window.getSelection();
+                  var range = document.createRange();
+                  range.selectNodeContents(input);
+                  sel.removeAllRanges();
+                  sel.addRange(range);
+                  document.execCommand('delete', false);
+                } else {
+                  input.value = '';
+                }
+                return { ok: true };
+              }
+            }
+            return { ok: false };
+          })()
+        `);
+        
+        await this._cdpCommand(binding, "Input.insertText", { text });
+        await new Promise(r => setTimeout(r, 100));
+        
+        // Sync framework state
+        await this._cdpEvaluate(binding, `
+          (function() {
+            var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+            for (var i = 0; i < sels.length; i++) {
+              var input = document.querySelector(sels[i]);
+              if (input) {
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }
+          })()
+        `);
+        insertionSuccess = true;
+      } catch (e) { /* ignore and try fallback */ }
+
+      // Strategy 2: Fallback to System Clipboard Paste (Cmd+V)
+      if (!insertionSuccess) {
+        try {
+          writeClipboardText(text);
+          const mod = isMac ? 4 : 2; // Meta (4) on Mac, Control (2) on Win/Linux
+          const keyCode = isMac ? 9 : 86; // 'V' key code
+          
+          // On Mac, we can send a list of commands. "paste" is layout-independent.
+          const cdpParams = {
+            type: "keyDown",
+            modifiers: mod,
+            key: isMac ? "ㅍ" : "v", // Map to current layout if possible
+            code: "KeyV",
+            windowsVirtualKeyCode: 86,
+            nativeVirtualKeyCode: keyCode
+          };
+          if (isMac) cdpParams.commands = ["paste"];
+          
+          await this._cdpCommand(binding, "Input.dispatchKeyEvent", cdpParams);
+          
+          // Also send KeyUp
+          await this._cdpCommand(binding, "Input.dispatchKeyEvent", {
+            type: "keyUp",
+            modifiers: mod,
+            key: isMac ? "ㅍ" : "v",
+            code: "KeyV",
+            windowsVirtualKeyCode: 86,
+            nativeVirtualKeyCode: keyCode
+          });
+          
+          insertionSuccess = true;
+          await new Promise(r => setTimeout(r, 200));
+        } catch (clipErr) { /* ignore */ }
+      }
+
+      if (!insertionSuccess) {
+        if (isCE) {
+          // For contenteditable: use CDP Input.insertText (works with tiptap/ProseMirror/Quill)
+          // First clear existing content
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+              var input = null;
+              for (var i = 0; i < sels.length; i++) { input = document.querySelector(sels[i]); if (input) break; }
+              if (!input) return { ok: true };
+              input.click();
+              input.focus();
+              var sel = window.getSelection();
+              var range = document.createRange();
+              range.selectNodeContents(input);
+              sel.removeAllRanges();
+              sel.addRange(range);
+              document.execCommand('delete', false);
+              return { ok: true };
+            })()
+          `);
+          await new Promise(r => setTimeout(r, 50));
+
+          // Use CDP Input.insertText — triggers all framework handlers (tiptap, ProseMirror, Quill)
+          try {
+            await this._cdpCommand(binding, "Input.insertText", { text });
+          } catch {
+            // Fallback: execCommand (works for tiptap when properly focused via click)
+            await this._cdpEvaluate(binding, `
+              (function() {
+                var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+                for (var i = 0; i < sels.length; i++) {
+                  var input = document.querySelector(sels[i]);
+                  if (input) { input.click(); input.focus(); document.execCommand('insertText', false, ${escapedText}); break; }
+                }
+                return { ok: true };
+              })()
+            `);
+          }
+        } else {
+          // For regular <textarea>/<input>: clear existing content, then use CDP Input.insertText
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var input = document.querySelector(${inputSel});
+              if (!input) return { ok: true };
+              input.focus();
+              input.select ? input.select() : null;
+              input.value = '';
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              return { ok: true };
+            })()
+          `);
+          await new Promise(r => setTimeout(r, 50));
+
+          // CDP Input.insertText triggers OS-level text input
+          try {
+            await this._cdpCommand(binding, "Input.insertText", { text });
+          } catch {
+            // Fallback: nativeSetter approach
+            await this._cdpEvaluate(binding, `
+              (function() {
+                var input = document.querySelector(${inputSel});
+                if (!input) return { ok: true };
+                var nativeSetter = Object.getOwnPropertyDescriptor(
+                  Object.getPrototypeOf(input), 'value'
+                );
+                if (nativeSetter && nativeSetter.set) {
+                  nativeSetter.set.call(input, ${escapedText});
+                } else {
+                  input.value = ${escapedText};
                 }
                 input.dispatchEvent(new Event('input', { bubbles: true }));
                 input.dispatchEvent(new Event('change', { bubbles: true }));
                 return { ok: true };
+              })()
+            `);
+          }
+
+          // Sync React/Vue state: CDP Input.insertText updates DOM but may not trigger React onChange.
+          // Re-set value via nativeSetter + dispatch input event to force framework state sync.
+          await this._cdpEvaluate(binding, `
+            (function() {
+              var sels = ${inputSel}.split(',').map(function(s) { return s.trim(); });
+              for (var i = 0; i < sels.length; i++) {
+                var input = document.querySelector(sels[i]);
+                if (input && input.value) {
+                  var proto = Object.getPrototypeOf(input);
+                  var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                  if (desc && desc.set) {
+                    desc.set.call(input, input.value);
+                  }
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                  return { ok: true };
+                }
               }
-            }
-            return { ok: true };
-          })()
-        `);
+              return { ok: true };
+            })()
+          `);
+        }
       }
 
       // Small delay for framework state propagation
@@ -527,6 +657,8 @@ class DevToolsMcpAdapter extends BrowserControlPort {
 
     const timeoutMs = timeoutSec * 1000;
     const pollInterval = binding.timing?.pollIntervalMs || 500;
+    const stabilizationThreshold = binding.timing?.stabilizationThreshold || 6;
+    const stabilizationMinWaitMs = binding.timing?.stabilizationMinWaitMs || 0;
     const startTime = Date.now();
 
     const streamSel = JSON.stringify(binding.selectors.streamingIndicator);
@@ -550,15 +682,31 @@ class DevToolsMcpAdapter extends BrowserControlPort {
             function isResponse(txt) {
               if (!txt || !txt.trim()) return false;
               var t = txt.trim();
+              var tLower = t.toLowerCase();
               // Reject if text is exact match of sent message (user echo)
               if (sentMsg && t === sentMsg) return false;
               // Reject if text is >80% similar to sent message (likely echo with minor formatting diff)
               if (sentMsg && t.length > 20 && (t.includes(sentMsg) || sentMsg === t.substring(0, sentMsg.length))) return false;
-              // Reject known loading/placeholder texts
+              // Strip known suffixes before checking (Qwen appends skip button text)
+              var suffixes = ['건너뛰기', 'skip'];
+              for (var s = 0; s < suffixes.length; s++) {
+                if (tLower.length > suffixes[s].length && tLower.lastIndexOf(suffixes[s]) === tLower.length - suffixes[s].length) {
+                  t = t.substring(0, t.length - suffixes[s].length).trim();
+                  tLower = t.toLowerCase();
+                }
+              }
+              // Reject known loading/placeholder texts (case-insensitive)
               var placeholders = ['...', '…', '생각 중...', '생각 중', '생각이 끝났습니다',
-                '조금만 더 기다려 주세요', '조금만 더 기다려 주세요.', 'Thinking', 'Thinking...',
-                'Loading', 'Loading...', 'Generating', 'Generating...'];
-              if (placeholders.indexOf(t) >= 0) return false;
+                '조금만 더 기다려 주세요', '조금만 더 기다려 주세요.',
+                '응답을 준비 중입니다. 잠시만 기다려 주세요.', '응답을 준비 중입니다.', '잠시만 기다려 주세요.',
+                'copilot 메시지', 'copilot message',
+                'thinking', 'thinking...', 'loading', 'loading...', 'generating', 'generating...'];
+              if (placeholders.indexOf(tLower) >= 0) return false;
+              // Reject by prefix (loading/preparing messages)
+              var prefixes = ['응답을 준비', 'generating response'];
+              for (var p = 0; p < prefixes.length; p++) {
+                if (tLower.indexOf(prefixes[p].toLowerCase()) === 0) return false;
+              }
               // Reject very short text (likely placeholder dots or single chars)
               if (t.length < 2) return false;
               return true;
@@ -571,6 +719,7 @@ class DevToolsMcpAdapter extends BrowserControlPort {
               return txt.replace(/\s*(Copied|Copy|복사|복사됨|공유|Share)\s*$/gi, '')
                         .replace(/\s*(오전|오후)\s+\d{1,2}:\d{2}\s*$/g, '') // Korean timestamps
                         .replace(/\s*\d+\.\d+초\s*$/g, '') // Duration indicators
+                        .replace(/\s*(건너뛰기|skip)\s*$/gi, '') // Qwen skip button text
                         .trim();
             }
 
@@ -594,15 +743,19 @@ class DevToolsMcpAdapter extends BrowserControlPort {
               } catch(e) {}
             }
 
-            if (allContainers.length > ${baselineContainers}) {
-              var last = allContainers[allContainers.length - 1];
-              // Scroll into view to force content-visibility rendering (ChatGPT workaround)
+            // Find NEW containers (without baseline marker — immune to content-visibility count fluctuations)
+            var newContainers = [];
+            for (var nc = 0; nc < allContainers.length; nc++) {
+              if (!allContainers[nc].hasAttribute('data-dlb-baseline')) newContainers.push(allContainers[nc]);
+            }
+            if (newContainers.length > 0) {
+              var last = newContainers[newContainers.length - 1];
+              // Scroll into view to force content-visibility rendering
               try { last.scrollIntoView({ block: 'end' }); } catch(e) {}
               var respSels = ${respSel}.split(',').map(function(s) { return s.trim(); });
               for (var i = 0; i < respSels.length; i++) {
                 try {
                   var content = last.querySelector(respSels[i]);
-                  // Try textContent first, then innerText as fallback for content-visibility
                   var txt = content ? (content.textContent || content.innerText || '') : '';
                   if (isResponse(txt)) {
                     candidateText = txt;
@@ -630,14 +783,17 @@ class DevToolsMcpAdapter extends BrowserControlPort {
                   for (var j = 0; j < found.length; j++) allDirect.push(found[j]);
                 } catch(e) {}
               }
-              if (allDirect.length > ${baselineDirect}) {
-                for (var k = allDirect.length - 1; k >= ${baselineDirect}; k--) {
-                  var txt = allDirect[k].textContent?.trim();
-                  if (isResponse(txt)) {
-                    candidateText = txt;
-                    candidateStrategy = 'direct';
-                    break;
-                  }
+              // Filter to elements NOT inside a baseline-marked container
+              var newDirect = [];
+              for (var d = 0; d < allDirect.length; d++) {
+                if (!allDirect[d].closest('[data-dlb-baseline]')) newDirect.push(allDirect[d]);
+              }
+              for (var k = newDirect.length - 1; k >= 0; k--) {
+                var txt = newDirect[k].textContent?.trim();
+                if (isResponse(txt)) {
+                  candidateText = txt;
+                  candidateStrategy = 'direct';
+                  break;
                 }
               }
             }
@@ -651,29 +807,27 @@ class DevToolsMcpAdapter extends BrowserControlPort {
           })()
         `);
 
-        if (status.data && !status.data.streaming && status.data.text) {
-          return makeResult(true, {
-            turnId,
-            response: status.data.text.trim(),
-            elapsedMs: Date.now() - startTime,
-            strategy: status.data.strategy,
-          });
-        }
+        // Unified text tracking: always verify text stability before returning
+        // (prevents premature capture when streaming indicators are unreliable)
+        const currentText = (status.data?.text || status.data?.candidateText || '').trim();
+        const isCurrentlyStreaming = !!(status.data?.streaming);
 
-        // Text stabilization: if streaming indicator persists but text hasn't changed for 3+ polls, consider done
-        if (status.data?.candidateText) {
-          if (status.data.candidateText === lastSeenText) {
+        if (currentText) {
+          if (currentText === lastSeenText) {
             stableCount++;
-            if (stableCount >= 3) {
+            // Non-streaming: require 2 stable polls (1s) for fast return
+            // Streaming: require full stabilizationThreshold for thorough check
+            const effectiveThreshold = isCurrentlyStreaming ? stabilizationThreshold : Math.min(2, stabilizationThreshold);
+            if (stableCount >= effectiveThreshold && elapsed >= stabilizationMinWaitMs) {
               return makeResult(true, {
                 turnId,
-                response: status.data.candidateText.trim(),
+                response: currentText,
                 elapsedMs: Date.now() - startTime,
-                strategy: 'stabilized',
+                strategy: isCurrentlyStreaming ? 'stabilized' : (status.data?.strategy || 'non-streaming'),
               });
             }
           } else {
-            lastSeenText = status.data.candidateText;
+            lastSeenText = currentText;
             stableCount = 0;
           }
         }
@@ -883,36 +1037,42 @@ class DevToolsMcpAdapter extends BrowserControlPort {
       throw Object.assign(new Error("No WebSocket URL for CDP"), { code: "MCP_CHANNEL_CLOSED" });
     }
 
-    // Use dynamic import for WebSocket (Node 18+ has it globally, or ws package)
-    const ws = await this._connectWs(binding.wsUrl);
+    const ws = await this._getConnection(binding.wsUrl);
     const id = ++this._cmdId;
 
     return new Promise((resolve, reject) => {
+      let cleanup;
+      
       const timeout = setTimeout(() => {
-        ws.close();
-        reject(Object.assign(new Error("CDP command timeout"), { code: "TIMEOUT" }));
-      }, 10000);
+        if (cleanup) cleanup();
+        reject(Object.assign(new Error(`CDP command timeout: ${method}`), { code: "TIMEOUT" }));
+      }, 15000);
 
-      ws.onmessage = (event) => {
+      const handleMessage = (event) => {
         try {
           const data = JSON.parse(typeof event === "string" ? event : event.data);
           if (data.id === id) {
             clearTimeout(timeout);
-            ws.close();
+            if (cleanup) cleanup();
+
             if (data.error) {
               reject(Object.assign(new Error(data.error.message), { code: "SEND_FAILED" }));
             } else {
               resolve(data.result);
             }
           }
-        } catch { /* ignore parse errors */ }
+        } catch { /* parse error */ }
       };
 
-      ws.onerror = (err) => {
-        clearTimeout(timeout);
-        ws.close();
-        reject(Object.assign(new Error(err.message || "WebSocket error"), { code: "NETWORK_DISCONNECTED" }));
+      cleanup = () => {
+        if (ws.removeEventListener) ws.removeEventListener("message", handleMessage);
+        else if (ws.off) ws.off("message", handleMessage);
+        else if (ws.onmessage === handleMessage) ws.onmessage = null;
       };
+
+      if (ws.addEventListener) ws.addEventListener("message", handleMessage);
+      else if (ws.on) ws.on("message", handleMessage);
+      else ws.onmessage = handleMessage;
 
       ws.send(JSON.stringify({ id, method, params }));
     });

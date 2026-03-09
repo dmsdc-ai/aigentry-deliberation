@@ -5,7 +5,7 @@
   "selectors": {
     "inputSelector": "#userInput, textarea#userInput",
     "sendButton": "button[data-testid='submit-button'], button[aria-label='메시지 제출'], button[aria-label='Submit message']",
-    "responseSelector": ".ac-textBlock, [data-content='ai-message']",
+    "responseSelector": ".ac-textBlock p, .ac-textBlock, [data-content='ai-message'] .markdown, [data-content='ai-message'] p",
     "responseContainer": "[data-content='ai-message'], .response-message",
     "streamingIndicator": ".typing-indicator, .is-streaming"
   },
@@ -13,7 +13,8 @@
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 45000
+    "streamingTimeoutMs": 45000,
+    "stabilizationMinWaitMs": 5000
   },
   "notes": "Microsoft Copilot selectors - send button aria-label is locale-dependent (EN: 'Submit message', KR: '메시지 제출'). Button appears after text input. data-testid='submit-button' is stable."
 }

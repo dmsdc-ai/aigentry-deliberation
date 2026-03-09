@@ -3,17 +3,18 @@
   "version": "1.1.0",
   "domains": ["chat.mistral.ai", "mistral.ai"],
   "selectors": {
-    "inputSelector": "div.ProseMirror[contenteditable='true'], div[contenteditable='true']",
-    "sendButton": "button[aria-label='Send question'], button[aria-label='Send'], button[type='submit']",
-    "responseSelector": ".prose, .markdown-body",
-    "responseContainer": ".message-assistant, [data-role='assistant']",
-    "streamingIndicator": ".animate-pulse, [data-streaming='true']"
+    "inputSelector": "div[contenteditable='true'][data-lexical-editor='true'], div.ProseMirror[contenteditable='true'], div[contenteditable='true']",
+    "sendButton": "button[aria-label='Send message'], button[aria-label='Send question'], button[aria-label='Send'], button[type='submit']",
+    "responseSelector": "[class*='prose'], [class*='markdown'], [class*='message-content'], .prose, .markdown-body",
+    "responseContainer": "[class*='assistant-message'], [class*='bot-message'], [class*='ai-message'], .message-assistant, [data-role='assistant']",
+    "streamingIndicator": ".animate-spin, [class*='loading'], [class*='streaming'], .animate-pulse, [data-streaming='true']"
   },
   "timing": {
     "inputDelayMs": 100,
     "sendDelayMs": 300,
     "pollIntervalMs": 500,
-    "streamingTimeoutMs": 45000
+    "streamingTimeoutMs": 45000,
+    "stabilizationMinWaitMs": 5000
   },
   "notes": "Mistral Le Chat uses ProseMirror contenteditable. Send button aria-label='Send question' appears after text input."
 }
