@@ -3325,6 +3325,41 @@ server.tool(
 );
 
 server.tool(
+  "deliberation_list_remote_sessions",
+  "List all active deliberation sessions on a remote machine (via Tailscale/IP) to find the correct session_id for context injection.",
+  {
+    remote_url: z.string().describe("The Tailscale IP or Host and port (e.g., '100.100.100.5:3847') of the remote machine."),
+  },
+  safeToolHandler("deliberation_list_remote_sessions", async ({ remote_url }) => {
+    try {
+      const baseUrl = remote_url.startsWith("http") ? remote_url : `http://${remote_url}`;
+      const cleanBaseUrl = baseUrl.replace(/\/$/, "");
+      const response = await fetch(`${cleanBaseUrl}/api/sessions`);
+      
+      if (!response.ok) {
+        return { content: [{ type: "text", text: `❌ Failed to fetch remote sessions (${response.status})` }] };
+      }
+      
+      const sessions = await response.json();
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        return { content: [{ type: "text", text: `No active deliberation sessions found on ${remote_url}.` }] };
+      }
+
+      let result = `### Active Sessions on ${remote_url}\n\n`;
+      for (const s of sessions) {
+        result += `- **ID:** \`${s.id}\`\n`;
+        result += `  **Topic:** ${s.topic}\n`;
+        result += `  **Status:** ${s.status} (Round ${s.current_round}/${s.max_rounds})\n\n`;
+      }
+
+      return { content: [{ type: "text", text: result }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `❌ Error connecting to remote machine at ${remote_url}: ${e.message}` }] };
+    }
+  })
+);
+
+server.tool(
   "deliberation_inject_context",
   "Inject additional context or instructions into a specific active session. (Useful for local or remote context injection via Tailscale)",
   {
