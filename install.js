@@ -42,6 +42,7 @@ function toForwardSlash(p) {
 const FILES_TO_COPY = [
   "index.js",
   "observer.js",
+  "clipboard.js",
   "browser-control-port.js",
   "degradation-state-machine.js",
   "model-router.js",

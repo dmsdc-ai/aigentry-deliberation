@@ -1453,7 +1453,7 @@ function resolveTransportForSpeaker(state, speaker) {
 // CLI-specific invocation flags for non-interactive execution
 const CLI_INVOCATION_HINTS = {
   claude: { cmd: "claude", flags: '-p --output-format text', example: 'CLAUDECODE= claude -p --output-format text "prompt"', envPrefix: 'CLAUDECODE=', modelFlag: '--model', provider: 'claude' },
-  codex: { cmd: "codex", flags: 'exec -', example: 'echo "prompt" | codex exec -', stdinMode: true, modelFlag: '--model', defaultModel: 'gpt-5.4', provider: 'chatgpt' },
+  codex: { cmd: "codex", flags: 'exec -', example: 'echo "prompt" | codex exec -', stdinMode: true, modelFlag: '--model', defaultModel: 'default', provider: 'chatgpt' },
   gemini: { cmd: "gemini", flags: '', example: 'gemini "prompt"', modelFlag: '--model', provider: 'gemini' },
   aider: { cmd: "aider", flags: '--message', example: 'aider --message "prompt"', modelFlag: '--model', provider: 'chatgpt' },
   cursor: { cmd: "cursor", flags: '', example: 'cursor "prompt"', modelFlag: null, provider: 'chatgpt' },
@@ -2449,6 +2449,7 @@ server.tool(
   "Start a new deliberation. Multiple deliberations can run simultaneously.",
   {
     topic: z.string().describe("Discussion topic"),
+    session_id: z.string().trim().min(1).max(64).optional().describe("Explicit session ID to use. If omitted, one is generated from topic."),
     rounds: z.coerce.number().optional().describe("Number of rounds (defaults to config setting, default 3)"),
     first_speaker: z.string().trim().min(1).max(64).optional().describe("First speaker name (defaults to first item in speakers)"),
     speakers: z.preprocess(
@@ -2483,9 +2484,9 @@ server.tool(
       z.record(z.string(), z.enum(["critic", "implementer", "mediator", "researcher", "free"])).optional()
     ).describe("Per-speaker role assignment (e.g., {\"claude\": \"critic\", \"codex\": \"implementer\"})"),
     role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
-      .describe("Role preset (balanced/debate/research/brainstorm/review/consensus). Ignored if speaker_roles is specified"),
-  },
-  safeToolHandler("deliberation_start", async ({ topic, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
+    .describe("Role preset (balanced/debate/research/brainstorm/review/consensus). Ignored if speaker_roles is specified"),
+    },
+    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
@@ -2499,7 +2500,13 @@ server.tool(
       };
     }
 
-    const sessionId = generateSessionId(topic);
+    const sessionId = session_id || generateSessionId(topic);
+    if (session_id) {
+      const existing = loadSession(session_id);
+      if (existing && existing.status === "active") {
+        return { content: [{ type: "text", text: `❌ Session "${session_id}" is already active. Please use a different ID or reset it first.` }] };
+      }
+    }
     const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
 
     // Resolve effective settings from config
@@ -2823,9 +2830,19 @@ server.tool(
 
     let guidance;
     if (isSelfSpeaker) {
-      guidance = `🟢 **It's your turn.** You (${speaker}) are the current speaker.\n\n` +
+      guidance = t(
+        `🟢 **It's your turn.** You (${speaker}) are the current speaker.\n\n` +
         `Write your response and submit via \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`.\n\n` +
-        `⚠️ **Do not use cli_auto_turn**: Recursively calling yourself will cause a timeout. You must use deliberation_respond directly.`;
+        `⚠️ **Wait! Why can't I use cli_auto_turn?**\n` +
+        `You are currently the **orchestrator** (the AI running this tool). If you try to spawn yourself automatically, it would create an infinite loop (you calling yourself calling yourself...) and timeout.\n\n` +
+        `Please analyze the topic and history above, formulate your response, and call \`deliberation_respond\` directly.`,
+        `🟢 **당신의 차례입니다.** 당신(${speaker})이 현재 발언자입니다.\n\n` +
+        `응답을 작성하고 \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`를 통해 제출하세요.\n\n` +
+        `⚠️ **잠깐! 왜 cli_auto_turn을 쓸 수 없나요?**\n` +
+        `당신은 현재 **오케스트레이터**(이 도구를 실행 중인 AI)입니다. 자기 자신을 자동으로 spawn하려고 하면 무한 루프(자신이 자신을 호출하고 다시 호출하는...)가 발생하여 타임아웃이 됩니다.\n\n` +
+        `위의 주제와 이력을 분석하여 응답을 작성한 뒤, \`deliberation_respond\`를 직접 호출해 주세요.`,
+        state?.lang
+      );
     } else {
       guidance = formatTransportGuidance(transport, state, speaker);
     }
@@ -3073,13 +3090,19 @@ server.tool(
       return { content: [{ type: "text", text: t(`Speaker "${speaker}" is not a CLI type (transport: ${transport}). Browser speakers should use deliberation_browser_auto_turn.`, `speaker "${speaker}"는 CLI 타입이 아닙니다 (transport: ${transport}). 브라우저 speaker는 deliberation_browser_auto_turn을 사용하세요.`, state?.lang) }] };
     }
 
-    // Block recursive self-spawn: if the speaker is the same CLI as the caller,
-    // spawning it would create infinite recursion and timeout.
     const callerSpeaker = detectCallerSpeaker();
     if (callerSpeaker && speaker === callerSpeaker) {
       return { content: [{ type: "text", text: t(
-        `⚠️ **Recursive call blocked**: Speaker "${speaker}" is the same CLI as the current orchestrator.\n\nSpawning yourself with cli_auto_turn will cause a timeout.\nWrite your response and submit via \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`.`,
-        `⚠️ **재귀 호출 차단**: speaker "${speaker}"는 현재 오케스트레이터와 동일한 CLI입니다.\n\ncli_auto_turn으로 자기 자신을 spawn하면 타임아웃이 발생합니다.\n직접 응답을 작성하여 \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`로 제출하세요.`,
+        `🟢 **It's your turn.** You (${speaker}) are the current speaker.\n\n` +
+        `Write your response and submit via \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`.\n\n` +
+        `⚠️ **Wait! Why can't I use cli_auto_turn?**\n` +
+        `You are currently the **orchestrator** (the AI running this tool). If you try to spawn yourself automatically, it would create an infinite loop (you calling yourself calling yourself...) and timeout.\n\n` +
+        `Please analyze the topic and history above, formulate your response, and call \`deliberation_respond\` directly.`,
+        `🟢 **당신의 차례입니다.** 당신(${speaker})이 현재 발언자입니다.\n\n` +
+        `응답을 작성하고 \`deliberation_respond(session_id: "${resolved}", speaker: "${speaker}", content: "...")\`를 통해 제출하세요.\n\n` +
+        `⚠️ **잠깐! 왜 cli_auto_turn을 쓸 수 없나요?**\n` +
+        `당신은 현재 **오케스트레이터**(이 도구를 실행 중인 AI)입니다. 자기 자신을 자동으로 spawn하려고 하면 무한 루프(자신이 자신을 호출하고 다시 호출하는...)가 발생하여 타임아웃이 됩니다.\n\n` +
+        `위의 주제와 이력을 분석하여 응답을 작성한 뒤, \`deliberation_respond\`를 직접 호출해 주세요.`,
         state?.lang)
       }] };
     }
@@ -3154,12 +3177,23 @@ server.tool(
             // Clean up output noise
             let cleaned = stdout;
             if (speaker === "codex") {
-              cleaned = stdout.split("\n")
-                .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|user$|mcp:|thinking$|tokens used$|^[0-9,]*$)/.test(line))
-                .join("\n");
+              // Codex output includes the prompt and metadata.
+              // Find the line starting with "codex" and take everything after it.
+              const lines = stdout.split("\n");
+              const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
+              if (codexLineIdx !== -1) {
+                cleaned = lines.slice(codexLineIdx + 1)
+                  .filter(line => !/^(tokens used$|^[0-9,]*$)/.test(line))
+                  .join("\n");
+              } else {
+                // Fallback regex cleaning
+                cleaned = stdout.split("\n")
+                  .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|user$|mcp:|thinking$|tokens used$|^[0-9,]*$)/.test(line))
+                  .join("\n");
+              }
             } else if (speaker === "gemini") {
               cleaned = stdout.split("\n")
-                .filter(line => !/^(Loaded cached|Error during discovery)/.test(line))
+                .filter(line => !/^(Loaded cached|Error during discovery|\[MCP error\]| {4}at| {2}errno:| {2}code:| {2}syscall:| {2}path:| {2}spawnargs:|MCP issues detected|Server .* supports tool updates)/.test(line))
                 .join("\n");
             }
             resolve(cleaned.trim());
@@ -3287,6 +3321,50 @@ server.tool(
     }
 
     return submitDeliberationTurn({ session_id, speaker, content: finalContent || "(Image response)", turn_id, channel_used: "cli_respond", attachments });
+  })
+);
+
+server.tool(
+  "deliberation_inject_context",
+  "Inject additional context or instructions into a specific active session. (Useful for local or remote context injection via Tailscale)",
+  {
+    session_id: z.string().describe("Session ID to inject context into"),
+    context: z.string().describe("The context text to inject"),
+    speaker: z.string().default("system").describe("Optional label for who injected the context (default: 'system')"),
+  },
+  safeToolHandler("deliberation_inject_context", async ({ session_id, context, speaker }) => {
+    const resolved = resolveSessionId(session_id);
+    if (!resolved) {
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+    }
+    if (resolved === "MULTIPLE") {
+      return { content: [{ type: "text", text: multipleSessionsError() }] };
+    }
+
+    return withSessionLock(resolved, () => {
+      const state = loadSession(resolved);
+      if (!state || state.status !== "active") {
+        return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+      }
+
+      state.log.push({
+        round: state.current_round,
+        speaker: speaker || "system",
+        content: `[Context Injection]\n${context}`,
+        timestamp: new Date().toISOString(),
+        event: "context_injection",
+      });
+
+      appendRuntimeLog("INFO", `CONTEXT_INJECTION: ${state.id} | speaker: ${speaker || "system"} | length: ${context.length}`);
+      saveSession(state);
+
+      return {
+        content: [{
+          type: "text",
+          text: `✅ Context successfully injected into session "${state.id}".`,
+        }],
+      };
+    });
   })
 );
 
@@ -3623,7 +3701,7 @@ server.tool(
 function invokeCliReviewer(command, prompt, timeoutMs) {
   const hint = CLI_INVOCATION_HINTS[command];
   let args;
-  let opts = { encoding: "utf-8", timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 5 * 1024 * 1024, windowsHide: true };
+  let opts = { encoding: "utf-8", timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 10 * 1024 * 1024, windowsHide: true };
   const env = { ...process.env };
 
   switch (command) {
@@ -3631,11 +3709,10 @@ function invokeCliReviewer(command, prompt, timeoutMs) {
       if (hint?.envPrefix?.includes("CLAUDECODE=")) delete env.CLAUDECODE;
       args = ["-p", "--output-format", "text", "--no-input"];
       opts.input = prompt;
-      opts.stdio = ["pipe", "pipe", "pipe"];
       break;
     case "codex":
-      args = ["exec", prompt];
-      opts.stdio = ["ignore", "pipe", "pipe"];
+      args = ["exec", "-"];
+      opts.input = prompt;
       break;
     case "gemini":
       args = ["-p", prompt];
@@ -3651,7 +3728,17 @@ function invokeCliReviewer(command, prompt, timeoutMs) {
 
   try {
     const result = execFileSync(command, args, { ...opts, env });
-    return { ok: true, response: result.trim() };
+    let cleaned = result;
+    if (command === "codex") {
+      const lines = result.split("\n");
+      const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
+      if (codexLineIdx !== -1) {
+        cleaned = lines.slice(codexLineIdx + 1)
+          .filter(line => !/^(tokens used$|^[0-9,]*$)/.test(line))
+          .join("\n");
+      }
+    }
+    return { ok: true, response: cleaned.trim() };
   } catch (error) {
     if (error && error.killed) {
       return { ok: false, error: "timeout" };
@@ -3991,23 +4078,23 @@ server.tool(
           let stdout = "";
           let stderr = "";
 
-          const args = [];
+          let proc;
+          const env = { ...process.env, NO_COLOR: "1" };
+          
           if (speaker === "claude") {
-            args.push("-p", "--output-format", "text", opinionPrompt);
+            proc = spawn("claude", ["-p", "--output-format", "text", "--no-input"], { env, windowsHide: true });
+            proc.stdin.write(opinionPrompt);
+            proc.stdin.end();
           } else if (speaker === "codex") {
-            args.push("exec", opinionPrompt);
+            proc = spawn("codex", ["exec", "-"], { env, windowsHide: true });
+            proc.stdin.write(opinionPrompt);
+            proc.stdin.end();
           } else if (speaker === "gemini") {
-            args.push("-p", opinionPrompt);
+            proc = spawn("gemini", ["-p", opinionPrompt], { env, windowsHide: true });
           } else {
-            const flags = hint?.flags || [];
-            args.push(...flags, opinionPrompt);
+            const flags = hint?.flags ? (Array.isArray(hint.flags) ? hint.flags : hint.flags.split(/\s+/)) : [];
+            proc = spawn(cmd, [...flags, opinionPrompt], { env, windowsHide: true });
           }
-
-          const proc = spawn(cmd, args, {
-            stdio: ["pipe", "pipe", "pipe"],
-            env: { ...process.env, NO_COLOR: "1" },
-            timeout: 180000,
-          });
 
           proc.stdout?.on("data", (d) => { stdout += d.toString(); });
           proc.stderr?.on("data", (d) => { stderr += d.toString(); });
@@ -4019,7 +4106,21 @@ server.tool(
 
           proc.on("close", (code) => {
             clearTimeout(timer);
-            resolve(stdout.trim() || stderr.trim());
+            let cleaned = stdout.trim() || stderr.trim();
+            if (speaker === "codex") {
+              const lines = cleaned.split("\n");
+              const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
+              if (codexLineIdx !== -1) {
+                cleaned = lines.slice(codexLineIdx + 1)
+                  .filter(line => !/^(tokens used$|^[0-9,]*$)/.test(line))
+                  .join("\n").trim();
+              }
+            } else if (speaker === "gemini") {
+              cleaned = cleaned.split("\n")
+                .filter(line => !/^(Loaded cached|Error during discovery|\[MCP error\]| {4}at| {2}errno:| {2}code:| {2}syscall:| {2}path:| {2}spawnargs:|MCP issues detected|Server .* supports tool updates)/.test(line))
+                .join("\n").trim();
+            }
+            resolve(cleaned);
           });
 
           proc.on("error", (err) => {

@@ -30,6 +30,7 @@ const CLI_LABELS = {
   opencode: "OpenCode", cursor: "Cursor", continue: "Continue"
 };
 const DEFAULT_PORT = 3847;
+const DEFAULT_HOST = process.env.HOST || "0.0.0.0";
 
 function getProjectSlug() {
   const cwd = process.cwd();
@@ -64,6 +65,21 @@ function findSession(sessionId) {
     }
   } catch {}
   return null;
+}
+
+function saveSession(session) {
+  const slugs = fs.readdirSync(STATE_DIR).filter(f => {
+    try { return fs.statSync(path.join(STATE_DIR, f)).isDirectory(); } catch { return false; }
+  });
+  for (const slug of slugs) {
+    const sessionsDir = path.join(STATE_DIR, slug, "sessions");
+    const filePath = path.join(sessionsDir, `${session.id}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, JSON.stringify(session, null, 2), "utf-8");
+      return true;
+    }
+  }
+  return false;
 }
 
 function getAllActiveSessions() {
@@ -262,8 +278,9 @@ function createServer(port) {
 
     // CORS
     const origin = req.headers.origin || "";
-    const allowedOrigins = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
-    res.setHeader("Access-Control-Allow-Origin", allowedOrigins.includes(origin) ? origin : allowedOrigins[0]);
+    // Allow all origins for Tailscale use cases, or restrict if needed.
+    // For now, allow all to ensure Tailscale cross-machine injection works easily.
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -330,15 +347,62 @@ function createServer(port) {
 
     const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
     if (sessionMatch) {
-      const session = findSession(sessionMatch[1]);
-      if (!session) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Session not found" }));
+      if (req.method === "POST" && pathname.endsWith("/context")) {
+        // POST /api/sessions/:id/context
+        const sessionId = pathname.match(/^\/api\/sessions\/([^/]+)\/context$/)?.[1];
+        if (!sessionId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid session ID" }));
+          return;
+        }
+        let body = "";
+        req.on("data", chunk => { body += chunk; });
+        req.on("end", () => {
+          const session = findSession(sessionId);
+          if (!session) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Session not found" }));
+            return;
+          }
+          let parsed;
+          try { parsed = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON" }));
+            return;
+          }
+          if (!parsed.context) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "context field is required" }));
+            return;
+          }
+          
+          session.log.push({
+            round: session.current_round,
+            speaker: parsed.speaker || "system",
+            content: `[Context Injection]\n${parsed.context}`,
+            timestamp: new Date().toISOString(),
+            event: "context_injection"
+          });
+          
+          saveSession(session);
+          
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, message: `Context injected into ${sessionId}` }));
+        });
         return;
       }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(session));
-      return;
+
+      if (req.method === "GET") {
+        const session = findSession(sessionMatch[1]);
+        if (!session) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Session not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(session));
+        return;
+      }
     }
 
     const streamMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/stream$/);
@@ -476,11 +540,12 @@ const server = createServer(port);
 // Poll every 1 second
 const pollInterval = setInterval(pollSessions, 1000);
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Deliberation Observer running at http://localhost:${port}`);
+server.listen(port, DEFAULT_HOST, () => {
+  console.log(`Deliberation Observer running at http://${DEFAULT_HOST === "0.0.0.0" ? "localhost" : DEFAULT_HOST}:${port}`);
   console.log(`   Dashboard: http://localhost:${port}/`);
   console.log(`   API: http://localhost:${port}/api/sessions`);
   console.log(`   SSE: http://localhost:${port}/api/sessions/{id}/stream`);
+  console.log(`   Tailscale: http://<your-tailscale-ip>:${port}/`);
   console.log(`\n   Press Ctrl+C to stop.`);
 });
 
