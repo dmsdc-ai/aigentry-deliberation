@@ -94,21 +94,22 @@ ${context}
                 || echo "Claude response unavailable"
             ;;
         codex)
-            codex exec "$prompt" 2>&1 \
-                | grep -v "^OpenAI Codex\|^--------\|^workdir:\|^model:\|^provider:\|^approval:\|^sandbox:\|^reasoning\|^session id:\|^user$\|^mcp:\|^thinking$\|^tokens used$\|^[0-9,]*$" \
+            echo "$prompt" | codex exec - 2>&1 \
+                | sed -n '/^codex$/,$p' | sed '1d' \
+                | grep -v "^tokens used\|^[0-9,]*$" \
                 || echo "Codex response unavailable"
             ;;
         gemini)
             gemini -p "$prompt" 2>&1 \
-                | grep -v "^Loaded cached\|^Error during discovery" \
+                | grep -v "^Loaded cached\|^Error during discovery\|^\[MCP error\]\|^    at\|^  errno:\|^  code:\|^  syscall:\|^  path:\|^  spawnargs:\|^MCP issues detected\|^Server .* supports tool updates" \
                 || echo "Gemini response unavailable"
             ;;
         qwen)
-            qwen "$prompt" 2>/dev/null \
+            echo "$prompt" | qwen 2>/dev/null \
                 || echo "Qwen response unavailable"
             ;;
         opencode)
-            opencode run "$prompt" 2>/dev/null \
+            echo "$prompt" | opencode run 2>/dev/null \
                 || echo "OpenCode response unavailable"
             ;;
         llm)
