@@ -516,6 +516,34 @@ function dedupeSpeakers(items = []) {
   return out;
 }
 
+function hasExplicitBrowserParticipantSelection({ speakers, participant_types } = {}) {
+  const manualSpeakers = Array.isArray(speakers) ? speakers : [];
+  const hasBrowserSpeaker = manualSpeakers.some(speaker => {
+    const normalized = normalizeSpeaker(speaker);
+    return normalized?.startsWith("web-");
+  });
+  if (hasBrowserSpeaker) return true;
+
+  const overrides = participant_types && typeof participant_types === "object"
+    ? Object.entries(participant_types)
+    : [];
+
+  return overrides.some(([speaker, type]) => {
+    const normalized = normalizeSpeaker(speaker);
+    return normalized?.startsWith("web-") || type === "browser" || type === "browser_auto";
+  });
+}
+
+function resolveIncludeBrowserSpeakers({ include_browser_speakers, config, speakers, participant_types } = {}) {
+  if (include_browser_speakers !== undefined && include_browser_speakers !== null) {
+    return include_browser_speakers;
+  }
+  if (config?.include_browser_speakers !== undefined && config?.include_browser_speakers !== null) {
+    return config.include_browser_speakers;
+  }
+  return false;
+}
+
 function resolveCliCandidates() {
   const fromEnv = (process.env.DELIBERATION_CLI_CANDIDATES || "")
     .split(/[,\s]+/)
@@ -2473,6 +2501,10 @@ server.tool(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("Whether to auto-discover speakers when omitted (defaults to config setting)"),
+    include_browser_speakers: z.preprocess(
+      (v) => (typeof v === "string" ? v === "true" : v),
+      z.boolean().optional()
+    ).describe("Whether browser speakers are allowed to participate. Defaults to false unless explicitly enabled."),
     participant_types: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
       z.record(z.string(), z.enum(["cli", "browser", "browser_auto", "manual"])).optional()
@@ -2486,7 +2518,7 @@ server.tool(
     role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
     .describe("Role preset (balanced/debate/research/brainstorm/review/consensus). Ignored if speaker_roles is specified"),
     },
-    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
+    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
@@ -2495,7 +2527,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `🎉 **Welcome to Deliberation!**\n\nPlease configure basic settings before starting.\n\n**Currently detected speakers:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou can set all options at once:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. Speaker participation mode** (\`require_speaker_selection\`)\n   - \`true\` — Select participating speakers each time\n   - \`false\` — All detected CLI + browser LLMs auto-join\n\n**2. Default rounds** (\`default_rounds\`)\n   - \`1\` — Quick consensus\n   - \`3\` — Default (recommended)\n   - \`5\` — Deep discussion\n\n**3. Ordering strategy** (\`default_ordering\`)\n   - \`"auto"\` — cyclic for 2 speakers, weighted-random for 3+ (recommended)\n   - \`"cyclic"\` — Fixed order\n   - \`"random"\` — Random each turn\n   - \`"weighted-random"\` — Less spoken speakers first`,
+          text: `🎉 **Welcome to Deliberation!**\n\nPlease configure basic settings before starting.\n\n**Currently detected speakers:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou can set all options at once:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  include_browser_speakers: false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. Speaker participation mode** (\`require_speaker_selection\`)\n   - \`true\` — Select participating speakers each time\n   - \`false\` — Auto-join detected speakers\n\n**2. Browser speakers** (\`include_browser_speakers\`)\n   - \`false\` — CLI only (recommended)\n   - \`true\` — Include browser LLM speakers too\n\n**3. Default rounds** (\`default_rounds\`)\n   - \`1\` — Quick consensus\n   - \`3\` — Default (recommended)\n   - \`5\` — Deep discussion\n\n**4. Ordering strategy** (\`default_ordering\`)\n   - \`"auto"\` — cyclic for 2 speakers, weighted-random for 3+ (recommended)\n   - \`"cyclic"\` — Fixed order\n   - \`"random"\` — Random each turn\n   - \`"weighted-random"\` — Less spoken speakers first`,
         }],
       };
     }
@@ -2507,7 +2539,26 @@ server.tool(
         return { content: [{ type: "text", text: `❌ Session "${session_id}" is already active. Please use a different ID or reset it first.` }] };
       }
     }
-    const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
+    const explicitBrowserSelection = hasExplicitBrowserParticipantSelection({ speakers, participant_types });
+    const includeBrowserSpeakers = resolveIncludeBrowserSpeakers({
+      include_browser_speakers,
+      config,
+      speakers,
+      participant_types,
+    });
+    if (explicitBrowserSelection && !includeBrowserSpeakers) {
+      return {
+        content: [{
+          type: "text",
+          text: `❌ Browser speakers are currently disabled.\n\nThis deliberation server now defaults to CLI-only participation to avoid browser timeouts blocking the session.\n\nTo include browser speakers, opt in explicitly:\n\`\`\`\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  speakers: ${JSON.stringify(speakers || ["claude", "codex"])},\n  include_browser_speakers: true,\n  require_manual_speakers: true\n)\n\`\`\`\n\nOr save it in config:\n\`deliberation_cli_config(include_browser_speakers: true)\``,
+        }],
+      };
+    }
+
+    const candidateSnapshot = await collectSpeakerCandidates({
+      include_cli: true,
+      include_browser: includeBrowserSpeakers,
+    });
 
     // Resolve effective settings from config
     const effectiveRequireManual = require_manual_speakers ?? config.require_speaker_selection ?? true;
@@ -2536,7 +2587,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["codex", "web-claude-1", "web-chatgpt-1"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
+          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["claude", "codex", "gemini"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
         }],
       };
     }
@@ -2544,7 +2595,6 @@ server.tool(
     let autoDiscoveredSpeakers = [];
     let autoParticipantTypes = {};
     if (!hasManualSpeakers && effectiveAutoDiscover) {
-      // Include ALL candidates: CLI + browser
       for (const c of candidateSnapshot.candidates) {
         autoDiscoveredSpeakers.push(c.speaker);
         if (c.type === "browser" && c.cdp_available) {
@@ -2575,12 +2625,11 @@ server.tool(
 
     // Warn if only 1 speaker — deliberation requires 2+
     if (speakerOrder.length < 2) {
-      const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: true });
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
       return {
         content: [{
           type: "text",
-          text: `⚠️ Deliberation requires at least 2 speakers. Currently only ${speakerOrder.length} specified: ${speakerOrder.join(", ")}\n\nAvailable speaker candidates:\n${candidateText}\n\nExample:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "web-gemini-1"])`,
+          text: `⚠️ Deliberation requires at least 2 speakers. Currently only ${speakerOrder.length} specified: ${speakerOrder.join(", ")}\n\nAvailable speaker candidates:\n${candidateText}\n\nExample:\ndeliberation_start(topic: "${topic.slice(0, 50)}...", speakers: ["claude", "codex", "gemini"])`,
         }],
       };
     }
@@ -3666,6 +3715,10 @@ server.tool(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("true: user selects speakers before each start, false: all detected speakers auto-join"),
+    include_browser_speakers: z.preprocess(
+      (v) => (typeof v === "string" ? v === "true" : v),
+      z.boolean().optional()
+    ).describe("true: browser LLM speakers may join when requested or auto-discovered, false: CLI-only mode"),
     default_rounds: z.coerce.number().int().min(1).max(10).optional()
       .describe("Default number of rounds (1-10, default 3)"),
     default_ordering: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
@@ -3673,13 +3726,17 @@ server.tool(
     chrome_profile: z.string().optional()
       .describe("Chrome profile directory name for CDP (e.g., \"Default\", \"Profile 1\"). Stored for auto-launch."),
   },
-  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, default_rounds, default_ordering, chrome_profile }) => {
+  safeToolHandler("deliberation_cli_config", async ({ enabled_clis, require_speaker_selection, include_browser_speakers, default_rounds, default_ordering, chrome_profile }) => {
     const config = loadDeliberationConfig();
 
     // Handle setup config updates
     let configChanged = false;
     if (require_speaker_selection !== undefined && require_speaker_selection !== null) {
       config.require_speaker_selection = require_speaker_selection;
+      configChanged = true;
+    }
+    if (include_browser_speakers !== undefined && include_browser_speakers !== null) {
+      config.include_browser_speakers = include_browser_speakers;
       configChanged = true;
     }
     if (default_rounds !== undefined && default_rounds !== null) {
@@ -3708,7 +3765,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (all detected speakers join)" : "manual (user selects)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (detected speakers join)" : "manual (user selects)"}\n**Browser speakers:** ${config.include_browser_speakers === true ? "enabled" : "disabled (CLI-only default)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, include_browser_speakers: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo enable browser speakers:\n\`deliberation_cli_config(include_browser_speakers: true)\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
@@ -4513,4 +4570,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers };
