@@ -137,61 +137,50 @@ export function selectModelForProvider(provider, category, complexity) {
 
   switch (provider) {
     case 'chatgpt': {
-      if (isHighReasoning) return { model: 'o3', reason: 'High-complexity reasoning task' };
-      if (isCoding) return { model: 'o4-mini', reason: 'Coding/implementation task' };
-      if (isSimple) return { model: 'gpt-4o-mini', reason: 'Simple task, cost-efficient model' };
-      return { model: 'gpt-4o', reason: 'Creative or medium-complexity task' };
+      if (isHighReasoning || isCoding) return { model: 'gpt-5.4', reason: 'High-complexity or coding task' };
+      return { model: 'gpt-5.4', reason: 'General or simple task' };
     }
 
     case 'claude': {
-      if (isHighReasoning) return { model: 'opus', reason: 'High-complexity reasoning task' };
-      if (isSimple) return { model: 'haiku', reason: 'Simple task, fast and cost-efficient' };
-      return { model: 'sonnet', reason: 'Coding or medium-complexity task' };
+      if (isSimple) return { model: 'sonnet', reason: 'Simple task' };
+      return { model: 'opus', reason: 'Medium or High-complexity task' };
     }
 
     case 'gemini': {
-      if (isHighReasoning || complexity === 'high') return { model: '2.5 Pro', reason: 'High-complexity or reasoning task' };
-      if (isSimple) return { model: '2.0 Flash', reason: 'Simple task, fast response' };
-      return { model: '2.5 Flash', reason: 'Medium-complexity task' };
+      return { model: '3.1 Pro Preview', reason: 'Always use highest-end model' };
     }
 
     case 'deepseek': {
-      if (category === 'reasoning') return { model: 'DeepSeek-R1', reason: 'Reasoning-focused task' };
-      return { model: 'DeepSeek-V3', reason: 'General task' };
+      return { model: 'DeepSeek-R1', reason: 'High-end reasoning model' };
     }
 
     case 'grok': {
-      if (complexity === 'high' || isHighReasoning) return { model: 'grok-3', reason: 'High-complexity task' };
-      return { model: 'grok-3-mini', reason: 'Simple task' };
+      return { model: 'grok-3', reason: 'Always use highest-end model' };
     }
 
     case 'mistral': {
-      if (complexity === 'high' || isHighReasoning) return { model: 'Mistral Large', reason: 'High-complexity task' };
-      return { model: 'Mistral Small', reason: 'Simple task' };
+      return { model: 'Mistral Large', reason: 'Always use highest-end model' };
     }
 
     case 'poe': {
-      if (complexity === 'high' || isHighReasoning) return { model: 'Claude-3.5-Sonnet', reason: 'High-complexity task' };
-      if (isSimple) return { model: 'Claude-3-Haiku', reason: 'Simple task' };
-      return { model: 'GPT-4o', reason: 'Medium-complexity task' };
+      if (isSimple) return { model: 'Claude-3.5-Sonnet', reason: 'Simple task' };
+      return { model: 'Claude-3.5-Opus', reason: 'Medium or High-complexity task' };
     }
 
     case 'qwen': {
-      if (complexity === 'high' || isHighReasoning) return { model: 'Qwen-Max', reason: 'High-complexity task' };
-      return { model: 'Qwen-Plus', reason: 'Simple task' };
+      return { model: 'Qwen-Max', reason: 'Always use highest-end model' };
     }
 
     case 'huggingchat': {
-      if (complexity === 'high' || isHighReasoning) return { model: 'Qwen/QwQ-32B', reason: 'High-complexity task' };
-      return { model: 'meta-llama/Llama-3.3-70B', reason: 'Simple task' };
+      return { model: 'Qwen/QwQ-32B', reason: 'Always use highest-end model' };
     }
 
     case 'copilot': {
-      return { model: 'GPT-4o', reason: 'Copilot uses GPT-4o (no model selection)' };
+      return { model: 'GPT-4.5', reason: 'Copilot using latest high-end model' };
     }
 
     case 'perplexity': {
-      return { model: 'default', reason: 'Perplexity uses default model (no model selection)' };
+      return { model: 'sonar-pro', reason: 'Perplexity high-end model' };
     }
 
     default: {
