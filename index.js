@@ -3037,6 +3037,15 @@ server.tool(
     }).join("\n");
 
     appendRuntimeLog("INFO", `SESSION_CREATED: ${sessionId} | topic: ${topic.slice(0, 60)} | speakers: ${speakerOrder.join(",")} | rounds: ${rounds}`);
+
+    // Auto-handoff: kick off background orchestration
+    if (auto_execute) {
+      // Fire-and-forget — runs in background
+      runAutoHandoff(sessionId).catch(err => {
+        appendRuntimeLog("ERROR", `AUTO_HANDOFF_SPAWN_ERROR: ${sessionId} | ${err.message}`);
+      });
+    }
+
     return {
       content: [{
         type: "text",
@@ -3413,6 +3422,336 @@ server.tool(
     };
   })
 );
+
+// ────────────────────────────────────────────────────────────────────────────
+// Auto-handoff orchestrator helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Run a single CLI auto-turn for the given session and speaker.
+ * Returns { ok: true, response, elapsedMs } or { ok: false, error }.
+ */
+async function runCliAutoTurnCore(sessionId, speaker, timeoutSec = 120) {
+  const state = loadSession(sessionId);
+  if (!state || state.status !== "active") {
+    return { ok: false, error: "Session not active" };
+  }
+
+  const { transport } = resolveTransportForSpeaker(state, speaker);
+  if (transport !== "cli_respond") {
+    return { ok: false, error: `Speaker "${speaker}" is not CLI type` };
+  }
+
+  const hint = CLI_INVOCATION_HINTS[speaker];
+  if (!hint) return { ok: false, error: `No CLI hints for "${speaker}"` };
+  if (!checkCliLiveness(hint.cmd)) return { ok: false, error: `CLI "${hint.cmd}" not available` };
+
+  const turnId = state.pending_turn_id || generateTurnId();
+  const turnPrompt = buildClipboardTurnPrompt(state, speaker, null, 3);
+  const speakerPriorTurns = state.log.filter(e => e.speaker === speaker).length;
+  const effectiveTimeout = getCliAutoTurnTimeoutSec({
+    speaker,
+    requestedTimeoutSec: timeoutSec,
+    promptLength: turnPrompt.length,
+    priorTurns: speakerPriorTurns,
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const env = { ...process.env };
+      if (hint.envPrefix?.includes("CLAUDECODE=")) delete env.CLAUDECODE;
+
+      let child;
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let forceKillTimer = null;
+
+      const resolveOnce = (v) => { if (!settled) { settled = true; if (forceKillTimer) clearTimeout(forceKillTimer); resolve(v); } };
+      const rejectOnce = (e) => { if (!settled) { settled = true; if (forceKillTimer) clearTimeout(forceKillTimer); reject(e); } };
+
+      switch (speaker) {
+        case "claude":
+          child = spawn("claude", getCliExecArgs("claude"), { env, windowsHide: true });
+          child.stdin.write(turnPrompt);
+          child.stdin.end();
+          break;
+        case "codex":
+          child = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
+          child.stdin.write(turnPrompt);
+          child.stdin.end();
+          break;
+        case "gemini":
+          child = spawn("gemini", ["-p", turnPrompt], { env, windowsHide: true });
+          break;
+        default: {
+          const flags = hint.flags ? hint.flags.split(/\s+/) : [];
+          child = spawn(hint.cmd, [...flags, turnPrompt], { env, windowsHide: true });
+          break;
+        }
+      }
+
+      const timer = setTimeout(() => {
+        try { child.kill("SIGTERM"); } catch {}
+        forceKillTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+        if (typeof forceKillTimer?.unref === "function") forceKillTimer.unref();
+        rejectOnce(new Error(`CLI timeout (${effectiveTimeout}s)`));
+      }, effectiveTimeout * 1000);
+
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.stderr.on("data", (d) => { stderr += d.toString(); });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0 && !stdout.trim()) {
+          rejectOnce(new Error(`CLI exit code ${code}: ${stderr.slice(0, 500)}`));
+        } else {
+          resolveOnce(stdout.trim());
+        }
+      });
+
+      child.on("error", (err) => rejectOnce(err));
+    });
+
+    // Submit the turn
+    submitDeliberationTurn({
+      session_id: sessionId,
+      speaker,
+      content: response,
+      turn_id: turnId,
+      channel_used: "cli_auto",
+    });
+
+    return { ok: true, response, elapsedMs: Date.now() - startTime };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Generate structured synthesis by calling a CLI speaker with a synthesis prompt.
+ */
+async function generateAutoSynthesis(sessionId) {
+  const state = loadSession(sessionId);
+  if (!state) return null;
+
+  const historyText = state.log.map(e => `[${e.speaker}] ${e.content}`).join("\n\n---\n\n");
+
+  const synthesisPrompt = `You are a deliberation synthesizer. Analyze this discussion and produce ONLY a JSON response (no markdown, no explanation).
+
+Topic: ${state.topic}
+Project: ${state.project}
+Rounds: ${state.max_rounds}
+
+Discussion:
+${historyText}
+
+Respond with EXACTLY this JSON structure:
+{
+  "summary": "Brief summary of the outcome",
+  "decisions": ["Decision 1", "Decision 2"],
+  "actionable_tasks": [
+    {"id": 1, "task": "What to do", "files": ["path/to/file.ts"], "project": "${state.project}", "priority": "high|medium|low"}
+  ],
+  "markdown_synthesis": "# Full synthesis in markdown\\n\\n..."
+}`;
+
+  // Use the first available CLI speaker to generate synthesis
+  const speaker = state.speakers.find(s => {
+    const hint = CLI_INVOCATION_HINTS[s];
+    return hint && checkCliLiveness(hint.cmd);
+  });
+
+  if (!speaker) return null;
+
+  const hint = CLI_INVOCATION_HINTS[speaker];
+
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const env = { ...process.env };
+      if (hint.envPrefix?.includes("CLAUDECODE=")) delete env.CLAUDECODE;
+
+      let child;
+      let stdout = "";
+
+      switch (speaker) {
+        case "claude":
+          child = spawn("claude", getCliExecArgs("claude"), { env, windowsHide: true });
+          child.stdin.write(synthesisPrompt);
+          child.stdin.end();
+          break;
+        case "codex":
+          child = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
+          child.stdin.write(synthesisPrompt);
+          child.stdin.end();
+          break;
+        case "gemini":
+          child = spawn("gemini", ["-p", synthesisPrompt], { env, windowsHide: true });
+          break;
+        default: {
+          const flags = hint.flags ? hint.flags.split(/\s+/) : [];
+          child = spawn(hint.cmd, [...flags, synthesisPrompt], { env, windowsHide: true });
+          break;
+        }
+      }
+
+      const timer = setTimeout(() => {
+        try { child.kill("SIGTERM"); } catch {}
+        reject(new Error("Synthesis generation timeout"));
+      }, 180000); // 3 min timeout for synthesis
+
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve(stdout.trim());
+      });
+      child.on("error", reject);
+    });
+
+    // Extract JSON from response (may have markdown wrapping)
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { markdown_synthesis: response };
+
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {
+      return { markdown_synthesis: response };
+    }
+  } catch (err) {
+    appendRuntimeLog("ERROR", `AUTO_SYNTHESIS_FAILED: ${sessionId} | ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Orchestrate full auto-handoff: run all turns -> synthesize -> inbox -> telepty.
+ * Called as fire-and-forget from deliberation_start when auto_execute is true.
+ */
+async function runAutoHandoff(sessionId) {
+  appendRuntimeLog("INFO", `AUTO_HANDOFF_START: ${sessionId}`);
+
+  try {
+    // Phase 1: Run all deliberation turns
+    let maxIterations = 100; // safety limit
+    while (maxIterations-- > 0) {
+      const state = loadSession(sessionId);
+      if (!state) {
+        appendRuntimeLog("ERROR", `AUTO_HANDOFF: Session ${sessionId} disappeared`);
+        return;
+      }
+      if (state.status !== "active") {
+        appendRuntimeLog("INFO", `AUTO_HANDOFF: Session ${sessionId} status=${state.status}, turns done`);
+        break;
+      }
+
+      const speaker = state.current_speaker;
+      if (speaker === "none") break;
+
+      appendRuntimeLog("INFO", `AUTO_HANDOFF_TURN: ${sessionId} | speaker: ${speaker} | round: ${state.current_round}/${state.max_rounds}`);
+
+      const result = await runCliAutoTurnCore(sessionId, speaker);
+      if (!result.ok) {
+        appendRuntimeLog("WARN", `AUTO_HANDOFF_TURN_FAIL: ${sessionId} | speaker: ${speaker} | ${result.error}`);
+        // Skip this speaker, continue with next
+        const freshState = loadSession(sessionId);
+        if (freshState) {
+          // Advance to next speaker manually
+          const idx = freshState.speakers.indexOf(speaker);
+          const nextIdx = (idx + 1) % freshState.speakers.length;
+          freshState.current_speaker = freshState.speakers[nextIdx];
+          if (nextIdx === 0) freshState.current_round++;
+          if (freshState.current_round > freshState.max_rounds) {
+            freshState.status = "awaiting_synthesis";
+            freshState.current_speaker = "none";
+          }
+          saveSession(freshState);
+        }
+        continue;
+      }
+
+      appendRuntimeLog("INFO", `AUTO_HANDOFF_TURN_OK: ${sessionId} | speaker: ${speaker} | ${result.elapsedMs}ms`);
+    }
+
+    // Phase 2: Generate structured synthesis
+    appendRuntimeLog("INFO", `AUTO_HANDOFF_SYNTHESIZE: ${sessionId}`);
+    const synthResult = await generateAutoSynthesis(sessionId);
+
+    // Phase 3: Call synthesize (reuse existing logic)
+    const state = loadSession(sessionId);
+    if (!state) return;
+
+    const markdownSynthesis = synthResult?.markdown_synthesis ||
+      `# Auto-generated synthesis\n\n${synthResult?.summary || "Deliberation completed."}\n\n## Decisions\n${(synthResult?.decisions || []).map(d => `- ${d}`).join("\n")}\n\n## Tasks\n${(synthResult?.actionable_tasks || []).map(t => `- [${t.priority}] ${t.task}`).join("\n")}`;
+
+    const structured = synthResult ? {
+      summary: synthResult.summary || "",
+      decisions: synthResult.decisions || [],
+      actionable_tasks: synthResult.actionable_tasks || [],
+    } : null;
+
+    // Apply synthesis to session
+    let inboxTask = null;
+    withSessionLock(sessionId, () => {
+      const loaded = loadSession(sessionId);
+      if (!loaded) return;
+      loaded.synthesis = markdownSynthesis;
+      loaded.structured_synthesis = structured;
+      loaded.status = "completed";
+      loaded.current_speaker = "none";
+      saveSession(loaded);
+      archiveState(loaded);
+      cleanupSyncMarkdown(loaded);
+
+      if (loaded.auto_execute) {
+        inboxTask = writeInboxTask(loaded);
+      }
+
+      const sessionFile = getSessionFile(loaded.id);
+      try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch {}
+    });
+
+    closeMonitorTerminal(sessionId, getSessionWindowIds(state));
+
+    appendRuntimeLog("INFO", `AUTO_HANDOFF_SYNTHESIZED: ${sessionId}${inboxTask ? " | task: " + inboxTask.id : ""}`);
+
+    // Phase 4: Notify telepty bus
+    if (inboxTask) {
+      await notifyTeleptyBus({
+        type: "handoff_ready",
+        sender: "deliberation",
+        session_id: sessionId,
+        task_id: inboxTask.id,
+        project: state.project,
+        topic: state.topic,
+        structured,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
+
+      // Phase 5: Inject into telepty executor session if available
+      const teleptyHost = process.env.TELEPTY_HOST || "localhost";
+      const teleptyPort = process.env.TELEPTY_PORT || "3848";
+      try {
+        const taskPrompt = `[HANDOFF] Deliberation "${state.topic}" completed with ${(structured?.actionable_tasks || []).length} tasks.\n\nTasks:\n${(structured?.actionable_tasks || []).map(t => `${t.id}. [${t.priority || "medium"}] ${t.task} → ${(t.files || []).join(", ")}`).join("\n")}\n\nExecute these tasks now. Use deliberation_handoff_status to update progress.`;
+
+        await fetch(`http://${teleptyHost}:${teleptyPort}/api/sessions/broadcast/inject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: taskPrompt }),
+        });
+        appendRuntimeLog("INFO", `AUTO_HANDOFF_INJECTED: ${sessionId} | telepty broadcast`);
+      } catch (err) {
+        appendRuntimeLog("WARN", `AUTO_HANDOFF_INJECT_FAIL: ${sessionId} | ${err.message}`);
+      }
+    }
+
+    appendRuntimeLog("INFO", `AUTO_HANDOFF_COMPLETE: ${sessionId}`);
+  } catch (err) {
+    appendRuntimeLog("ERROR", `AUTO_HANDOFF_ERROR: ${sessionId} | ${err.message}`);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 
 server.tool(
   "deliberation_cli_auto_turn",
