@@ -22,6 +22,7 @@ import { execSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "state");
+const INBOX_DIR = path.join(path.dirname(STATE_DIR), "inbox");
 const CONFIG_PATH = path.join(os.homedir(), ".local", "lib", "mcp-deliberation", "config.json");
 const DEFAULT_CLI_CANDIDATES = ["claude", "codex", "gemini", "qwen", "chatgpt", "aider", "llm", "opencode", "cursor", "continue"];
 const CLI_LABELS = {
@@ -105,6 +106,56 @@ function broadcastSessionUpdate(sessionId, event, data) {
   clients.forEach(res => {
     try { res.write(payload); } catch {}
   });
+}
+
+// Inbox handoff task tracking
+const inboxSnapshots = new Map();
+const inboxSseClients = [];
+
+function broadcastInboxUpdate(event, data) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  inboxSseClients.forEach(res => {
+    try { res.write(payload); } catch {}
+  });
+}
+
+function pollInbox() {
+  if (inboxSseClients.length === 0) return;
+  if (!fs.existsSync(INBOX_DIR)) return;
+
+  const files = fs.readdirSync(INBOX_DIR).filter(f => f.endsWith(".json"));
+  const currentIds = new Set();
+
+  for (const file of files) {
+    try {
+      const task = JSON.parse(fs.readFileSync(path.join(INBOX_DIR, file), "utf-8"));
+      currentIds.add(task.id);
+      const prev = inboxSnapshots.get(task.id);
+
+      if (!prev) {
+        // New task
+        broadcastInboxUpdate("inbox_new", task);
+        inboxSnapshots.set(task.id, { status: task.status, logLength: task.execution_log?.length || 0 });
+      } else if (prev.status !== task.status) {
+        // Status changed
+        broadcastInboxUpdate("inbox_status", { id: task.id, status: task.status, project: task.project, topic: task.topic });
+        inboxSnapshots.set(task.id, { status: task.status, logLength: task.execution_log?.length || 0 });
+      } else if ((task.execution_log?.length || 0) > prev.logLength) {
+        // New log entries
+        const newEntries = task.execution_log.slice(prev.logLength);
+        broadcastInboxUpdate("inbox_log", { id: task.id, entries: newEntries });
+        inboxSnapshots.set(task.id, { status: task.status, logLength: task.execution_log.length });
+      }
+    } catch {}
+  }
+
+  // Detect removed tasks
+  for (const [id] of inboxSnapshots) {
+    if (!currentIds.has(id)) {
+      broadcastInboxUpdate("inbox_removed", { id });
+      inboxSnapshots.delete(id);
+    }
+  }
 }
 
 // Poll for session changes
@@ -521,8 +572,64 @@ function createServer(port) {
 
     if (pathname === "/api/stats" && req.method === "GET") {
       const stats = computeStats();
+      stats.inbox_pending = fs.existsSync(INBOX_DIR) ? fs.readdirSync(INBOX_DIR).filter(f => f.endsWith(".json")).length : 0;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(stats));
+      return;
+    }
+
+    if (pathname === "/api/inbox" && req.method === "GET") {
+      if (!fs.existsSync(INBOX_DIR)) return res.end(JSON.stringify([]));
+      const tasks = fs.readdirSync(INBOX_DIR)
+        .filter(f => f.endsWith(".json"))
+        .map(f => {
+          try { return JSON.parse(fs.readFileSync(path.join(INBOX_DIR, f), "utf-8")); }
+          catch { return null; }
+        })
+        .filter(Boolean);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(tasks));
+      return;
+    }
+
+    if (pathname === "/api/inbox/stream" && req.method === "GET") {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.write(`event: connected\ndata: ${JSON.stringify({ type: "inbox" })}\n\n`);
+
+      // Send current inbox snapshot
+      if (fs.existsSync(INBOX_DIR)) {
+        const tasks = fs.readdirSync(INBOX_DIR)
+          .filter(f => f.endsWith(".json"))
+          .map(f => { try { return JSON.parse(fs.readFileSync(path.join(INBOX_DIR, f), "utf-8")); } catch { return null; } })
+          .filter(Boolean);
+        res.write(`event: snapshot\ndata: ${JSON.stringify(tasks)}\n\n`);
+      }
+
+      inboxSseClients.push(res);
+      req.on("close", () => {
+        const idx = inboxSseClients.indexOf(res);
+        if (idx >= 0) inboxSseClients.splice(idx, 1);
+        if (inboxSseClients.length === 0) inboxSnapshots.clear();
+      });
+      return;
+    }
+
+    const inboxIdMatch = pathname.match(/^\/api\/inbox\/([^/]+)$/);
+    if (inboxIdMatch && req.method === "GET") {
+      const safeId = String(inboxIdMatch[1]).replace(/[^a-zA-Z0-9._-]/g, "_");
+      const file = path.join(INBOX_DIR, `${safeId}.json`);
+      if (!fs.existsSync(file)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Task not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(fs.readFileSync(file, "utf-8"));
       return;
     }
 
@@ -539,6 +646,7 @@ const server = createServer(port);
 
 // Poll every 1 second
 const pollInterval = setInterval(pollSessions, 1000);
+setInterval(pollInbox, 2000);
 
 server.listen(port, DEFAULT_HOST, () => {
   console.log(`Deliberation Observer running at http://${DEFAULT_HOST === "0.0.0.0" ? "localhost" : DEFAULT_HOST}:${port}`);

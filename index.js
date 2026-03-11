@@ -345,6 +345,8 @@ const LOCKS_SUBDIR = ".locks";
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 8000;
 const LOCK_STALE_MS = 60000;
+const SPEAKER_SELECTION_FILE = "speaker-selection.json";
+const SPEAKER_SELECTION_TTL_MS = 10 * 60 * 1000;
 
 function getProjectSlug() {
   return path.basename(process.cwd());
@@ -362,6 +364,73 @@ function getSessionFile(sessionId) {
   return path.join(getSessionsDir(), `${sessionId}.json`);
 }
 
+function getInboxDir() {
+  return path.join(INSTALL_DIR, "inbox");
+}
+
+function writeInboxTask(state) {
+  const dir = getInboxDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const task = {
+    id: `task-${state.id}`,
+    session_id: state.id,
+    project: state.project,
+    topic: state.topic,
+    status: "pending",
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    synthesis: state.synthesis,
+    structured_synthesis: state.structured_synthesis || null,
+    execution_log: [],
+  };
+  writeTextAtomic(path.join(dir, `${task.id}.json`), JSON.stringify(task, null, 2));
+  appendRuntimeLog("INFO", `HANDOFF: Inbox task created: ${task.id}`);
+  return task;
+}
+
+function loadInboxTask(taskId) {
+  const safeId = String(taskId).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const file = path.join(getInboxDir(), `${safeId}.json`);
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, "utf-8"));
+}
+
+function listInboxTasks() {
+  const dir = getInboxDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith(".json"))
+    .map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")); }
+      catch { return null; }
+    })
+    .filter(Boolean);
+}
+
+function updateInboxTask(taskId, updates) {
+  const safeId = String(taskId).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const task = loadInboxTask(safeId);
+  if (!task) return null;
+  Object.assign(task, updates, { updated: new Date().toISOString() });
+  writeTextAtomic(path.join(getInboxDir(), `${safeId}.json`), JSON.stringify(task, null, 2));
+  return task;
+}
+
+async function notifyTeleptyBus(event) {
+  const host = process.env.TELEPTY_HOST || "localhost";
+  const port = process.env.TELEPTY_PORT || "3848";
+  try {
+    const res = await fetch(`http://${host}:${port}/api/bus/publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event),
+    });
+    if (res.ok) appendRuntimeLog("INFO", `HANDOFF: Telepty bus notified: ${event.type}`);
+  } catch (err) {
+    appendRuntimeLog("WARN", `HANDOFF: Telepty bus notification failed: ${err.message}`);
+  }
+}
+
 function getArchiveDir() {
   const obsidianDir = path.join(OBSIDIAN_PROJECTS, getProjectSlug(), "deliberations");
   if (fs.existsSync(path.join(OBSIDIAN_PROJECTS, getProjectSlug()))) {
@@ -372,6 +441,10 @@ function getArchiveDir() {
 
 function getLocksDir() {
   return path.join(getProjectStateDir(), LOCKS_SUBDIR);
+}
+
+function getSpeakerSelectionFile() {
+  return path.join(getProjectStateDir(), SPEAKER_SELECTION_FILE);
 }
 
 function formatRuntimeError(error) {
@@ -427,6 +500,19 @@ function writeTextAtomic(filePath, text) {
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, text, "utf-8");
   fs.renameSync(tmp, filePath);
+}
+
+function readJsonFileSafe(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonFileAtomic(filePath, value) {
+  writeTextAtomic(filePath, JSON.stringify(value, null, 2));
 }
 
 function acquireFileLock(lockPath, {
@@ -514,6 +600,63 @@ function dedupeSpeakers(items = []) {
     out.push(normalized);
   }
   return out;
+}
+
+function createSelectionToken() {
+  return `sel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function issueSpeakerSelectionToken({ candidates, include_browser }) {
+  const selectionState = {
+    token: createSelectionToken(),
+    created_at: new Date().toISOString(),
+    include_browser: !!include_browser,
+    candidate_speakers: dedupeSpeakers((candidates || []).map(c => typeof c === "string" ? c : c?.speaker)),
+  };
+  writeJsonFileAtomic(getSpeakerSelectionFile(), selectionState);
+  return selectionState;
+}
+
+function loadSpeakerSelectionToken() {
+  return readJsonFileSafe(getSpeakerSelectionFile());
+}
+
+function clearSpeakerSelectionToken() {
+  try {
+    fs.unlinkSync(getSpeakerSelectionFile());
+  } catch {
+    // ignore missing file
+  }
+}
+
+function validateSpeakerSelectionRequest({ selectionState, selection_token, speakers, includeBrowserSpeakers, nowMs = Date.now() }) {
+  if (!selection_token) {
+    return { ok: false, code: "missing_token" };
+  }
+  if (!selectionState?.token) {
+    return { ok: false, code: "missing_selection_state" };
+  }
+  if (selectionState.token !== selection_token) {
+    return { ok: false, code: "token_mismatch" };
+  }
+
+  const createdAtMs = Date.parse(selectionState.created_at || "");
+  if (!Number.isFinite(createdAtMs) || (nowMs - createdAtMs) > SPEAKER_SELECTION_TTL_MS) {
+    return { ok: false, code: "expired_token" };
+  }
+
+  if (!!selectionState.include_browser !== !!includeBrowserSpeakers) {
+    return { ok: false, code: "mode_mismatch" };
+  }
+
+  const availableSpeakers = new Set(dedupeSpeakers(selectionState.candidate_speakers || []));
+  const requestedSpeakers = dedupeSpeakers(speakers || []);
+  const missingSpeakers = requestedSpeakers.filter(speaker => !availableSpeakers.has(speaker));
+  if (missingSpeakers.length > 0) {
+    return { ok: false, code: "speaker_mismatch", missing_speakers: missingSpeakers };
+  }
+
+  return { ok: true };
 }
 
 function hasExplicitBrowserParticipantSelection({ speakers, participant_types } = {}) {
@@ -2293,20 +2436,148 @@ function multipleSessionsError() {
   return t(`Multiple active sessions found. Please specify session_id:\n\n${list}`, `여러 활성 세션이 있습니다. session_id를 지정하세요:\n\n${list}`, "en");
 }
 
-function formatRecentLogForPrompt(state, maxEntries = 4) {
+function truncatePromptText(text, maxChars) {
+  const value = String(text || "").trim();
+  if (!value || !Number.isFinite(maxChars) || maxChars <= 0 || value.length <= maxChars) {
+    return value;
+  }
+  const remaining = value.length - maxChars;
+  return `${value.slice(0, maxChars).trimEnd()}\n...(truncated ${remaining} chars)`;
+}
+
+function getPromptBudgetForSpeaker(speaker, includeHistoryEntries = 4) {
+  const defaultBudget = {
+    maxEntries: Math.max(0, includeHistoryEntries),
+    maxCharsPerEntry: 1600,
+    maxTotalChars: 6400,
+    maxTopicChars: 3200,
+  };
+  switch (speaker) {
+    case "codex":
+      return {
+        maxEntries: Math.min(Math.max(0, includeHistoryEntries), 3),
+        maxCharsPerEntry: 1200,
+        maxTotalChars: 3600,
+        maxTopicChars: 2200,
+      };
+    case "gemini":
+      return {
+        maxEntries: Math.min(Math.max(0, includeHistoryEntries), 4),
+        maxCharsPerEntry: 1400,
+        maxTotalChars: 5600,
+        maxTopicChars: 2800,
+      };
+    default:
+      return defaultBudget;
+  }
+}
+
+function formatRecentLogForPrompt(state, maxEntries = 4, options = {}) {
   const entries = Array.isArray(state.log) ? state.log.slice(-Math.max(0, maxEntries)) : [];
   if (entries.length === 0) {
     return "(No previous responses yet)";
   }
-  return entries.map(e => {
-    const content = String(e.content || "").trim();
-    return `- ${e.speaker} (Round ${e.round})\n${content}`;
-  }).join("\n\n");
+  const maxCharsPerEntry = options.maxCharsPerEntry || 1600;
+  const maxTotalChars = options.maxTotalChars || maxCharsPerEntry * entries.length;
+  const rendered = [];
+  let usedChars = 0;
+
+  for (const entry of entries) {
+    const header = `- ${entry.speaker} (Round ${entry.round})`;
+    const remainingChars = Math.max(0, maxTotalChars - usedChars - header.length - 1);
+    const entryBudget = Math.max(200, Math.min(maxCharsPerEntry, remainingChars || maxCharsPerEntry));
+    const content = truncatePromptText(entry.content, entryBudget);
+    const block = `${header}\n${content}`;
+    rendered.push(block);
+    usedChars += block.length + 2;
+    if (usedChars >= maxTotalChars) {
+      break;
+    }
+  }
+
+  return rendered.join("\n\n");
+}
+
+function getCliAutoTurnTimeoutSec({ speaker, requestedTimeoutSec, promptLength, priorTurns }) {
+  const requested = Number.isFinite(requestedTimeoutSec) ? requestedTimeoutSec : 120;
+  if (speaker === "codex") {
+    let recommended = Math.max(requested, priorTurns === 0 ? 240 : 180);
+    if (promptLength > 6000) {
+      recommended = Math.max(recommended, 300);
+    }
+    if (promptLength > 10000 || priorTurns >= 1) {
+      recommended = Math.max(recommended, 420);
+    }
+    return recommended;
+  }
+  return priorTurns === 0 ? Math.max(requested, 180) : requested;
+}
+
+function getCliExecArgs(speaker) {
+  switch (speaker) {
+    case "claude":
+      return ["-p", "--output-format", "text"];
+    case "codex":
+      return [
+        "exec",
+        "--ephemeral",
+        "-c", 'approval_policy="never"',
+        "-c", 'sandbox_mode="read-only"',
+        "-c", 'model_reasoning_effort="low"',
+        "-",
+      ];
+    case "gemini":
+      return null;
+    default:
+      return null;
+  }
+}
+
+function buildCliAutoTurnFailureText({ state, speaker, hint, err, effectiveTimeout, promptLength, priorTurns }) {
+  const isTimeout = /CLI timeout \(/.test(String(err?.message || ""));
+  if (!isTimeout) {
+    return `❌ CLI auto-turn failed: ${err.message}\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n\nYou can submit a manual response via deliberation_respond(speaker: "${speaker}", content: "...").`;
+  }
+
+  const retryTimeout = speaker === "codex"
+    ? Math.min(Math.max(effectiveTimeout, 420), 600)
+    : Math.min(effectiveTimeout + 60, 300);
+
+  return t(
+    `⏱️ CLI auto-turn timed out.\n\n` +
+    `**Speaker:** ${speaker}\n` +
+    `**CLI:** ${hint.cmd}\n` +
+    `**Timeout:** ${effectiveTimeout}s\n` +
+    `**Prompt size:** ${promptLength} chars\n` +
+    `**Prior turns by speaker:** ${priorTurns}\n` +
+    `**Session state:** still waiting on ${speaker} for Round ${state.current_round}\n\n` +
+    `This usually means the CLI stayed busy longer than the timeout. It does **not** necessarily mean the model is down.\n` +
+    `${speaker === "codex" ? `Codex is the slowest CLI in recent deliberation logs, especially when recent_log contains long prior responses.\n` : ""}` +
+    `Recommended next step: retry with \`deliberation_cli_auto_turn(session_id: "${state.id}", timeout_sec: ${retryTimeout})\`.\n` +
+    `Manual fallback: \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`.`,
+    `⏱️ CLI 자동 턴이 타임아웃되었습니다.\n\n` +
+    `**Speaker:** ${speaker}\n` +
+    `**CLI:** ${hint.cmd}\n` +
+    `**Timeout:** ${effectiveTimeout}s\n` +
+    `**Prompt 크기:** ${promptLength} chars\n` +
+    `**이 speaker의 이전 발언 수:** ${priorTurns}\n` +
+    `**세션 상태:** Round ${state.current_round}에서 아직 ${speaker} 응답을 기다리는 중\n\n` +
+    `이건 보통 CLI가 제한 시간 안에 응답을 끝내지 못했다는 뜻입니다. 모델이 완전히 죽었다는 의미는 아닙니다.\n` +
+    `${speaker === "codex" ? `최근 딜리버레이션 로그 기준으로 Codex는 이전 응답 전문이 길게 들어가면 가장 느린 편입니다.\n` : ""}` +
+    `권장 조치: \`deliberation_cli_auto_turn(session_id: "${state.id}", timeout_sec: ${retryTimeout})\` 로 재시도하세요.\n` +
+    `수동 대안: \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", content: "...")\`.`,
+    state?.lang
+  );
 }
 
 function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries = 4) {
-  const recent = formatRecentLogForPrompt(state, includeHistoryEntries);
+  const promptBudget = getPromptBudgetForSpeaker(speaker, includeHistoryEntries);
+  const recent = formatRecentLogForPrompt(state, promptBudget.maxEntries, promptBudget);
   const extraPrompt = prompt ? `\n[Additional instructions]\n${prompt}\n` : "";
+  const topic = truncatePromptText(state.topic, promptBudget.maxTopicChars);
+  const noToolRule = speaker === "codex"
+    ? `\n- Do not inspect files, run shell commands, browse, or call tools. Answer only from the provided discussion context.`
+    : "";
 
   // Role prompt injection
   const speakerRole = (state.speaker_roles || {})[speaker] || "free";
@@ -2318,7 +2589,7 @@ function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries 
   return `[deliberation_turn_request]
 session_id: ${state.id}
 project: ${state.project}
-topic: ${state.topic}
+topic: ${topic}
 round: ${state.current_round}/${state.max_rounds}
 target_speaker: ${speaker}
 required_turn: ${state.current_speaker}${roleSection}
@@ -2330,6 +2601,7 @@ ${recent}
 [response_rule]
 - Write only ${speaker}'s response for this turn reflecting the discussion context above
 - Output markdown body only (no unnecessary headers/footers)${speakerRole !== "free" ? `\n- Analyze and respond from the perspective of assigned role (${speakerRole})` : ""}
+- Keep the response concise and decision-oriented${noToolRule}
 - Must include one of [AGREE], [DISAGREE], or [CONDITIONAL: reason] at the end of response
 [/response_rule]
 [/deliberation_turn_request]
@@ -2480,6 +2752,7 @@ server.tool(
     session_id: z.string().trim().min(1).max(64).optional().describe("Explicit session ID to use. If omitted, one is generated from topic."),
     rounds: z.coerce.number().optional().describe("Number of rounds (defaults to config setting, default 3)"),
     first_speaker: z.string().trim().min(1).max(64).optional().describe("First speaker name (defaults to first item in speakers)"),
+    selection_token: z.string().trim().min(1).max(128).optional().describe("Single-use token returned by deliberation_speaker_candidates. Required for fresh manual speaker selection."),
     speakers: z.preprocess(
       (v) => {
         const parsed = typeof v === "string" ? JSON.parse(v) : v;
@@ -2517,8 +2790,12 @@ server.tool(
     ).describe("Per-speaker role assignment (e.g., {\"claude\": \"critic\", \"codex\": \"implementer\"})"),
     role_preset: z.enum(["balanced", "debate", "research", "brainstorm", "review", "consensus"]).optional()
     .describe("Role preset (balanced/debate/research/brainstorm/review/consensus). Ignored if speaker_roles is specified"),
+    auto_execute: z.preprocess(
+      (v) => (typeof v === "string" ? v === "true" : v),
+      z.boolean().optional()
+    ).describe("If true, automatically create a handoff task in the inbox when synthesis completes. Enables the Autonomous Deliberation Handoff pattern."),
     },
-    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset }) => {
+    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, selection_token, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset, auto_execute }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
@@ -2568,26 +2845,41 @@ server.tool(
     // Resolve "auto": 2 speakers → cyclic, 3+ → weighted-random
     ordering_strategy = rawOrdering === "auto" ? undefined : rawOrdering; // resolved after speakers are known
 
-    // When require_speaker_selection is explicitly true in config,
-    // ignore LLM-provided speakers UNLESS require_manual_speakers: true is explicitly passed
-    // (which signals the user has confirmed the speaker selection)
-    const configRequiresSelection = config.require_speaker_selection === true;
-    const llmExplicitlyConfirmed = require_manual_speakers === true;
-    const hasManualSpeakers = Array.isArray(speakers) && speakers.length > 0
-      && (!configRequiresSelection || llmExplicitlyConfirmed);
+    const manualSpeakersProvided = Array.isArray(speakers) && speakers.length > 0;
+    let selectionValidation = { ok: true };
+    if (effectiveRequireManual && manualSpeakersProvided) {
+      selectionValidation = validateSpeakerSelectionRequest({
+        selectionState: loadSpeakerSelectionToken(),
+        selection_token,
+        speakers,
+        includeBrowserSpeakers,
+      });
+    }
+    const hasManualSpeakers = manualSpeakersProvided && (!effectiveRequireManual || selectionValidation.ok);
 
-    if (!hasManualSpeakers && effectiveRequireManual) {
+    if (manualSpeakersProvided && effectiveRequireManual && !selectionValidation.ok) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
-      const llmSuggested = Array.isArray(speakers) && speakers.length > 0
-        ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nTo use this suggestion, pass speakers again with \`require_manual_speakers: true\`.`
-        : "";
-      const configNote = configRequiresSelection
-        ? "\n\n⚙️ `require_speaker_selection: true` setting requires you to manually select speakers."
+      const mismatchNote = selectionValidation.code === "speaker_mismatch"
+        ? `\n\nRequested speakers not in the latest candidate snapshot: ${(selectionValidation.missing_speakers || []).join(", ")}`
         : "";
       return {
         content: [{
           type: "text",
-          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  rounds: ${rounds},\n  speakers: ["claude", "codex", "gemini"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
+          text: `Fresh participant selection is required before each deliberation start.${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates(include_cli: true, include_browser: ${includeBrowserSpeakers ? "true" : "false"})\`\n2. Show the speaker list in the TUI and let the user choose participants\n3. Pass the returned \`selection_token\` into \`deliberation_start(..., selection_token: "...")\`\n\n${candidateText}`,
+        }],
+      };
+    }
+
+    if (!hasManualSpeakers && effectiveRequireManual) {
+      const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
+      const llmSuggested = Array.isArray(speakers) && speakers.length > 0
+        ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nShow the candidate list in the TUI, let the user confirm, then pass the returned \`selection_token\` with the final speaker list.`
+        : "";
+      const configNote = "\n\n⚙️ Manual speaker selection is enabled and requires a fresh `selection_token`.";
+      return {
+        content: [{
+          type: "text",
+          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  selection_token: "<token-from-deliberation_speaker_candidates>",\n  rounds: ${rounds},\n  speakers: ["claude", "codex", "gemini"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
         }],
       };
     }
@@ -2622,6 +2914,10 @@ server.tool(
       || normalizeSpeaker(selectedSpeakers?.[0])
       || DEFAULT_SPEAKERS[0];
     const speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
+
+    if (effectiveRequireManual) {
+      clearSpeakerSelectionToken();
+    }
 
     // Warn if only 1 speaker — deliberation requires 2+
     if (speakerOrder.length < 2) {
@@ -2673,6 +2969,7 @@ server.tool(
       ordering_strategy: ordering_strategy || (speakerOrder.length <= 2 ? "cyclic" : "weighted-random"),
       speaker_roles: speaker_roles || (role_preset ? applyRolePreset(role_preset, speakerOrder) : {}),
       degradation: degradationLevels,
+      auto_execute: auto_execute || false,
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
     };
@@ -2758,8 +3055,17 @@ server.tool(
   },
   async ({ include_cli, include_browser }) => {
     const snapshot = await collectSpeakerCandidates({ include_cli, include_browser });
+    const selection = issueSpeakerSelectionToken({
+      candidates: snapshot.candidates,
+      include_browser,
+    });
     const text = formatSpeakerCandidatesReport(snapshot);
-    return { content: [{ type: "text", text: `${text}\n\n${PRODUCT_DISCLAIMER}` }] };
+    return {
+      content: [{
+        type: "text",
+        text: `${text}\n\n**Selection token:** \`${selection.token}\`\nUse this token in \`deliberation_start(selection_token: "...")\` after the user picks participants. The token is single-use and expires in 10 minutes.\n\n${PRODUCT_DISCLAIMER}`,
+      }],
+    };
   }
 );
 
@@ -3156,10 +3462,7 @@ server.tool(
       }] };
     }
 
-    // Dynamic timeout: first turn gets extra time for cold-start
     const speakerPriorTurns = state.log.filter(e => e.speaker === speaker).length;
-    const effectiveTimeout = speakerPriorTurns === 0 ? Math.max(timeout_sec, 180) : timeout_sec;
-
     const hint = CLI_INVOCATION_HINTS[speaker];
     if (!hint) {
       return { content: [{ type: "text", text: t(`No CLI invocation info for speaker "${speaker}". This speaker is not registered in CLI_INVOCATION_HINTS.`, `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.`, state?.lang) }] };
@@ -3172,6 +3475,12 @@ server.tool(
 
     const turnId = state.pending_turn_id || generateTurnId();
     const turnPrompt = buildClipboardTurnPrompt(state, speaker, null, 3);
+    const effectiveTimeout = getCliAutoTurnTimeoutSec({
+      speaker,
+      requestedTimeoutSec: timeout_sec,
+      promptLength: turnPrompt.length,
+      priorTurns: speakerPriorTurns,
+    });
 
     // Spawn CLI process
     const startTime = Date.now();
@@ -3186,16 +3495,31 @@ server.tool(
         let child;
         let stdout = "";
         let stderr = "";
+        let settled = false;
+        let forceKillTimer = null;
+
+        const resolveOnce = (value) => {
+          if (settled) return;
+          settled = true;
+          if (forceKillTimer) clearTimeout(forceKillTimer);
+          resolve(value);
+        };
+        const rejectOnce = (error) => {
+          if (settled) return;
+          settled = true;
+          if (forceKillTimer) clearTimeout(forceKillTimer);
+          reject(error);
+        };
 
         // Different invocation patterns per CLI
         switch (speaker) {
           case "claude":
-            child = spawn("claude", ["-p", "--output-format", "text"], { env, windowsHide: true });
+            child = spawn("claude", getCliExecArgs("claude"), { env, windowsHide: true });
             child.stdin.write(turnPrompt);
             child.stdin.end();
             break;
           case "codex":
-            child = spawn("codex", ["exec", "-"], { env, windowsHide: true });
+            child = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
             child.stdin.write(turnPrompt);
             child.stdin.end();
             break;
@@ -3211,8 +3535,19 @@ server.tool(
         }
 
         const timer = setTimeout(() => {
-          child.kill("SIGTERM");
-          reject(new Error(`CLI timeout (${effectiveTimeout}s)`));
+          appendRuntimeLog("WARN", `CLI_TURN_TIMEOUT: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | timeout: ${effectiveTimeout}s | prompt_len: ${turnPrompt.length} | prior_turns: ${speakerPriorTurns}`);
+          try {
+            child.kill("SIGTERM");
+          } catch { /* ignore */ }
+          forceKillTimer = setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch { /* ignore */ }
+          }, 5000);
+          if (typeof forceKillTimer.unref === "function") {
+            forceKillTimer.unref();
+          }
+          rejectOnce(new Error(`CLI timeout (${effectiveTimeout}s)`));
         }, effectiveTimeout * 1000);
 
         child.stdout.on("data", (data) => { stdout += data.toString(); });
@@ -3221,7 +3556,8 @@ server.tool(
         child.on("close", (code) => {
           clearTimeout(timer);
           if (code !== 0 && !stdout.trim()) {
-            reject(new Error(`CLI exit code ${code}: ${stderr.slice(0, 500)}`));
+            appendRuntimeLog("ERROR", `CLI_TURN_EXIT: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | code: ${code} | stderr: ${stderr.slice(0, 200).replace(/\s+/g, " ")}`);
+            rejectOnce(new Error(`CLI exit code ${code}: ${stderr.slice(0, 500)}`));
           } else {
             // Clean up output noise
             let cleaned = stdout;
@@ -3232,12 +3568,12 @@ server.tool(
               const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
               if (codexLineIdx !== -1) {
                 cleaned = lines.slice(codexLineIdx + 1)
-                  .filter(line => !/^(tokens used$|^[0-9,]*$)/.test(line))
+                  .filter(line => !/^(tokens used$|^[0-9,]*$|^mcp:.*)/.test(line))
                   .join("\n");
               } else {
                 // Fallback regex cleaning
                 cleaned = stdout.split("\n")
-                  .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|user$|mcp:|thinking$|tokens used$|^[0-9,]*$)/.test(line))
+                  .filter(line => !/^(OpenAI Codex|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning|session id:|user$|mcp:.*|thinking$|tokens used$|^[0-9,]*$)/.test(line))
                   .join("\n");
               }
             } else if (speaker === "gemini") {
@@ -3245,13 +3581,14 @@ server.tool(
                 .filter(line => !/^(Loaded cached|Error during discovery|\[MCP error\]| {4}at| {2}errno:| {2}code:| {2}syscall:| {2}path:| {2}spawnargs:|MCP issues detected|Server .* supports tool updates)/.test(line))
                 .join("\n");
             }
-            resolve(cleaned.trim());
+            resolveOnce(cleaned.trim());
           }
         });
 
         child.on("error", (err) => {
           clearTimeout(timer);
-          reject(err);
+          appendRuntimeLog("ERROR", `CLI_TURN_ERROR: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | error: ${String(err.message || err).replace(/\s+/g, " ")}`);
+          rejectOnce(err);
         });
       });
 
@@ -3283,7 +3620,15 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `❌ CLI auto-turn failed: ${err.message}\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n\nYou can submit a manual response via deliberation_respond(speaker: "${speaker}", content: "...").`,
+          text: buildCliAutoTurnFailureText({
+            state,
+            speaker,
+            hint,
+            err,
+            effectiveTimeout,
+            promptLength: turnPrompt.length,
+            priorTurns: speakerPriorTurns,
+          }),
         }],
       };
     }
@@ -3544,12 +3889,32 @@ server.tool(
 
 server.tool(
   "deliberation_synthesize",
-  "End the deliberation and submit a synthesis report.",
+  "End the deliberation and submit a synthesis report. Optionally include structured actionable tasks for automated handoff.",
   {
     session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
     synthesis: z.string().describe("Synthesis report (markdown)"),
+    structured: z.preprocess(
+      (v) => {
+        if (typeof v === "string") {
+          try { return JSON.parse(v); }
+          catch { return v; }
+        }
+        return v;
+      },
+      z.object({
+        summary: z.string().describe("Brief summary of the deliberation outcome"),
+        decisions: z.array(z.string()).describe("List of decisions made"),
+        actionable_tasks: z.array(z.object({
+          id: z.number().describe("Task sequential ID"),
+          task: z.string().describe("Task description"),
+          files: z.array(z.string()).optional().describe("Target files to modify"),
+          project: z.string().optional().describe("Target project name"),
+          priority: z.enum(["high", "medium", "low"]).optional().describe("Task priority"),
+        })).describe("Concrete tasks for executor agents"),
+      }).optional()
+    ).describe("Structured synthesis data for automated handoff. If omitted, only markdown synthesis is stored."),
   },
-  safeToolHandler("deliberation_synthesize", async ({ session_id, synthesis }) => {
+  safeToolHandler("deliberation_synthesize", async ({ session_id, synthesis, structured }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
       return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
@@ -3560,6 +3925,7 @@ server.tool(
 
     let state = null;
     let archivePath = null;
+    let inboxTask = null;
     const lockedResult = withSessionLock(resolved, () => {
       const loaded = loadSession(resolved);
       if (!loaded) {
@@ -3567,11 +3933,18 @@ server.tool(
       }
 
       loaded.synthesis = synthesis;
+      loaded.structured_synthesis = structured || null;
       loaded.status = "completed";
       loaded.current_speaker = "none";
       saveSession(loaded);
       archivePath = archiveState(loaded);
       cleanupSyncMarkdown(loaded);
+
+      // Create inbox task if auto_execute was enabled
+      if (loaded.auto_execute) {
+        inboxTask = writeInboxTask(loaded);
+      }
+
       // Clean up the active session JSON file upon completion
       const sessionFile = getSessionFile(loaded.id);
       try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch { /* ignore */ }
@@ -3582,15 +3955,33 @@ server.tool(
       return lockedResult;
     }
 
-    appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
+    appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}${inboxTask ? ' | handoff: ' + inboxTask.id : ''}`);
 
     // Immediately force-close monitor terminal (including physical Terminal) on deliberation end
     closeMonitorTerminal(state.id, getSessionWindowIds(state));
 
+    // Notify telepty bus if handoff task was created
+    if (inboxTask) {
+      notifyTeleptyBus({
+        type: "handoff_ready",
+        sender: "deliberation",
+        session_id: state.id,
+        task_id: inboxTask.id,
+        project: state.project,
+        topic: state.topic,
+        structured: structured || null,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {}); // fire-and-forget
+    }
+
+    const handoffMsg = inboxTask
+      ? `\n\n🤖 **Handoff Task Created:** ${inboxTask.id}\n📥 Inbox: ${path.join(getInboxDir(), inboxTask.id + '.json')}`
+      : '';
+
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.`,
+        text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.${handoffMsg}`,
       }],
     };
   })
@@ -3618,6 +4009,84 @@ server.tool(
     const list = files.map((f, i) => `${i + 1}. ${f.replace(".md", "")}`).join("\n");
     return { content: [{ type: "text", text: `## Past Deliberations (${getProjectSlug()})\n\n${list}` }] };
   }
+);
+
+server.tool(
+  "deliberation_inbox_list",
+  "List all pending handoff tasks in the deliberation inbox.",
+  {},
+  safeToolHandler("deliberation_inbox_list", async () => {
+    const tasks = listInboxTasks();
+    if (tasks.length === 0) {
+      return { content: [{ type: "text", text: "📥 Inbox is empty. No pending handoff tasks." }] };
+    }
+    const lines = tasks.map(t =>
+      `- **${t.id}** [${t.status}] ${t.project}/${t.topic} (${t.structured_synthesis?.actionable_tasks?.length || 0} tasks) — ${t.created}`
+    );
+    return {
+      content: [{ type: "text", text: `📥 **Deliberation Inbox** (${tasks.length} tasks)\n\n${lines.join('\n')}` }],
+    };
+  })
+);
+
+server.tool(
+  "deliberation_handoff_status",
+  "Read or update the status of a handoff task in the inbox.",
+  {
+    task_id: z.string().describe("Inbox task ID (e.g., task-my-session-id)"),
+    status: z.enum(["pending", "executing", "implemented", "failed"]).optional()
+      .describe("New status to set. Omit to just read current status."),
+    log_entry: z.string().optional().describe("Optional log message to append to execution_log"),
+  },
+  safeToolHandler("deliberation_handoff_status", async ({ task_id, status, log_entry }) => {
+    const task = loadInboxTask(task_id);
+    if (!task) {
+      return { content: [{ type: "text", text: `❌ Task "${task_id}" not found in inbox.` }] };
+    }
+
+    if (!status && !log_entry) {
+      // Read-only mode
+      const taskLines = (task.structured_synthesis?.actionable_tasks || [])
+        .map(t => `  ${t.id}. ${t.task}${t.files ? ` (${t.files.join(', ')})` : ''}${t.priority ? ` [${t.priority}]` : ''}`);
+      return {
+        content: [{
+          type: "text",
+          text: `📋 **${task.id}** — ${task.project}/${task.topic}\n**Status:** ${task.status}\n**Created:** ${task.created}\n**Updated:** ${task.updated}\n\n**Actionable Tasks:**\n${taskLines.join('\n') || '(none)'}\n\n**Execution Log:**\n${task.execution_log.map(e => `  [${e.timestamp}] ${e.message}`).join('\n') || '(empty)'}`,
+        }],
+      };
+    }
+
+    const updates = {};
+    if (status) updates.status = status;
+    if (log_entry) {
+      updates.execution_log = [
+        ...(task.execution_log || []),
+        { timestamp: new Date().toISOString(), message: log_entry },
+      ];
+    }
+    const updated = updateInboxTask(task_id, updates);
+
+    // Notify telepty bus of status change
+    if (status) {
+      notifyTeleptyBus({
+        type: "handoff_status",
+        sender: "deliberation",
+        task_id,
+        status,
+        project: task.project,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
+    }
+
+    appendRuntimeLog("INFO", `HANDOFF: ${task_id} status → ${updated.status}${log_entry ? ` | ${log_entry}` : ''}`);
+
+    return {
+      content: [{
+        type: "text",
+        text: `✅ ${task_id} updated → **${updated.status}**${log_entry ? `\n📝 Log: ${log_entry}` : ''}`,
+      }],
+    };
+  })
 );
 
 server.tool(
@@ -3765,7 +4234,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (detected speakers join)" : "manual (user selects)"}\n**Browser speakers:** ${config.include_browser_speakers === true ? "enabled" : "disabled (CLI-only default)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, include_browser_speakers: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo enable browser speakers:\n\`deliberation_cli_config(include_browser_speakers: true)\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (detected speakers join)" : "manual (user selects every start)"}\n**Browser speakers:** ${config.include_browser_speakers === true ? "enabled" : "disabled (CLI-only default)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nℹ️ Manual mode now requires a fresh \`selection_token\` from \`deliberation_speaker_candidates\` on every start.\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, include_browser_speakers: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo enable browser speakers:\n\`deliberation_cli_config(include_browser_speakers: true)\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
@@ -4197,11 +4666,12 @@ server.tool(
           const env = { ...process.env, NO_COLOR: "1" };
           
           if (speaker === "claude") {
-            proc = spawn("claude", ["-p", "--output-format", "text", "--no-input"], { env, windowsHide: true });
+            const args = getCliExecArgs("claude");
+            proc = spawn("claude", args.includes("--no-input") ? args : [...args, "--no-input"], { env, windowsHide: true });
             proc.stdin.write(opinionPrompt);
             proc.stdin.end();
           } else if (speaker === "codex") {
-            proc = spawn("codex", ["exec", "-"], { env, windowsHide: true });
+            proc = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
             proc.stdin.write(opinionPrompt);
             proc.stdin.end();
           } else if (speaker === "gemini") {
@@ -4227,7 +4697,7 @@ server.tool(
               const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
               if (codexLineIdx !== -1) {
                 cleaned = lines.slice(codexLineIdx + 1)
-                  .filter(line => !/^(tokens used$|^[0-9,]*$)/.test(line))
+                  .filter(line => !/^(tokens used$|^[0-9,]*$|^mcp:.*)/.test(line))
                   .join("\n").trim();
               }
             } else if (speaker === "gemini") {
@@ -4570,4 +5040,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt };
