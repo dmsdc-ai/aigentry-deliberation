@@ -207,6 +207,12 @@ cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 
 ## What's New
 
+### v0.0.36
+- **README refresh**: clarified the mandatory TUI speaker-selection flow and the confirmed-token handoff before `deliberation_start`
+- **Telepty candidate docs**: documented active telepty session discovery with lightweight `session_id` + `host/pid` locators instead of heavy persisted process snapshots
+- **Cross-project delivery docs**: clarified that active session lookup now resolves across project state directories, which unblocks cross-project `deliberation_respond` flows
+- **Operator guidance**: documented telepty bus transport as the automation path and unmanaged/manual sessions as the fallback path
+
 ### v0.0.35
 - **Manual selection enforcement**: `deliberation_confirm_speakers` binds a fresh candidate snapshot to the exact user-picked speaker set before `deliberation_start`
 - **Telepty session candidates**: active telepty sessions appear in speaker discovery with lightweight host/pid locators
