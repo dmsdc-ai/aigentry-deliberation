@@ -364,58 +364,6 @@ function getSessionFile(sessionId) {
   return path.join(getSessionsDir(), `${sessionId}.json`);
 }
 
-function getInboxDir() {
-  return path.join(INSTALL_DIR, "inbox");
-}
-
-function writeInboxTask(state) {
-  const dir = getInboxDir();
-  fs.mkdirSync(dir, { recursive: true });
-  const task = {
-    id: `task-${state.id}`,
-    session_id: state.id,
-    project: state.project,
-    topic: state.topic,
-    status: "pending",
-    created: new Date().toISOString(),
-    updated: new Date().toISOString(),
-    synthesis: state.synthesis,
-    structured_synthesis: state.structured_synthesis || null,
-    execution_log: [],
-  };
-  writeTextAtomic(path.join(dir, `${task.id}.json`), JSON.stringify(task, null, 2));
-  appendRuntimeLog("INFO", `HANDOFF: Inbox task created: ${task.id}`);
-  return task;
-}
-
-function loadInboxTask(taskId) {
-  const safeId = String(taskId).replace(/[^a-zA-Z0-9._-]/g, "_");
-  const file = path.join(getInboxDir(), `${safeId}.json`);
-  if (!fs.existsSync(file)) return null;
-  return JSON.parse(fs.readFileSync(file, "utf-8"));
-}
-
-function listInboxTasks() {
-  const dir = getInboxDir();
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir)
-    .filter(f => f.endsWith(".json"))
-    .map(f => {
-      try { return JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")); }
-      catch { return null; }
-    })
-    .filter(Boolean);
-}
-
-function updateInboxTask(taskId, updates) {
-  const safeId = String(taskId).replace(/[^a-zA-Z0-9._-]/g, "_");
-  const task = loadInboxTask(safeId);
-  if (!task) return null;
-  Object.assign(task, updates, { updated: new Date().toISOString() });
-  writeTextAtomic(path.join(getInboxDir(), `${safeId}.json`), JSON.stringify(task, null, 2));
-  return task;
-}
-
 async function notifyTeleptyBus(event) {
   const host = process.env.TELEPTY_HOST || "localhost";
   const port = process.env.TELEPTY_PORT || "3848";
@@ -3675,23 +3623,37 @@ async function runAutoHandoff(sessionId) {
 
     // Phase 2: Generate structured synthesis
     appendRuntimeLog("INFO", `AUTO_HANDOFF_SYNTHESIZE: ${sessionId}`);
-    const synthResult = await generateAutoSynthesis(sessionId);
+    let synthResult = await generateAutoSynthesis(sessionId);
 
     // Phase 3: Call synthesize (reuse existing logic)
     const state = loadSession(sessionId);
     if (!state) return;
 
+    // Fallback: if synthesis generation failed, build a basic structure from the discussion
+    if (!synthResult || (!synthResult.summary && !synthResult.actionable_tasks)) {
+      appendRuntimeLog("WARN", `AUTO_HANDOFF_SYNTH_FALLBACK: ${sessionId} | Building fallback from discussion log`);
+      const turns = state.log || [];
+      const fallbackSummary = turns.length > 0
+        ? `Deliberation on "${state.topic}" completed with ${turns.length} turns from ${[...new Set(turns.map(t => t.speaker))].join(", ")}.`
+        : `Deliberation on "${state.topic}" completed.`;
+      synthResult = {
+        summary: fallbackSummary,
+        decisions: [`Discussed: ${state.topic}`],
+        actionable_tasks: [],
+        markdown_synthesis: `# Auto-generated synthesis (fallback)\n\n${fallbackSummary}\n\n## Discussion\n${turns.map(t => `**${t.speaker}**: ${typeof t.content === 'string' ? t.content.substring(0, 200) : '(no content)'}${t.content && t.content.length > 200 ? '...' : ''}`).join("\n\n")}`,
+      };
+    }
+
     const markdownSynthesis = synthResult?.markdown_synthesis ||
       `# Auto-generated synthesis\n\n${synthResult?.summary || "Deliberation completed."}\n\n## Decisions\n${(synthResult?.decisions || []).map(d => `- ${d}`).join("\n")}\n\n## Tasks\n${(synthResult?.actionable_tasks || []).map(t => `- [${t.priority}] ${t.task}`).join("\n")}`;
 
-    const structured = synthResult ? {
+    const structured = {
       summary: synthResult.summary || "",
       decisions: synthResult.decisions || [],
       actionable_tasks: synthResult.actionable_tasks || [],
-    } : null;
+    };
 
     // Apply synthesis to session
-    let inboxTask = null;
     withSessionLock(sessionId, () => {
       const loaded = loadSession(sessionId);
       if (!loaded) return;
@@ -3703,46 +3665,27 @@ async function runAutoHandoff(sessionId) {
       archiveState(loaded);
       cleanupSyncMarkdown(loaded);
 
-      if (loaded.auto_execute) {
-        inboxTask = writeInboxTask(loaded);
-      }
-
       const sessionFile = getSessionFile(loaded.id);
       try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch {}
     });
 
     closeMonitorTerminal(sessionId, getSessionWindowIds(state));
 
-    appendRuntimeLog("INFO", `AUTO_HANDOFF_SYNTHESIZED: ${sessionId}${inboxTask ? " | task: " + inboxTask.id : ""}`);
+    appendRuntimeLog("INFO", `AUTO_HANDOFF_SYNTHESIZED: ${sessionId}`);
 
-    // Phase 4: Notify telepty bus
-    if (inboxTask) {
+    // Phase 4: Notify telepty bus with full structured data for dustcraw to consume
+    if (state.auto_execute) {
       await notifyTeleptyBus({
-        type: "handoff_ready",
+        type: "deliberation_completed",
         sender: "deliberation",
         session_id: sessionId,
-        task_id: inboxTask.id,
         project: state.project,
         topic: state.topic,
-        structured,
+        synthesis: markdownSynthesis,
+        structured_synthesis: structured,
         timestamp: new Date().toISOString(),
       }).catch(() => {});
-
-      // Phase 5: Inject into telepty executor session if available
-      const teleptyHost = process.env.TELEPTY_HOST || "localhost";
-      const teleptyPort = process.env.TELEPTY_PORT || "3848";
-      try {
-        const taskPrompt = `[HANDOFF] Deliberation "${state.topic}" completed with ${(structured?.actionable_tasks || []).length} tasks.\n\nTasks:\n${(structured?.actionable_tasks || []).map(t => `${t.id}. [${t.priority || "medium"}] ${t.task} → ${(t.files || []).join(", ")}`).join("\n")}\n\nExecute these tasks now. Use deliberation_handoff_status to update progress.`;
-
-        await fetch(`http://${teleptyHost}:${teleptyPort}/api/sessions/broadcast/inject`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: taskPrompt }),
-        });
-        appendRuntimeLog("INFO", `AUTO_HANDOFF_INJECTED: ${sessionId} | telepty broadcast`);
-      } catch (err) {
-        appendRuntimeLog("WARN", `AUTO_HANDOFF_INJECT_FAIL: ${sessionId} | ${err.message}`);
-      }
+      appendRuntimeLog("INFO", `AUTO_HANDOFF_NOTIFIED: ${sessionId} | telepty event sent`);
     }
 
     appendRuntimeLog("INFO", `AUTO_HANDOFF_COMPLETE: ${sessionId}`);
@@ -4264,7 +4207,6 @@ server.tool(
 
     let state = null;
     let archivePath = null;
-    let inboxTask = null;
     const lockedResult = withSessionLock(resolved, () => {
       const loaded = loadSession(resolved);
       if (!loaded) {
@@ -4279,11 +4221,6 @@ server.tool(
       archivePath = archiveState(loaded);
       cleanupSyncMarkdown(loaded);
 
-      // Create inbox task if auto_execute was enabled
-      if (loaded.auto_execute) {
-        inboxTask = writeInboxTask(loaded);
-      }
-
       // Clean up the active session JSON file upon completion
       const sessionFile = getSessionFile(loaded.id);
       try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch { /* ignore */ }
@@ -4294,33 +4231,29 @@ server.tool(
       return lockedResult;
     }
 
-    appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}${inboxTask ? ' | handoff: ' + inboxTask.id : ''}`);
+    appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
 
     // Immediately force-close monitor terminal (including physical Terminal) on deliberation end
     closeMonitorTerminal(state.id, getSessionWindowIds(state));
 
-    // Notify telepty bus if handoff task was created
-    if (inboxTask) {
+    // Notify telepty bus with full structured data for dustcraw to consume
+    if (state.auto_execute) {
       notifyTeleptyBus({
-        type: "handoff_ready",
+        type: "deliberation_completed",
         sender: "deliberation",
         session_id: state.id,
-        task_id: inboxTask.id,
         project: state.project,
         topic: state.topic,
-        structured: structured || null,
+        synthesis,
+        structured_synthesis: structured || null,
         timestamp: new Date().toISOString(),
       }).catch(() => {}); // fire-and-forget
     }
 
-    const handoffMsg = inboxTask
-      ? `\n\n🤖 **Handoff Task Created:** ${inboxTask.id}\n📥 Inbox: ${path.join(getInboxDir(), inboxTask.id + '.json')}`
-      : '';
-
     return {
       content: [{
         type: "text",
-        text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.${handoffMsg}`,
+        text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.`,
       }],
     };
   })
@@ -4348,84 +4281,6 @@ server.tool(
     const list = files.map((f, i) => `${i + 1}. ${f.replace(".md", "")}`).join("\n");
     return { content: [{ type: "text", text: `## Past Deliberations (${getProjectSlug()})\n\n${list}` }] };
   }
-);
-
-server.tool(
-  "deliberation_inbox_list",
-  "List all pending handoff tasks in the deliberation inbox.",
-  {},
-  safeToolHandler("deliberation_inbox_list", async () => {
-    const tasks = listInboxTasks();
-    if (tasks.length === 0) {
-      return { content: [{ type: "text", text: "📥 Inbox is empty. No pending handoff tasks." }] };
-    }
-    const lines = tasks.map(t =>
-      `- **${t.id}** [${t.status}] ${t.project}/${t.topic} (${t.structured_synthesis?.actionable_tasks?.length || 0} tasks) — ${t.created}`
-    );
-    return {
-      content: [{ type: "text", text: `📥 **Deliberation Inbox** (${tasks.length} tasks)\n\n${lines.join('\n')}` }],
-    };
-  })
-);
-
-server.tool(
-  "deliberation_handoff_status",
-  "Read or update the status of a handoff task in the inbox.",
-  {
-    task_id: z.string().describe("Inbox task ID (e.g., task-my-session-id)"),
-    status: z.enum(["pending", "executing", "implemented", "failed"]).optional()
-      .describe("New status to set. Omit to just read current status."),
-    log_entry: z.string().optional().describe("Optional log message to append to execution_log"),
-  },
-  safeToolHandler("deliberation_handoff_status", async ({ task_id, status, log_entry }) => {
-    const task = loadInboxTask(task_id);
-    if (!task) {
-      return { content: [{ type: "text", text: `❌ Task "${task_id}" not found in inbox.` }] };
-    }
-
-    if (!status && !log_entry) {
-      // Read-only mode
-      const taskLines = (task.structured_synthesis?.actionable_tasks || [])
-        .map(t => `  ${t.id}. ${t.task}${t.files ? ` (${t.files.join(', ')})` : ''}${t.priority ? ` [${t.priority}]` : ''}`);
-      return {
-        content: [{
-          type: "text",
-          text: `📋 **${task.id}** — ${task.project}/${task.topic}\n**Status:** ${task.status}\n**Created:** ${task.created}\n**Updated:** ${task.updated}\n\n**Actionable Tasks:**\n${taskLines.join('\n') || '(none)'}\n\n**Execution Log:**\n${task.execution_log.map(e => `  [${e.timestamp}] ${e.message}`).join('\n') || '(empty)'}`,
-        }],
-      };
-    }
-
-    const updates = {};
-    if (status) updates.status = status;
-    if (log_entry) {
-      updates.execution_log = [
-        ...(task.execution_log || []),
-        { timestamp: new Date().toISOString(), message: log_entry },
-      ];
-    }
-    const updated = updateInboxTask(task_id, updates);
-
-    // Notify telepty bus of status change
-    if (status) {
-      notifyTeleptyBus({
-        type: "handoff_status",
-        sender: "deliberation",
-        task_id,
-        status,
-        project: task.project,
-        timestamp: new Date().toISOString(),
-      }).catch(() => {});
-    }
-
-    appendRuntimeLog("INFO", `HANDOFF: ${task_id} status → ${updated.status}${log_entry ? ` | ${log_entry}` : ''}`);
-
-    return {
-      content: [{
-        type: "text",
-        text: `✅ ${task_id} updated → **${updated.status}**${log_entry ? `\n📝 Log: ${log_entry}` : ''}`,
-      }],
-    };
-  })
 );
 
 server.tool(
