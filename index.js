@@ -68,10 +68,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync, spawn } from "child_process";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import os from "os";
+import WebSocket from "ws";
 import { OrchestratedBrowserPort } from "./browser-control-port.js";
 import { getModelSelectionForTurn } from "./model-router.js";
 import { readClipboardText, writeClipboardText, hasClipboardImage, captureClipboardImage } from "./clipboard.js";
@@ -110,6 +112,13 @@ const DEFAULT_CLI_CANDIDATES = [
   "continue",
 ];
 const MAX_AUTO_DISCOVERED_SPEAKERS = 12;
+const TELEPTY_CONFIG_FILE = path.join(HOME, ".telepty", "config.json");
+const TELEPTY_DEFAULT_HOST = process.env.TELEPTY_HOST || "127.0.0.1";
+const TELEPTY_PORT = Number(process.env.TELEPTY_PORT || 3848);
+const TELEPTY_TRANSPORT_TIMEOUT_MS = 5_000;
+const TELEPTY_SEMANTIC_TIMEOUT_MS = 60_000;
+const TELEPTY_BUS_RECONNECT_MS = 5_000;
+const TELEPTY_SESSION_HEALTH_STALE_MS = 25_000;
 
 function loadDeliberationConfig() {
   const configPath = path.join(INSTALL_DIR, "config.json");
@@ -125,6 +134,57 @@ function saveDeliberationConfig(config) {
   config.updated = new Date().toISOString();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
+
+const StructuredActionableTaskSchema = z.object({
+  id: z.number(),
+  task: z.string(),
+  files: z.array(z.string()).optional(),
+  project: z.string().optional(),
+  priority: z.enum(["high", "medium", "low"]).optional(),
+});
+
+const StructuredSynthesisSchema = z.object({
+  summary: z.string(),
+  decisions: z.array(z.string()),
+  actionable_tasks: z.array(StructuredActionableTaskSchema),
+});
+
+const TeleptyEnvelopeSchema = z.object({
+  message_id: z.string().min(1),
+  session_id: z.string().min(1),
+  project: z.string().min(1),
+  kind: z.string().min(1),
+  source: z.string().min(1),
+  target: z.string().min(1),
+  reply_to: z.string().nullable().optional(),
+  trace: z.array(z.string()),
+  payload: z.unknown(),
+  ts: z.string().min(1),
+});
+
+const TeleptyTurnRequestPayloadSchema = z.object({
+  turn_id: z.string().min(1),
+  round: z.number().int().positive(),
+  max_rounds: z.number().int().positive(),
+  speaker: z.string().min(1),
+  role: z.string().nullable().optional(),
+  prompt: z.string().min(1),
+  prompt_sha1: z.string().length(40),
+  history_entries: z.number().int().nonnegative().optional(),
+  transport_timeout_ms: z.number().int().positive(),
+  semantic_timeout_ms: z.number().int().positive(),
+});
+
+const TeleptyDeliberationCompletedPayloadSchema = z.object({
+  topic: z.string(),
+  synthesis: z.string(),
+  structured_synthesis: StructuredSynthesisSchema.nullable().optional(),
+});
+
+const TELEPTY_ENVELOPE_PAYLOAD_SCHEMAS = {
+  turn_request: TeleptyTurnRequestPayloadSchema,
+  deliberation_completed: TeleptyDeliberationCompletedPayloadSchema,
+};
 
 const DEFAULT_BROWSER_APPS = ["Google Chrome", "Brave Browser", "Arc", "Microsoft Edge", "Safari"];
 const DEFAULT_LLM_DOMAINS = [
@@ -352,47 +412,434 @@ function getProjectSlug() {
   return path.basename(process.cwd());
 }
 
-function getProjectStateDir() {
-  return path.join(GLOBAL_STATE_DIR, getProjectSlug());
+function normalizeProjectSlug(projectSlug) {
+  if (typeof projectSlug === "string" && projectSlug.trim()) {
+    return projectSlug.trim();
+  }
+  return getProjectSlug();
 }
 
-function getSessionsDir() {
-  return path.join(getProjectStateDir(), "sessions");
+function getProjectStateDir(projectSlug = getProjectSlug()) {
+  return path.join(GLOBAL_STATE_DIR, normalizeProjectSlug(projectSlug));
 }
 
-function getSessionFile(sessionId) {
-  return path.join(getSessionsDir(), `${sessionId}.json`);
+function getSessionsDir(projectSlug = getProjectSlug()) {
+  return path.join(getProjectStateDir(projectSlug), "sessions");
+}
+
+function getSessionProject(sessionRef, fallbackProject = getProjectSlug()) {
+  if (sessionRef && typeof sessionRef === "object" && typeof sessionRef.project === "string" && sessionRef.project.trim()) {
+    return sessionRef.project.trim();
+  }
+  return normalizeProjectSlug(fallbackProject);
+}
+
+function getSessionFile(sessionRef, projectSlug) {
+  const sessionId = typeof sessionRef === "object" && sessionRef !== null
+    ? sessionRef.id
+    : sessionRef;
+  return path.join(getSessionsDir(getSessionProject(sessionRef, projectSlug)), `${sessionId}.json`);
+}
+
+function listStateProjects() {
+  if (!fs.existsSync(GLOBAL_STATE_DIR)) return [];
+  try {
+    return fs.readdirSync(GLOBAL_STATE_DIR, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function findSessionRecord(sessionRef, { preferProject, activeOnly = false } = {}) {
+  if (!sessionRef) return null;
+
+  if (typeof sessionRef === "object" && sessionRef !== null && sessionRef.id) {
+    const project = getSessionProject(sessionRef, preferProject);
+    const file = getSessionFile(sessionRef.id, project);
+    const state = readJsonFileSafe(file);
+    if (!state) return null;
+    const normalized = normalizeSessionActors(state);
+    if (activeOnly && normalized.status !== "active" && normalized.status !== "awaiting_synthesis") {
+      return null;
+    }
+    return { file, project, state: normalized };
+  }
+
+  const sessionId = String(sessionRef);
+  const preferred = normalizeProjectSlug(preferProject);
+  const projects = [...new Set([preferred, ...listStateProjects()])];
+  for (const project of projects) {
+    const file = getSessionFile(sessionId, project);
+    const state = readJsonFileSafe(file);
+    if (!state) continue;
+    const normalized = normalizeSessionActors(state);
+    if (activeOnly && normalized.status !== "active" && normalized.status !== "awaiting_synthesis") {
+      continue;
+    }
+    return { file, project: normalized.project || project, state: normalized };
+  }
+  return null;
+}
+
+const teleptyBusState = {
+  ws: null,
+  status: "idle",
+  connectPromise: null,
+  reconnectTimer: null,
+  lastError: null,
+  lastConnectedAt: null,
+  lastMessageAt: null,
+  healthBySession: new Map(),
+};
+
+const pendingTeleptyTurnRequests = new Map();
+
+function hashPromptText(value) {
+  return createHash("sha1").update(String(value || "")).digest("hex");
+}
+
+function createEnvelopeId(prefix = "env") {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function validateTeleptyEnvelope(envelope) {
+  const parsed = TeleptyEnvelopeSchema.parse(envelope);
+  const payloadSchema = TELEPTY_ENVELOPE_PAYLOAD_SCHEMAS[parsed.kind];
+  if (payloadSchema) {
+    payloadSchema.parse(parsed.payload);
+  }
+  return parsed;
+}
+
+function buildTeleptyEnvelope({ session_id, project, kind, source, target, reply_to = null, trace = [], payload, ts = new Date().toISOString(), message_id = createEnvelopeId(kind) }) {
+  return validateTeleptyEnvelope({
+    message_id,
+    session_id,
+    project,
+    kind,
+    source,
+    target,
+    reply_to,
+    trace,
+    payload,
+    ts,
+  });
+}
+
+function buildTeleptyTurnRequestEnvelope({ state, speaker, turnId, turnPrompt, includeHistoryEntries = 0, profile }) {
+  const role = (state.speaker_roles || {})[speaker] || null;
+  const target = profile?.telepty_host && !["127.0.0.1", "localhost"].includes(profile.telepty_host)
+    ? `${profile.telepty_session_id}@${profile.telepty_host}`
+    : profile?.telepty_session_id || speaker;
+  return buildTeleptyEnvelope({
+    session_id: state.id,
+    project: state.project || getProjectSlug(),
+    kind: "turn_request",
+    source: `deliberation:${state.id}`,
+    target,
+    reply_to: state.id,
+    trace: [
+      `project:${state.project || getProjectSlug()}`,
+      `speaker:${speaker}`,
+      `turn:${turnId}`,
+    ],
+    payload: {
+      turn_id: turnId,
+      round: state.current_round,
+      max_rounds: state.max_rounds,
+      speaker,
+      role,
+      prompt: turnPrompt,
+      prompt_sha1: hashPromptText(turnPrompt),
+      history_entries: includeHistoryEntries,
+      transport_timeout_ms: TELEPTY_TRANSPORT_TIMEOUT_MS,
+      semantic_timeout_ms: TELEPTY_SEMANTIC_TIMEOUT_MS,
+    },
+  });
+}
+
+function buildTeleptySynthesisEnvelope({ state, synthesis, structured }) {
+  return buildTeleptyEnvelope({
+    session_id: state.id,
+    project: state.project || getProjectSlug(),
+    kind: "deliberation_completed",
+    source: `deliberation:${state.id}`,
+    target: "telepty-bus",
+    reply_to: state.id,
+    trace: [
+      `project:${state.project || getProjectSlug()}`,
+      "stage:synthesis",
+    ],
+    payload: {
+      topic: state.topic,
+      synthesis,
+      structured_synthesis: structured || null,
+    },
+  });
+}
+
+function resolveTeleptyBusUrl(host = TELEPTY_DEFAULT_HOST) {
+  const url = new URL(`ws://${host}:${TELEPTY_PORT}/api/bus`);
+  const token = loadTeleptyAuthToken();
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
+}
+
+function cleanupPendingTeleptyTurn(messageId) {
+  const entry = pendingTeleptyTurnRequests.get(messageId);
+  if (!entry) return;
+  if (entry.transportTimer) clearTimeout(entry.transportTimer);
+  if (entry.semanticTimer) clearTimeout(entry.semanticTimer);
+  pendingTeleptyTurnRequests.delete(messageId);
+}
+
+function registerPendingTeleptyTurnRequest({ envelope, profile, speaker }) {
+  const nowMs = Date.now();
+  const entry = {
+    message_id: envelope.message_id,
+    deliberation_session_id: envelope.session_id,
+    project: envelope.project,
+    speaker,
+    turn_id: envelope.payload.turn_id,
+    target_session_id: profile?.telepty_session_id || speaker,
+    target_host: profile?.telepty_host || TELEPTY_DEFAULT_HOST,
+    prompt_sha1: envelope.payload.prompt_sha1,
+    published_at: envelope.ts,
+    transport_status: "pending",
+    semantic_status: "pending",
+    transport_deadline_at: new Date(nowMs + TELEPTY_TRANSPORT_TIMEOUT_MS).toISOString(),
+    semantic_deadline_at: new Date(nowMs + TELEPTY_SEMANTIC_TIMEOUT_MS).toISOString(),
+  };
+  entry.transportPromise = new Promise(resolve => {
+    entry.resolveTransport = resolve;
+  });
+  entry.semanticPromise = new Promise(resolve => {
+    entry.resolveSemantic = resolve;
+  });
+  entry.transportTimer = setTimeout(() => {
+    if (entry.transport_status !== "pending") return;
+    entry.transport_status = "timeout";
+    appendRuntimeLog("WARN", `TELEPTY_TRANSPORT_TIMEOUT: ${entry.deliberation_session_id} | speaker: ${entry.speaker} | target: ${entry.target_session_id}`);
+    entry.resolveTransport?.({ ok: false, code: "transport_timeout" });
+  }, TELEPTY_TRANSPORT_TIMEOUT_MS);
+  entry.semanticTimer = setTimeout(() => {
+    if (entry.semantic_status !== "pending") return;
+    entry.semantic_status = "timeout";
+    appendRuntimeLog("WARN", `TELEPTY_SEMANTIC_TIMEOUT: ${entry.deliberation_session_id} | speaker: ${entry.speaker} | target: ${entry.target_session_id}`);
+    entry.resolveSemantic?.({ ok: false, code: "semantic_timeout" });
+    setTimeout(() => cleanupPendingTeleptyTurn(entry.message_id), 5_000);
+  }, TELEPTY_SEMANTIC_TIMEOUT_MS);
+  pendingTeleptyTurnRequests.set(entry.message_id, entry);
+  return entry;
+}
+
+function ackPendingTeleptyTurn(event) {
+  const promptHash = hashPromptText(event?.content || "");
+  const targetSessionId = String(event?.target_agent || "");
+  const candidate = [...pendingTeleptyTurnRequests.values()]
+    .filter(entry =>
+      entry.transport_status === "pending"
+      && entry.target_session_id === targetSessionId
+      && entry.prompt_sha1 === promptHash
+    )
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+  if (!candidate) return null;
+
+  candidate.transport_status = "ack";
+  candidate.inject_id = event.inject_id || null;
+  candidate.transport_acked_at = new Date().toISOString();
+  if (candidate.transportTimer) clearTimeout(candidate.transportTimer);
+  candidate.resolveTransport?.({
+    ok: true,
+    code: "inject_written",
+    inject_id: event.inject_id || null,
+  });
+  appendRuntimeLog("INFO", `TELEPTY_TRANSPORT_ACK: ${candidate.deliberation_session_id} | speaker: ${candidate.speaker} | target: ${candidate.target_session_id} | inject_id: ${event.inject_id || "n/a"}`);
+  return candidate;
+}
+
+function completePendingTeleptySemantic({ sessionId, speaker, turnId }) {
+  const candidate = [...pendingTeleptyTurnRequests.values()]
+    .filter(entry =>
+      entry.semantic_status === "pending"
+      && entry.deliberation_session_id === sessionId
+      && normalizeSpeaker(entry.speaker) === normalizeSpeaker(speaker)
+      && (!turnId || !entry.turn_id || entry.turn_id === turnId)
+    )
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+  if (!candidate) return null;
+
+  candidate.semantic_status = "completed";
+  candidate.semantic_completed_at = new Date().toISOString();
+  if (candidate.semanticTimer) clearTimeout(candidate.semanticTimer);
+  candidate.resolveSemantic?.({ ok: true, code: "responded" });
+  appendRuntimeLog("INFO", `TELEPTY_SEMANTIC_COMPLETE: ${candidate.deliberation_session_id} | speaker: ${candidate.speaker} | target: ${candidate.target_session_id}`);
+  setTimeout(() => cleanupPendingTeleptyTurn(candidate.message_id), 5_000);
+  return candidate;
+}
+
+function updateTeleptySessionHealth(event) {
+  const sessionId = event?.session_id;
+  if (!sessionId) return null;
+  const health = {
+    session_id: sessionId,
+    payload: event.payload || {},
+    timestamp: event.timestamp || new Date().toISOString(),
+    seen_at: new Date().toISOString(),
+  };
+  teleptyBusState.healthBySession.set(sessionId, health);
+  return health;
+}
+
+function getTeleptySessionHealth(sessionId, nowMs = Date.now()) {
+  const entry = teleptyBusState.healthBySession.get(sessionId);
+  if (!entry) return null;
+  const seenAtMs = Date.parse(entry.seen_at || entry.timestamp || "");
+  const ageMs = Number.isFinite(seenAtMs) ? nowMs - seenAtMs : null;
+  return {
+    ...entry,
+    age_ms: ageMs,
+    stale: Number.isFinite(ageMs) ? ageMs > TELEPTY_SESSION_HEALTH_STALE_MS : true,
+  };
+}
+
+function handleTeleptyBusMessage(raw) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+  teleptyBusState.lastMessageAt = new Date().toISOString();
+  if (!parsed || typeof parsed !== "object") return null;
+
+  if (parsed.type === "inject_written") {
+    return ackPendingTeleptyTurn(parsed);
+  }
+  if (parsed.type === "session_health") {
+    return updateTeleptySessionHealth(parsed);
+  }
+  return parsed;
+}
+
+async function ensureTeleptyBusSubscriber() {
+  if (teleptyBusState.ws && teleptyBusState.ws.readyState === WebSocket.OPEN) {
+    return { ok: true, status: "open" };
+  }
+  if (teleptyBusState.connectPromise) {
+    return teleptyBusState.connectPromise;
+  }
+
+  teleptyBusState.connectPromise = new Promise((resolve) => {
+    try {
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      teleptyBusState.status = "connecting";
+      const ws = new WebSocket(resolveTeleptyBusUrl());
+      teleptyBusState.ws = ws;
+
+      ws.once("open", () => {
+        teleptyBusState.status = "open";
+        teleptyBusState.lastConnectedAt = new Date().toISOString();
+        teleptyBusState.lastError = null;
+        appendRuntimeLog("INFO", "TELEPTY_BUS_CONNECTED");
+        finish({ ok: true, status: "open" });
+      });
+
+      ws.on("message", (data) => {
+        handleTeleptyBusMessage(data.toString());
+      });
+
+      ws.on("error", (err) => {
+        teleptyBusState.lastError = String(err?.message || err);
+        appendRuntimeLog("WARN", `TELEPTY_BUS_ERROR: ${teleptyBusState.lastError}`);
+        if (ws.readyState !== WebSocket.OPEN) {
+          teleptyBusState.status = "error";
+          teleptyBusState.ws = null;
+          teleptyBusState.connectPromise = null;
+          finish({ ok: false, status: "error", error: teleptyBusState.lastError });
+        }
+      });
+
+      ws.on("close", () => {
+        teleptyBusState.status = "closed";
+        teleptyBusState.ws = null;
+        teleptyBusState.connectPromise = null;
+        if (!settled) {
+          finish({ ok: false, status: "closed", error: teleptyBusState.lastError || "socket closed" });
+        }
+        if (!teleptyBusState.reconnectTimer) {
+          teleptyBusState.reconnectTimer = setTimeout(() => {
+            teleptyBusState.reconnectTimer = null;
+            ensureTeleptyBusSubscriber().catch(() => {});
+          }, TELEPTY_BUS_RECONNECT_MS);
+        }
+      });
+    } catch (err) {
+      teleptyBusState.status = "error";
+      teleptyBusState.lastError = String(err?.message || err);
+      teleptyBusState.connectPromise = null;
+      resolve({ ok: false, status: "error", error: teleptyBusState.lastError });
+    }
+  });
+
+  const result = await teleptyBusState.connectPromise;
+  if (!result.ok) {
+    teleptyBusState.connectPromise = null;
+  } else if (teleptyBusState.ws?.readyState === WebSocket.OPEN) {
+    teleptyBusState.connectPromise = null;
+  }
+  return result;
 }
 
 async function notifyTeleptyBus(event) {
   const host = process.env.TELEPTY_HOST || "localhost";
   const port = process.env.TELEPTY_PORT || "3848";
+  const token = loadTeleptyAuthToken();
   try {
     const res = await fetch(`http://${host}:${port}/api/bus/publish`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "x-telepty-token": token } : {}),
+      },
       body: JSON.stringify(event),
     });
-    if (res.ok) appendRuntimeLog("INFO", `HANDOFF: Telepty bus notified: ${event.type}`);
+    const data = await res.json().catch(() => null);
+    if (res.ok) {
+      appendRuntimeLog("INFO", `HANDOFF: Telepty bus notified: ${event.kind || event.type || "unknown"}`);
+      return { ok: true, delivered: data?.delivered ?? null };
+    }
+    return { ok: false, status: res.status, error: data?.error || `HTTP ${res.status}` };
   } catch (err) {
     appendRuntimeLog("WARN", `HANDOFF: Telepty bus notification failed: ${err.message}`);
+    return { ok: false, error: err.message };
   }
 }
 
-function getArchiveDir() {
-  const obsidianDir = path.join(OBSIDIAN_PROJECTS, getProjectSlug(), "deliberations");
-  if (fs.existsSync(path.join(OBSIDIAN_PROJECTS, getProjectSlug()))) {
+function getArchiveDir(projectSlug = getProjectSlug()) {
+  const slug = normalizeProjectSlug(projectSlug);
+  const obsidianDir = path.join(OBSIDIAN_PROJECTS, slug, "deliberations");
+  if (fs.existsSync(path.join(OBSIDIAN_PROJECTS, slug))) {
     return obsidianDir;
   }
-  return path.join(getProjectStateDir(), "archive");
+  return path.join(getProjectStateDir(slug), "archive");
 }
 
-function getLocksDir() {
-  return path.join(getProjectStateDir(), LOCKS_SUBDIR);
+function getLocksDir(projectSlug = getProjectSlug()) {
+  return path.join(getProjectStateDir(projectSlug), LOCKS_SUBDIR);
 }
 
-function getSpeakerSelectionFile() {
-  return path.join(getProjectStateDir(), SPEAKER_SELECTION_FILE);
+function getSpeakerSelectionFile(projectSlug = getProjectSlug()) {
+  return path.join(getProjectStateDir(projectSlug), SPEAKER_SELECTION_FILE);
 }
 
 function formatRuntimeError(error) {
@@ -522,13 +969,20 @@ function withFileLock(lockPath, fn, options) {
   }
 }
 
-function withProjectLock(fn, options) {
-  return withFileLock(path.join(getLocksDir(), "_project.lock"), fn, options);
+function withProjectLock(projectSlug, fn, options) {
+  if (typeof projectSlug === "function") {
+    return withFileLock(path.join(getLocksDir(), "_project.lock"), projectSlug, fn);
+  }
+  return withFileLock(path.join(getLocksDir(projectSlug), "_project.lock"), fn, options);
 }
 
-function withSessionLock(sessionId, fn, options) {
+function withSessionLock(sessionRef, fn, options) {
+  const sessionId = typeof sessionRef === "object" && sessionRef !== null ? sessionRef.id : sessionRef;
+  const explicitProject = typeof sessionRef === "object" && sessionRef !== null ? sessionRef.project : null;
+  const record = findSessionRecord(sessionRef, { preferProject: explicitProject || getProjectSlug() });
+  const projectSlug = explicitProject || record?.project || getProjectSlug();
   const safeId = String(sessionId).replace(/[^a-zA-Z0-9가-힣._-]/g, "_");
-  return withFileLock(path.join(getLocksDir(), `${safeId}.lock`), fn, options);
+  return withFileLock(path.join(getLocksDir(projectSlug), `${safeId}.lock`), fn, options);
 }
 
 function normalizeSpeaker(raw) {
@@ -557,6 +1011,7 @@ function createSelectionToken() {
 function issueSpeakerSelectionToken({ candidates, include_browser }) {
   const selectionState = {
     token: createSelectionToken(),
+    phase: "candidates",
     created_at: new Date().toISOString(),
     include_browser: !!include_browser,
     candidate_speakers: dedupeSpeakers((candidates || []).map(c => typeof c === "string" ? c : c?.speaker)),
@@ -577,7 +1032,7 @@ function clearSpeakerSelectionToken() {
   }
 }
 
-function validateSpeakerSelectionRequest({ selectionState, selection_token, speakers, includeBrowserSpeakers, nowMs = Date.now() }) {
+function validateSpeakerSelectionSnapshot({ selectionState, selection_token, speakers, includeBrowserSpeakers, nowMs = Date.now() }) {
   if (!selection_token) {
     return { ok: false, code: "missing_token" };
   }
@@ -602,6 +1057,65 @@ function validateSpeakerSelectionRequest({ selectionState, selection_token, spea
   const missingSpeakers = requestedSpeakers.filter(speaker => !availableSpeakers.has(speaker));
   if (missingSpeakers.length > 0) {
     return { ok: false, code: "speaker_mismatch", missing_speakers: missingSpeakers };
+  }
+
+  return { ok: true };
+}
+
+function confirmSpeakerSelectionToken({ selectionState, selection_token, speakers, includeBrowserSpeakers, nowMs = Date.now(), persist = true }) {
+  const snapshotValidation = validateSpeakerSelectionSnapshot({
+    selectionState,
+    selection_token,
+    speakers,
+    includeBrowserSpeakers,
+    nowMs,
+  });
+  if (!snapshotValidation.ok) {
+    return snapshotValidation;
+  }
+
+  const confirmedSelection = {
+    token: createSelectionToken(),
+    phase: "confirmed",
+    created_at: new Date(nowMs).toISOString(),
+    include_browser: !!includeBrowserSpeakers,
+    candidate_speakers: dedupeSpeakers(selectionState.candidate_speakers || []),
+    selected_speakers: dedupeSpeakers(speakers || []),
+  };
+  if (persist) {
+    writeJsonFileAtomic(getSpeakerSelectionFile(), confirmedSelection);
+  }
+  return { ok: true, selectionState: confirmedSelection };
+}
+
+function validateSpeakerSelectionRequest({ selectionState, selection_token, speakers, includeBrowserSpeakers, nowMs = Date.now() }) {
+  const snapshotValidation = validateSpeakerSelectionSnapshot({
+    selectionState,
+    selection_token,
+    speakers,
+    includeBrowserSpeakers,
+    nowMs,
+  });
+  if (!snapshotValidation.ok) {
+    return snapshotValidation;
+  }
+
+  if (selectionState.phase !== "confirmed" || !Array.isArray(selectionState.selected_speakers)) {
+    return { ok: false, code: "selection_not_confirmed" };
+  }
+
+  const expectedSpeakers = dedupeSpeakers(selectionState.selected_speakers || []);
+  const requestedSpeakers = dedupeSpeakers(speakers || []);
+  if (
+    expectedSpeakers.length !== requestedSpeakers.length
+    || expectedSpeakers.some(speaker => !requestedSpeakers.includes(speaker))
+  ) {
+    return {
+      ok: false,
+      code: "selected_speakers_mismatch",
+      expected_speakers: expectedSpeakers,
+      requested_speakers: requestedSpeakers,
+    };
   }
 
   return { ok: true };
@@ -648,6 +1162,125 @@ function resolveCliCandidates() {
   }
 
   return dedupeSpeakers([...fromEnv, ...DEFAULT_CLI_CANDIDATES]);
+}
+
+function loadTeleptyAuthToken() {
+  try {
+    const raw = fs.readFileSync(TELEPTY_CONFIG_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.authToken === "string" && parsed.authToken.trim()
+      ? parsed.authToken.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatTeleptyHostLabel(host) {
+  return !host || host === "127.0.0.1" || host === "localhost" ? "Local" : host;
+}
+
+async function collectTeleptySessions() {
+  const token = loadTeleptyAuthToken();
+  if (!token) {
+    return { sessions: [], note: "telepty auth token not found." };
+  }
+
+  const host = TELEPTY_DEFAULT_HOST;
+  try {
+    const res = await fetch(`http://${host}:${TELEPTY_PORT}/api/sessions`, {
+      headers: { "x-telepty-token": token },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) {
+      return { sessions: [], note: `telepty daemon unavailable (${res.status}).` };
+    }
+    const sessions = await res.json();
+    if (!Array.isArray(sessions)) {
+      return { sessions: [], note: "telepty session response format was invalid." };
+    }
+    ensureTeleptyBusSubscriber().catch(() => {});
+    return {
+      sessions: sessions.map(session => ({ host, ...session })),
+      note: null,
+    };
+  } catch {
+    return { sessions: [], note: null };
+  }
+}
+
+function scoreTeleptyProcessMatch(session, baseCommand = "", fullCommand = "") {
+  const base = String(baseCommand || "").toLowerCase();
+  const full = String(fullCommand || "").toLowerCase();
+  const wanted = String(session?.command || "").trim().toLowerCase();
+  let score = 0;
+
+  if (wanted && (base === wanted || full.startsWith(`${wanted} `) || full.includes(` ${wanted} `))) {
+    score += 10;
+  }
+  if (base === "node" || base === "telepty") {
+    score -= 2;
+  }
+  if (full.includes("mcp-deliberation") || full.includes("oh-my-claudecode") || full.includes("bridge/mcp-server")) {
+    score -= 3;
+  }
+  return score;
+}
+
+function collectTeleptyProcessLocators(sessions = []) {
+  const wantedSessions = new Map(
+    sessions
+      .filter(session => session?.id)
+      .map(session => [String(session.id), session])
+  );
+  if (wantedSessions.size === 0) {
+    return new Map();
+  }
+
+  try {
+    const env = {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      SHELL: process.env.SHELL,
+      USER: process.env.USER,
+      LOGNAME: process.env.LOGNAME,
+      TERM: process.env.TERM,
+    };
+    const raw = execFileSync("ps", ["eww", "-axo", "pid=,tty=,comm=,command="], {
+      encoding: "utf-8",
+      windowsHide: true,
+      timeout: 2500,
+      maxBuffer: 8 * 1024 * 1024,
+      env,
+    });
+
+    const best = new Map();
+    for (const line of String(raw).split("\n")) {
+      if (!line.includes("TELEPTY_SESSION_ID=")) continue;
+      const match = line.match(/^\s*(\d+)\s+(\S+)\s+(\S+)\s+(.*)$/);
+      if (!match) continue;
+      const [, pid, tty, comm, command] = match;
+      const sessionIdMatch = command.match(/(?:^|\s)TELEPTY_SESSION_ID=([^\s]+)/);
+      const sessionId = sessionIdMatch?.[1];
+      if (!sessionId || !wantedSessions.has(sessionId)) continue;
+
+      const session = wantedSessions.get(sessionId);
+      const score = scoreTeleptyProcessMatch(session, comm, command);
+      const current = best.get(sessionId);
+      if (!current || score > current.score) {
+        best.set(sessionId, { pid: Number(pid), tty, score });
+      }
+    }
+
+    return new Map(
+      [...best.entries()].map(([sessionId, value]) => [
+        sessionId,
+        { pid: Number.isFinite(value.pid) ? value.pid : null, tty: value.tty || null },
+      ])
+    );
+  } catch {
+    return new Map();
+  }
 }
 
 function commandExistsInPath(command) {
@@ -1262,6 +1895,7 @@ function inferLlmProvider(url = "", title = "") {
 async function collectSpeakerCandidates({ include_cli = true, include_browser = true } = {}) {
   const candidates = [];
   const seen = new Set();
+  let browserNote = null;
 
   const add = (candidate) => {
     const speaker = normalizeSpeaker(candidate?.speaker);
@@ -1281,9 +1915,29 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
         live,
       });
     }
+
+    const { sessions: teleptySessions, note: teleptyNote } = await collectTeleptySessions();
+    const locators = collectTeleptyProcessLocators(teleptySessions);
+    for (const session of teleptySessions) {
+      const locator = locators.get(session.id) || {};
+      add({
+        speaker: session.id,
+        type: "telepty",
+        label: session.id,
+        telepty_session_id: session.id,
+        telepty_host: session.host || TELEPTY_DEFAULT_HOST,
+        command: session.command || "wrapped",
+        cwd: session.cwd || null,
+        active_clients: session.active_clients ?? null,
+        runtime_pid: locator.pid ?? null,
+        runtime_tty: locator.tty ?? null,
+      });
+    }
+    if (teleptyNote) {
+      browserNote = browserNote ? `${browserNote} | ${teleptyNote}` : teleptyNote;
+    }
   }
 
-  let browserNote = null;
   if (include_browser) {
     // Ensure CDP is available before probing browser tabs
     const cdpStatus = await ensureCdpAvailable();
@@ -1427,6 +2081,7 @@ async function collectSpeakerCandidates({ include_cli = true, include_browser = 
 
 function formatSpeakerCandidatesReport({ candidates, browserNote }) {
   const cli = candidates.filter(c => c.type === "cli");
+  const telepty = candidates.filter(c => c.type === "telepty");
   const detected = candidates.filter(c => c.type === "browser" && !c.auto_registered);
   const autoReg = candidates.filter(c => c.type === "browser" && c.auto_registered);
 
@@ -1438,6 +2093,22 @@ function formatSpeakerCandidatesReport({ candidates, browserNote }) {
     out += `${cli.map(c => {
       const status = c.live === false ? " ❌ not executable" : c.live === true ? " ✅ executable" : "";
       return `- \`${c.speaker}\` (command: ${c.command})${status}`;
+    }).join("\n")}\n\n`;
+  }
+
+  out += "### Telepty Sessions\n";
+  if (telepty.length === 0) {
+    out += "- (No active telepty sessions)\n\n";
+  } else {
+    out += `${telepty.map(c => {
+      const parts = [
+        `command: ${c.command || "wrapped"}`,
+        c.telepty_host ? `host: ${formatTeleptyHostLabel(c.telepty_host)}` : null,
+        Number.isFinite(c.runtime_pid) ? `pid: ${c.runtime_pid}` : null,
+        c.runtime_tty ? `tty: ${c.runtime_tty}` : null,
+      ].filter(Boolean).join(", ");
+      const cwdLine = c.cwd ? `\n  cwd: ${c.cwd}` : "";
+      return `- \`${c.speaker}\` (${parts})${cwdLine}`;
     }).join("\n")}\n\n`;
   }
 
@@ -1522,6 +2193,18 @@ function mapParticipantProfiles(speakers, candidates, typeOverrides) {
       continue;
     }
 
+    if (candidate.type === "telepty") {
+      profiles.push({
+        speaker,
+        type: "telepty",
+        command: candidate.command || null,
+        telepty_session_id: candidate.telepty_session_id || speaker,
+        telepty_host: candidate.telepty_host || null,
+        runtime_pid: Number.isFinite(candidate.runtime_pid) ? candidate.runtime_pid : null,
+      });
+      continue;
+    }
+
     const effectiveType = candidate.cdp_available ? "browser_auto" : "browser";
     profiles.push({
       speaker,
@@ -1539,6 +2222,7 @@ function mapParticipantProfiles(speakers, candidates, typeOverrides) {
 
 const TRANSPORT_TYPES = {
   cli: "cli_respond",
+  telepty: "telepty_bus",
   browser: "clipboard",
   browser_auto: "browser_auto",
   manual: "manual",
@@ -1580,6 +2264,9 @@ const CLI_INVOCATION_HINTS = {
 
 function formatTransportGuidance(transport, state, speaker) {
   const sid = state.id;
+  const profile = (state.participant_profiles || []).find(
+    p => normalizeSpeaker(p.speaker) === normalizeSpeaker(speaker)
+  ) || null;
   switch (transport) {
     case "cli_respond": {
       const hint = CLI_INVOCATION_HINTS[speaker] || null;
@@ -1604,8 +2291,22 @@ function formatTransportGuidance(transport, state, speaker) {
              `⛔ **No API calls**: This speaker responds only via web browser. Do not call LLMs via REST API or HTTP requests.`;
     case "browser_auto":
       return `Auto browser speaker. Proceed automatically with \`deliberation_browser_auto_turn(session_id: "${sid}")\`. Inputs directly to browser LLM via CDP and reads responses.\n\n⛔ **No API calls**: Proceeds only via CDP automation. No REST API or HTTP requests.`;
+    case "telepty_bus":
+      return `Telepty session speaker. This turn will be published on the telepty bus as a structured \`turn_request\` envelope for the target session to consume.\n\n` +
+             `📡 **Bus delivery**: deliberation publishes a typed envelope instead of relying on raw PTY inject.\n` +
+             `⏱️ **Timeouts**: transport ack waits ${TELEPTY_TRANSPORT_TIMEOUT_MS / 1000}s, semantic self-submit waits ${TELEPTY_SEMANTIC_TIMEOUT_MS / 1000}s.\n` +
+             `⛔ **No proxy response**: the remote telepty session must answer for itself via \`deliberation_respond(...)\`.`;
     case "manual":
     default:
+      if (profile?.type === "telepty" && profile.telepty_session_id) {
+        const hostSuffix = profile.telepty_host && !["127.0.0.1", "localhost"].includes(profile.telepty_host)
+          ? `@${profile.telepty_host}`
+          : "";
+        const pidNote = Number.isFinite(profile.runtime_pid) ? ` (pid ${profile.runtime_pid})` : "";
+        return `Telepty-managed session speaker${pidNote}. Send the [turn_prompt] below to \`telepty inject ${profile.telepty_session_id}${hostSuffix} "<prompt>"\`, then have that remote session self-submit via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.\n\n` +
+               `📋 **Recommended path**: inject the prompt into the telepty session and let the remote session answer for itself.\n` +
+               `⛔ **No proxy response**: Do not answer on behalf of this speaker from the orchestrator.`;
+      }
       return `Manual speaker. Get a response from the LLM's **web UI or CLI tool** and submit via \`deliberation_respond(session_id: "${sid}", speaker: "${speaker}", content: "...")\`.\n\n` +
              `📋 **Copy the [turn_prompt] section below** to the web UI.\n` +
              `🖼️ **To include an image:** Copy the image to your clipboard and use \`include_clipboard_image: true\` in \`deliberation_respond\`.\n\n` +
@@ -1746,38 +2447,45 @@ function readContextFromDirs(dirs, maxChars = 15000) {
 
 // ── State helpers ──────────────────────────────────────────────
 
-function ensureDirs() {
-  fs.mkdirSync(getSessionsDir(), { recursive: true });
-  fs.mkdirSync(getArchiveDir(), { recursive: true });
-  fs.mkdirSync(getLocksDir(), { recursive: true });
+function ensureDirs(projectSlug = getProjectSlug()) {
+  fs.mkdirSync(getSessionsDir(projectSlug), { recursive: true });
+  fs.mkdirSync(getArchiveDir(projectSlug), { recursive: true });
+  fs.mkdirSync(getLocksDir(projectSlug), { recursive: true });
 }
 
-function loadSession(sessionId) {
-  const file = getSessionFile(sessionId);
-  if (!fs.existsSync(file)) return null;
-  return normalizeSessionActors(JSON.parse(fs.readFileSync(file, "utf-8")));
+function loadSession(sessionRef) {
+  const record = findSessionRecord(sessionRef);
+  return record?.state || null;
 }
 
 function saveSession(state) {
-  ensureDirs();
+  ensureDirs(state.project);
   state.updated = new Date().toISOString();
-  writeTextAtomic(getSessionFile(state.id), JSON.stringify(state, null, 2));
+  writeTextAtomic(getSessionFile(state), JSON.stringify(state, null, 2));
   syncMarkdown(state);
 }
 
-function listActiveSessions() {
-  const dir = getSessionsDir();
-  if (!fs.existsSync(dir)) return [];
+function listActiveSessions(projectSlug) {
+  const projects = projectSlug
+    ? [normalizeProjectSlug(projectSlug)]
+    : [...new Set([getProjectSlug(), ...listStateProjects()])];
 
-  return fs.readdirSync(dir)
-    .filter(f => f.endsWith(".json"))
-    .map(f => {
-      try {
-        const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
-        return data;
-      } catch { return null; }
-    })
-    .filter(s => s && (s.status === "active" || s.status === "awaiting_synthesis"));
+  return projects.flatMap(project => {
+    const dir = getSessionsDir(project);
+    if (!fs.existsSync(dir)) return [];
+
+    return fs.readdirSync(dir)
+      .filter(f => f.endsWith(".json"))
+      .map(f => {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+          return normalizeSessionActors(data);
+        } catch {
+          return null;
+        }
+      })
+      .filter(s => s && (s.status === "active" || s.status === "awaiting_synthesis"));
+  });
 }
 
 function resolveSessionId(sessionId) {
@@ -1795,8 +2503,7 @@ function resolveSessionId(sessionId) {
 
 function syncMarkdown(state) {
   const filename = `deliberation-${state.id}.md`;
-  // Write to state dir instead of CWD to avoid polluting project root
-  const mdPath = path.join(getProjectStateDir(), filename);
+  const mdPath = path.join(getProjectStateDir(state.project), filename);
   try {
     writeTextAtomic(mdPath, stateToMarkdown(state));
   } catch { /* ignore sync failures */ }
@@ -1804,8 +2511,7 @@ function syncMarkdown(state) {
 
 function cleanupSyncMarkdown(state) {
   const filename = `deliberation-${state.id}.md`;
-  // Remove from state dir
-  const statePath = path.join(getProjectStateDir(), filename);
+  const statePath = path.join(getProjectStateDir(state.project), filename);
   try { fs.unlinkSync(statePath); } catch { /* ignore */ }
   // Also clean up legacy files in CWD (from older versions)
   const cwdPath = path.join(process.cwd(), filename);
@@ -1864,14 +2570,14 @@ tags: [deliberation]
 }
 
 function archiveState(state) {
-  ensureDirs();
+  ensureDirs(state.project);
   const slug = state.topic
     .replace(/[^a-zA-Z0-9가-힣\s-]/g, "")
     .replace(/\s+/g, "-")
     .slice(0, 30);
   const ts = new Date().toISOString().slice(0, 16).replace(/:/g, "");
   const filename = `deliberation-${ts}-${slug}.md`;
-  const dest = path.join(getArchiveDir(), filename);
+  const dest = path.join(getArchiveDir(state.project), filename);
   writeTextAtomic(dest, stateToMarkdown(state));
   return dest;
 }
@@ -2380,7 +3086,7 @@ function closeAllMonitorTerminals() {
 
 function multipleSessionsError() {
   const active = listActiveSessions();
-  const list = active.map(s => `- **${s.id}**: "${s.topic}" (Round ${s.current_round}/${s.max_rounds}, next: ${s.current_speaker})`).join("\n");
+  const list = active.map(s => `- **${s.id}** [${s.project || "unknown"}]: "${s.topic}" (Round ${s.current_round}/${s.max_rounds}, next: ${s.current_speaker})`).join("\n");
   return t(`Multiple active sessions found. Please specify session_id:\n\n${list}`, `여러 활성 세션이 있습니다. session_id를 지정하세요:\n\n${list}`, "en");
 }
 
@@ -2623,6 +3329,11 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       role_drift: roleDrift || undefined,
       attachments: attachments || undefined,
     });
+    completePendingTeleptySemantic({
+      sessionId: state.id,
+      speaker: normalizedSpeaker,
+      turnId: state.pending_turn_id || turn_id || null,
+    });
     appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | attachments: ${attachments ? attachments.length : 0}`);
 
     state.current_speaker = selectNextSpeaker(state);
@@ -2717,18 +3428,18 @@ server.tool(
     require_manual_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("If true, speakers must be explicitly specified to start (defaults to config setting)"),
+    ).describe("Deprecated toggle. Speakers are now always selected manually before start."),
     auto_discover_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("Whether to auto-discover speakers when omitted (defaults to config setting)"),
+    ).describe("Deprecated toggle. Auto-discovery no longer auto-joins participants; use deliberation_speaker_candidates instead."),
     include_browser_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("Whether browser speakers are allowed to participate. Defaults to false unless explicitly enabled."),
     participant_types: z.preprocess(
       (v) => (typeof v === "string" ? JSON.parse(v) : v),
-      z.record(z.string(), z.enum(["cli", "browser", "browser_auto", "manual"])).optional()
+      z.record(z.string(), z.enum(["cli", "telepty", "browser", "browser_auto", "manual"])).optional()
     ).describe("Per-speaker type override (e.g., {\"chatgpt\": \"browser_auto\"})"),
     ordering_strategy: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
       .describe("Ordering strategy: auto (automatic based on speaker count), cyclic (sequential), random (random each turn), weighted-random (less spoken speakers first)"),
@@ -2752,7 +3463,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `🎉 **Welcome to Deliberation!**\n\nPlease configure basic settings before starting.\n\n**Currently detected speakers:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou can set all options at once:\n\n\`\`\`\ndeliberation_cli_config(\n  require_speaker_selection: true/false,\n  include_browser_speakers: false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. Speaker participation mode** (\`require_speaker_selection\`)\n   - \`true\` — Select participating speakers each time\n   - \`false\` — Auto-join detected speakers\n\n**2. Browser speakers** (\`include_browser_speakers\`)\n   - \`false\` — CLI only (recommended)\n   - \`true\` — Include browser LLM speakers too\n\n**3. Default rounds** (\`default_rounds\`)\n   - \`1\` — Quick consensus\n   - \`3\` — Default (recommended)\n   - \`5\` — Deep discussion\n\n**4. Ordering strategy** (\`default_ordering\`)\n   - \`"auto"\` — cyclic for 2 speakers, weighted-random for 3+ (recommended)\n   - \`"cyclic"\` — Fixed order\n   - \`"random"\` — Random each turn\n   - \`"weighted-random"\` — Less spoken speakers first`,
+          text: `🎉 **Welcome to Deliberation!**\n\nPlease configure basic settings before starting.\n\n**Currently detected speakers:**\n${candidateText}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou can set the remaining defaults with:\n\n\`\`\`\ndeliberation_cli_config(\n  include_browser_speakers: false,\n  default_rounds: 3,\n  default_ordering: "auto"\n)\n\`\`\`\n\n**1. Speaker participation mode**\n   - Always manual — participants are selected fresh at every start from the current candidate snapshot\n\n**2. Browser speakers** (\`include_browser_speakers\`)\n   - \`false\` — CLI + telepty sessions only (recommended)\n   - \`true\` — Include browser LLM speakers too\n\n**3. Default rounds** (\`default_rounds\`)\n   - \`1\` — Quick consensus\n   - \`3\` — Default (recommended)\n   - \`5\` — Deep discussion\n\n**4. Ordering strategy** (\`default_ordering\`)\n   - \`"auto"\` — cyclic for 2 speakers, weighted-random for 3+ (recommended)\n   - \`"cyclic"\` — Fixed order\n   - \`"random"\` — Random each turn\n   - \`"weighted-random"\` — Less spoken speakers first`,
         }],
       };
     }
@@ -2786,8 +3497,8 @@ server.tool(
     });
 
     // Resolve effective settings from config
-    const effectiveRequireManual = require_manual_speakers ?? config.require_speaker_selection ?? true;
-    const effectiveAutoDiscover = auto_discover_speakers ?? !effectiveRequireManual;
+    const effectiveRequireManual = true;
+    const effectiveAutoDiscover = false;
     rounds = rounds ?? config.default_rounds ?? 3;
     const rawOrdering = ordering_strategy ?? config.default_ordering ?? "auto";
     // Resolve "auto": 2 speakers → cyclic, 3+ → weighted-random
@@ -2809,11 +3520,16 @@ server.tool(
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
       const mismatchNote = selectionValidation.code === "speaker_mismatch"
         ? `\n\nRequested speakers not in the latest candidate snapshot: ${(selectionValidation.missing_speakers || []).join(", ")}`
+        : selectionValidation.code === "selected_speakers_mismatch"
+          ? `\n\nThis token is bound to a different speaker set.\nExpected: ${(selectionValidation.expected_speakers || []).join(", ")}\nRequested: ${(selectionValidation.requested_speakers || []).join(", ")}`
+          : "";
+      const confirmationNote = selectionValidation.code === "selection_not_confirmed"
+        ? "\n\nThe token you passed is only a candidate snapshot token. You must confirm the exact user-picked speakers before start."
         : "";
       return {
         content: [{
           type: "text",
-          text: `Fresh participant selection is required before each deliberation start.${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates(include_cli: true, include_browser: ${includeBrowserSpeakers ? "true" : "false"})\`\n2. Show the speaker list in the TUI and let the user choose participants\n3. Pass the returned \`selection_token\` into \`deliberation_start(..., selection_token: "...")\`\n\n${candidateText}`,
+          text: `Fresh participant selection is required before each deliberation start.${confirmationNote}${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates(include_cli: true, include_browser: ${includeBrowserSpeakers ? "true" : "false"})\`\n2. Show the speaker list in the TUI and let the user choose participants\n3. Call \`deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: [...])\`\n4. Pass the returned confirmed \`selection_token\` into \`deliberation_start(..., selection_token: "...", speakers: [...])\`\n\n${candidateText}`,
         }],
       };
     }
@@ -2821,13 +3537,13 @@ server.tool(
     if (!hasManualSpeakers && effectiveRequireManual) {
       const candidateText = formatSpeakerCandidatesReport(candidateSnapshot);
       const llmSuggested = Array.isArray(speakers) && speakers.length > 0
-        ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nShow the candidate list in the TUI, let the user confirm, then pass the returned \`selection_token\` with the final speaker list.`
+        ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nShow the candidate list in the TUI, let the user confirm, then call \`deliberation_confirm_speakers\` with the final speaker list.`
         : "";
-      const configNote = "\n\n⚙️ Manual speaker selection is enabled and requires a fresh `selection_token`.";
+      const configNote = "\n\n⚙️ Manual speaker selection is enabled and requires a fresh confirmed `selection_token`.";
       return {
         content: [{
           type: "text",
-          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  selection_token: "<token-from-deliberation_speaker_candidates>",\n  rounds: ${rounds},\n  speakers: ["claude", "codex", "gemini"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
+          text: `Speakers must be manually selected to start a deliberation.${configNote}${llmSuggested}\n\n${candidateText}\n\nExample:\n\n1. \`deliberation_speaker_candidates(...)\`\n2. User picks speakers in the TUI\n3. \`deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: ["claude", "codex", "gemini"])\`\n4. \`deliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  selection_token: "<confirmed-token>",\n  rounds: ${rounds},\n  speakers: ["claude", "codex", "gemini"],\n  require_manual_speakers: true,\n  first_speaker: "codex"\n)\`\n\nFirst call deliberation_speaker_candidates to check currently available speakers.`,
         }],
       };
     }
@@ -2894,7 +3610,7 @@ server.tool(
     }
 
     const participantMode = hasManualSpeakers
-      ? "manually specified"
+      ? "user-selected"
       : (autoDiscoveredSpeakers.length > 0 ? "auto-discovered (PATH)" : "default");
 
     const degradationLevels = await detectDegradationLevels();
@@ -3005,7 +3721,7 @@ server.tool(
 
 server.tool(
   "deliberation_speaker_candidates",
-  "Query available speaker candidates (local CLI + browser LLM tabs).",
+  "Query available speaker candidates (local CLI + telepty active sessions + browser LLM tabs).",
   {
     include_cli: z.boolean().default(true).describe("Include local CLI candidates"),
     include_browser: z.boolean().default(true).describe("Include browser LLM tab candidates"),
@@ -3020,7 +3736,49 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `${text}\n\n**Selection token:** \`${selection.token}\`\nUse this token in \`deliberation_start(selection_token: "...")\` after the user picks participants. The token is single-use and expires in 10 minutes.\n\n${PRODUCT_DISCLAIMER}`,
+        text: `${text}\n\n**Candidate token:** \`${selection.token}\`\nAfter the user picks participants in the TUI, call \`deliberation_confirm_speakers(selection_token: "${selection.token}", speakers: [...])\` to mint a confirmed start token. Raw candidate tokens cannot start a deliberation.\n\n${PRODUCT_DISCLAIMER}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "deliberation_confirm_speakers",
+  "Bind a fresh candidate token to the exact CLI/telepty/browser speakers the user chose in the TUI.",
+  {
+    selection_token: z.string().trim().min(1).max(128).describe("Candidate token returned by deliberation_speaker_candidates."),
+    speakers: z.array(z.string().trim().min(1)).min(1).describe("Exact speakers the user selected in the TUI."),
+  },
+  async ({ selection_token, speakers }) => {
+    const selectionState = loadSpeakerSelectionToken();
+    const includeBrowserSpeakers = !!selectionState?.include_browser;
+    const confirmation = confirmSpeakerSelectionToken({
+      selectionState,
+      selection_token,
+      speakers,
+      includeBrowserSpeakers,
+    });
+
+    if (!confirmation.ok) {
+      const candidateText = formatSpeakerCandidatesReport(await collectSpeakerCandidates({
+        include_cli: true,
+        include_browser: includeBrowserSpeakers,
+      }));
+      const mismatchNote = confirmation.code === "speaker_mismatch"
+        ? `\n\nRequested speakers not in the latest candidate snapshot: ${(confirmation.missing_speakers || []).join(", ")}`
+        : "";
+      return {
+        content: [{
+          type: "text",
+          text: `Speaker confirmation failed.${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates\` for a fresh snapshot\n2. Let the user choose speakers in the TUI\n3. Call \`deliberation_confirm_speakers\` with that exact selection\n\n${candidateText}`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `✅ Speaker selection confirmed.\n\n**Selected speakers:** ${confirmation.selectionState.selected_speakers.join(", ")}\n**Confirmed selection token:** \`${confirmation.selectionState.token}\`\n\nUse this exact token with the same speaker list in \`deliberation_start(..., selection_token: "...", speakers: [...])\`.\nIf the user changes the selection, call \`deliberation_speaker_candidates\` again for a fresh snapshot.`,
       }],
     };
   }
@@ -3161,6 +3919,55 @@ server.tool(
 
     let extra = "";
     let turnPrompt = "";
+    let manualFallbackPrompt = false;
+
+    if (transport === "telepty_bus") {
+      turnPrompt = buildClipboardTurnPrompt(state, speaker, prompt, include_history_entries);
+      const busReady = await ensureTeleptyBusSubscriber();
+      const envelope = buildTeleptyTurnRequestEnvelope({
+        state,
+        speaker,
+        turnId: turnId || generateTurnId(),
+        turnPrompt,
+        includeHistoryEntries: include_history_entries,
+        profile,
+      });
+      const pending = registerPendingTeleptyTurnRequest({ envelope, profile, speaker });
+      const publishResult = await notifyTeleptyBus(envelope);
+      const health = profile?.telepty_session_id ? getTeleptySessionHealth(profile.telepty_session_id) : null;
+
+      if (!publishResult.ok) {
+        cleanupPendingTeleptyTurn(envelope.message_id);
+        manualFallbackPrompt = true;
+        extra += `\n\n❌ Telepty bus publish failed: ${publishResult.error || publishResult.status || "unknown error"}\n` +
+                 `Fallback: use manual telepty inject for this turn.`;
+        guidance = formatTransportGuidance("manual", state, speaker);
+      } else {
+        const transportResult = await pending.transportPromise;
+        const healthLine = health
+          ? `\n**Session health:** alive=${health.payload?.alive === true ? "yes" : "no"}, pid=${health.payload?.pid || "n/a"}, age=${Math.max(0, Math.round((health.age_ms || 0) / 1000))}s${health.stale ? " (stale)" : ""}`
+          : "";
+        const transportLine = transportResult.ok
+          ? `✅ Transport ack received via \`inject_written\` within ${TELEPTY_TRANSPORT_TIMEOUT_MS / 1000}s.`
+          : `⚠️ Transport ack not observed within ${TELEPTY_TRANSPORT_TIMEOUT_MS / 1000}s. The request was published, but delivery is still best-effort.`;
+        const subscriberLine = busReady.ok
+          ? "- Bus subscriber: connected"
+          : `- Bus subscriber: unavailable (${busReady.error || busReady.status || "unknown"})`;
+        if (!transportResult.ok) {
+          manualFallbackPrompt = true;
+        }
+        extra += `\n\n### Telepty Bus Dispatch\n` +
+                 `- Envelope: \`${envelope.message_id}\`\n` +
+                 `- Kind: \`${envelope.kind}\`\n` +
+                 `- Target: \`${envelope.target}\`\n` +
+                 `- Delivered subscribers: ${publishResult.delivered ?? "unknown"}\n` +
+                 `${subscriberLine}\n` +
+                 `- Transport timeout: ${TELEPTY_TRANSPORT_TIMEOUT_MS / 1000}s\n` +
+                 `- Semantic timeout: ${TELEPTY_SEMANTIC_TIMEOUT_MS / 1000}s${healthLine}\n\n` +
+                 `${transportLine}\n\n` +
+                 `The remote telepty session must still self-submit its response with \`deliberation_respond(session_id: "${state.id}", speaker: "${speaker}", ...)\` before the semantic timeout.`;
+      }
+    }
 
     if (transport === "browser_auto") {
       // Auto-execute browser_auto_turn
@@ -3237,9 +4044,13 @@ server.tool(
       extra += `\n\n### [turn_prompt]\n\`\`\`markdown\n${turnPrompt}\n\`\`\``;
     }
 
+    if (transport === "telepty_bus" && manualFallbackPrompt) {
+      extra += `\n\n### [turn_prompt]\n\`\`\`markdown\n${turnPrompt}\n\`\`\``;
+    }
+
     const profileInfo = profile
       ? `\n**Profile:** ${profile.type}${profile.url ? ` | ${profile.url}` : ""}${profile.command ? ` | command: ${profile.command}` : ""}`
-      : "";
+        : "";
 
     return {
       content: [{
@@ -3665,7 +4476,7 @@ async function runAutoHandoff(sessionId) {
       archiveState(loaded);
       cleanupSyncMarkdown(loaded);
 
-      const sessionFile = getSessionFile(loaded.id);
+      const sessionFile = getSessionFile(loaded);
       try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch {}
     });
 
@@ -3675,16 +4486,12 @@ async function runAutoHandoff(sessionId) {
 
     // Phase 4: Notify telepty bus with full structured data for dustcraw to consume
     if (state.auto_execute) {
-      await notifyTeleptyBus({
-        type: "deliberation_completed",
-        sender: "deliberation",
-        session_id: sessionId,
-        project: state.project,
-        topic: state.topic,
+      const envelope = buildTeleptySynthesisEnvelope({
+        state,
         synthesis: markdownSynthesis,
-        structured_synthesis: structured,
-        timestamp: new Date().toISOString(),
-      }).catch(() => {});
+        structured,
+      });
+      await notifyTeleptyBus(envelope).catch(() => {});
       appendRuntimeLog("INFO", `AUTO_HANDOFF_NOTIFIED: ${sessionId} | telepty event sent`);
     }
 
@@ -4183,17 +4990,7 @@ server.tool(
         }
         return v;
       },
-      z.object({
-        summary: z.string().describe("Brief summary of the deliberation outcome"),
-        decisions: z.array(z.string()).describe("List of decisions made"),
-        actionable_tasks: z.array(z.object({
-          id: z.number().describe("Task sequential ID"),
-          task: z.string().describe("Task description"),
-          files: z.array(z.string()).optional().describe("Target files to modify"),
-          project: z.string().optional().describe("Target project name"),
-          priority: z.enum(["high", "medium", "low"]).optional().describe("Task priority"),
-        })).describe("Concrete tasks for executor agents"),
-      }).optional()
+      StructuredSynthesisSchema.optional()
     ).describe("Structured synthesis data for automated handoff. If omitted, only markdown synthesis is stored."),
   },
   safeToolHandler("deliberation_synthesize", async ({ session_id, synthesis, structured }) => {
@@ -4222,7 +5019,7 @@ server.tool(
       cleanupSyncMarkdown(loaded);
 
       // Clean up the active session JSON file upon completion
-      const sessionFile = getSessionFile(loaded.id);
+      const sessionFile = getSessionFile(loaded);
       try { if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile); } catch { /* ignore */ }
       state = loaded;
       return null;
@@ -4232,22 +5029,18 @@ server.tool(
     }
 
     appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
+    const synthesisEnvelope = buildTeleptySynthesisEnvelope({
+      state,
+      synthesis,
+      structured,
+    });
 
     // Immediately force-close monitor terminal (including physical Terminal) on deliberation end
     closeMonitorTerminal(state.id, getSessionWindowIds(state));
 
     // Notify telepty bus with full structured data for dustcraw to consume
     if (state.auto_execute) {
-      notifyTeleptyBus({
-        type: "deliberation_completed",
-        sender: "deliberation",
-        session_id: state.id,
-        project: state.project,
-        topic: state.topic,
-        synthesis,
-        structured_synthesis: structured || null,
-        timestamp: new Date().toISOString(),
-      }).catch(() => {}); // fire-and-forget
+      notifyTeleptyBus(synthesisEnvelope).catch(() => {}); // fire-and-forget
     }
 
     return {
@@ -4297,11 +5090,11 @@ server.tool(
       // Reset specific session only
       let toCloseIds = [];
       const result = withSessionLock(session_id, () => {
-        const file = getSessionFile(session_id);
-        if (!fs.existsSync(file)) {
+        const state = loadSession(session_id);
+        if (!state) {
           return { content: [{ type: "text", text: t(`Session "${session_id}" not found.`, `세션 "${session_id}"을 찾을 수 없습니다.`, "en") }] };
         }
-        const state = loadSession(session_id);
+        const file = getSessionFile(state);
         if (state && state.log.length > 0) {
           archiveState(state);
         }
@@ -4377,11 +5170,11 @@ server.tool(
     require_speaker_selection: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("true: user selects speakers before each start, false: all detected speakers auto-join"),
+    ).describe("Deprecated toggle. Speaker selection is now always manual; any provided value is normalized to true."),
     include_browser_speakers: z.preprocess(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
-    ).describe("true: browser LLM speakers may join when requested or auto-discovered, false: CLI-only mode"),
+    ).describe("true: browser LLM speakers may join when requested, false: CLI + telepty candidate mode"),
     default_rounds: z.coerce.number().int().min(1).max(10).optional()
       .describe("Default number of rounds (1-10, default 3)"),
     default_ordering: z.enum(["auto", "cyclic", "random", "weighted-random"]).optional()
@@ -4395,7 +5188,7 @@ server.tool(
     // Handle setup config updates
     let configChanged = false;
     if (require_speaker_selection !== undefined && require_speaker_selection !== null) {
-      config.require_speaker_selection = require_speaker_selection;
+      config.require_speaker_selection = true;
       configChanged = true;
     }
     if (include_browser_speakers !== undefined && include_browser_speakers !== null) {
@@ -4428,7 +5221,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** ${config.require_speaker_selection === false ? "auto (detected speakers join)" : "manual (user selects every start)"}\n**Browser speakers:** ${config.include_browser_speakers === true ? "enabled" : "disabled (CLI-only default)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nℹ️ Manual mode now requires a fresh \`selection_token\` from \`deliberation_speaker_candidates\` on every start.\n\nTo change:\n\`deliberation_cli_config(require_speaker_selection: false, include_browser_speakers: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo enable browser speakers:\n\`deliberation_cli_config(include_browser_speakers: true)\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
+          text: `## Deliberation CLI Settings\n\n**Mode:** ${mode}\n**Speaker selection:** manual only (fresh user selection required every start)\n**Browser speakers:** ${config.include_browser_speakers === true ? "enabled" : "disabled (CLI + telepty default)"}\n**Default rounds:** ${config.default_rounds || 3}\n**Ordering:** ${config.default_ordering || "auto"}\n**Chrome profile:** ${config.chrome_profile || "Default"} (env: DELIBERATION_CHROME_PROFILE)\n**Configured CLIs:** ${configured.length > 0 ? configured.join(", ") : "(none — full auto-detection)"}\n**Currently detected CLIs:** ${detected.join(", ") || "(none)"}\n**All supported CLIs:** ${DEFAULT_CLI_CANDIDATES.join(", ")}\n\nℹ️ Every start now requires two steps: \`deliberation_speaker_candidates\` for a fresh snapshot, then \`deliberation_confirm_speakers\` for the exact user-picked set. Telepty active sessions are included in the candidate list automatically.\n\nTo change defaults:\n\`deliberation_cli_config(include_browser_speakers: false, default_rounds: 3, default_ordering: "auto")\`\n\nTo enable browser speakers:\n\`deliberation_cli_config(include_browser_speakers: true)\`\n\nTo set Chrome profile for CDP:\n\`deliberation_cli_config(chrome_profile: "Profile 1")\`\n\nTo revert CLI filters to full auto-detection:\n\`deliberation_cli_config(enabled_clis: [])\``,
         }],
       };
     }
@@ -5234,4 +6027,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };

@@ -80,22 +80,26 @@ When user approves, execute this sequence:
 
 ### Standard Path (brainstorming, debugging, general)
 
-1. **Speaker discovery**: `deliberation_speaker_candidates` → get available CLI + browser speakers
+1. **Speaker discovery**: `deliberation_speaker_candidates` → get available CLI + telepty active sessions + browser speakers and capture the returned candidate token
 2. **Speaker selection**: `AskUserQuestion(multiSelect: true)` → user selects which speakers to include
-3. **Start deliberation**: `deliberation_start`
+3. **Confirm selection**: `deliberation_confirm_speakers`
+   - `selection_token`: candidate token returned by `deliberation_speaker_candidates`
+   - `speakers`: exact user-selected list
+4. **Start deliberation**: `deliberation_start`
    - `topic`: the artifact being validated (design summary / error description + hypotheses / user's question)
+   - `selection_token`: confirmed token returned by `deliberation_confirm_speakers`
    - `speakers`: user-selected list
    - `speaker_roles`: from scenario preset map above
    - `rounds`: from scenario preset map above
    - `ordering_strategy`: "auto"
    - `role_preset`: from scenario preset map above
-4. **Turn loop**: For each turn:
+5. **Turn loop**: For each turn:
    - Call `deliberation_route_turn` — it auto-detects the correct transport
    - **Self-speaker** (you are the current speaker): Compose your response based on your role, submit via `deliberation_respond(speaker: "claude", content: "...")`
    - **Other CLI speaker**: `deliberation_route_turn` will guide to `deliberation_cli_auto_turn` which spawns the actual CLI
    - **Browser speaker**: `deliberation_route_turn` will auto-execute via CDP
-5. **Synthesize**: After all rounds complete, call `deliberation_synthesize` with a summary of the consensus
-6. **Apply synthesis**: Follow the Integration Rules below
+6. **Synthesize**: After all rounds complete, call `deliberation_synthesize` with a summary of the consensus
+7. **Apply synthesis**: Follow the Integration Rules below
 
 ### Lightweight Path (code-review only)
 

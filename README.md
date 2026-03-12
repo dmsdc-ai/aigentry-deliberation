@@ -15,10 +15,14 @@ MCP Deliberation Server — Multi-session AI deliberation with smart speaker ord
 - **Browser LLM integration**: CDP-based auto-turn for ChatGPT, Claude, Gemini browser tabs
 - **Chrome Extension support**: Side panel detection via title-based matching
 - **Cross-platform**: macOS (tmux + Terminal.app), Windows (Windows Terminal), Linux
+- **Telepty bus transport**: structured `turn_request` delivery for telepty-managed sessions
+- **User-confirmed speaker selection**: candidates must be confirmed before a session can start
 - **Obsidian archiving**: Auto-archive deliberation results to Obsidian vault
 - **Session monitoring**: Real-time tmux/terminal monitoring
 - **Vote enforcement**: Automatic [AGREE]/[DISAGREE]/[CONDITIONAL] vote marker requirement
 - **Dynamic CLI timeout**: Smart cold-start handling (180s first turn, 120s subsequent)
+- **Split telepty timeouts**: 5s transport ack + 60s semantic response tracking
+- **Typed synthesis envelopes**: validated structured payloads for downstream automation
 - **Runtime logging**: Session lifecycle event logging for observability
 - **Resilient browser automation**: 5-stage degradation state machine with 60s SLO
 - **Model routing**: Dynamic per-provider model selection based on prompt analysis
@@ -102,12 +106,36 @@ Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제�
 | `deliberation_list` | List archived sessions |
 | `deliberation_reset` | Reset session(s) |
 | `deliberation_speaker_candidates` | List available speakers |
+| `deliberation_confirm_speakers` | Confirm the exact user-selected speaker set |
 | `deliberation_browser_llm_tabs` | List browser LLM tabs |
 | `deliberation_browser_auto_turn` | Auto-send turn to browser LLM |
 | `deliberation_route_turn` | Route turn to appropriate transport |
 | `deliberation_request_review` | Request code review |
 | `deliberation_cli_auto_turn` | Auto-send turn to CLI speaker |
 | `deliberation_cli_config` | Configure CLI settings |
+
+## Start Flow
+
+Manual participant selection is enforced for both CLI speakers and telepty sessions.
+
+```text
+1. deliberation_speaker_candidates(...)
+2. User picks speakers in the TUI
+3. deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: [...])
+4. deliberation_start(selection_token: "<confirmed-token>", speakers: [...])
+```
+
+Raw candidate tokens cannot start a deliberation.
+
+## Telepty Transport
+
+Telepty-managed sessions are now routed through the telepty bus instead of raw PTY inject guidance.
+
+- `deliberation_route_turn` publishes a typed `turn_request` envelope on `ws://localhost:3848/api/bus`
+- transport delivery is tracked with a 5-second `inject_written` ack window
+- semantic completion is tracked with a 60-second self-submit window
+- `session_health` bus events are cached for operator visibility
+- `deliberation_synthesize` validates and emits typed `deliberation_completed` envelopes for downstream automation
 
 ## Speaker Ordering Strategies
 
@@ -178,6 +206,15 @@ cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 **RFC:** [Prerequisites header for tool-dependent skills](https://github.com/obra/superpowers/issues/589)
 
 ## What's New
+
+### v0.0.35
+- **Manual selection enforcement**: `deliberation_confirm_speakers` binds a fresh candidate snapshot to the exact user-picked speaker set before `deliberation_start`
+- **Telepty session candidates**: active telepty sessions appear in speaker discovery with lightweight host/pid locators
+- **Cross-project sessions**: session lookup/load/save now resolves active deliberations across project state directories
+- **Telepty bus routing**: telepty speakers route via typed `turn_request` envelopes with 5s transport and 60s semantic timeout tracking
+- **Structured synthesis envelopes**: `deliberation_synthesize` validates typed payloads before telepty bus publication
+- **Codex CLI hardening**: reduced prompt budgets, lower-friction exec profile, and clearer timeout diagnostics
+- **Packaging**: install path now preserves default config and includes required runtime modules (`clipboard.js`, `decision-engine.js`, `i18n.js`)
 
 ### v0.0.24
 - **Role inference**: Heading marker weight increased from +5 to +8, added critic(검증/평가/Review) and researcher(데이터/Data) patterns to reduce false positives

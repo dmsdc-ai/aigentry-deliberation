@@ -32,6 +32,7 @@
     "i18n.js",
     "decision-engine.js",
     "model-router.js",
+    "clipboard.js",
     "install.js",
     "doctor.js",
     "observer.js",

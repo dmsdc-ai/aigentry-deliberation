@@ -43,6 +43,8 @@ const FILES_TO_COPY = [
   "index.js",
   "observer.js",
   "clipboard.js",
+  "decision-engine.js",
+  "i18n.js",
   "browser-control-port.js",
   "degradation-state-machine.js",
   "model-router.js",
@@ -183,8 +185,23 @@ function install() {
 
   // Step 6b: Preserve existing config
   const configPath = path.join(INSTALL_DIR, "config.json");
+  const defaultConfig = {
+    require_speaker_selection: true,
+    include_browser_speakers: false,
+  };
   if (!fs.existsSync(configPath)) {
-    fs.writeFileSync(configPath, JSON.stringify({}, null, 2));
+    fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+  } else {
+    try {
+      const existingConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const mergedConfig = {
+        ...defaultConfig,
+        ...existingConfig,
+      };
+      fs.writeFileSync(configPath, JSON.stringify(mergedConfig, null, 2));
+    } catch {
+      fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+    }
   }
 
   // Step 7: Deploy deliberation-gate skill
