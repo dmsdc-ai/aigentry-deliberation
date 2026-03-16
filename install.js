@@ -10,7 +10,7 @@
  * What it does:
  *   1. Copies server files to ~/.local/lib/mcp-deliberation/
  *   2. Installs npm dependencies
- *   3. Registers MCP server in ~/.claude/.mcp.json (Claude Code)
+ *   3. Registers MCP server via `claude mcp add` (Claude Code)
  *   4. Registers MCP server in ~/.gemini/settings.json (Gemini CLI)
  *   5. Ready to use — next Claude Code or Gemini CLI session will auto-load
  *   6. Installs skill file (~/.claude/skills/deliberation-gate/SKILL.md)
@@ -59,6 +59,15 @@ const DIRS_TO_COPY = ["selectors", "public", "skills"];
 
 function log(msg) {
   console.log(`  ${msg}`);
+}
+
+function commandExists(cmd) {
+  try {
+    execSync(IS_WIN ? `where ${cmd}` : `command -v ${cmd}`, { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function copyFileIfExists(src, dest) {
@@ -121,32 +130,53 @@ function install() {
     log("   Manual fix: cd ~/.local/lib/mcp-deliberation && npm install");
   }
 
-  // Step 4: Register MCP server
+  // Step 4: Register MCP server (Claude Code)
   log("🔧 Registering Claude Code MCP server...");
-  const claudeDir = path.join(HOME, ".claude");
-  fs.mkdirSync(claudeDir, { recursive: true });
+  const serverEntryPoint = toForwardSlash(path.join(INSTALL_DIR, "index.js"));
+  let claudeRegistered = false;
 
-  let mcpConfig = {};
-  if (fs.existsSync(MCP_CONFIG)) {
+  // Prefer `claude mcp add` — this is the only method Claude Code reliably reads
+  if (commandExists("claude")) {
     try {
-      mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, "utf-8"));
-    } catch {
-      mcpConfig = {};
+      execSync(`claude mcp add deliberation -s user -- node "${serverEntryPoint}"`, {
+        stdio: "pipe",
+      });
+      log("   → Registered via 'claude mcp add' (user scope)");
+      claudeRegistered = true;
+    } catch (err) {
+      log(`   ⚠️ 'claude mcp add' failed: ${err.message}`);
     }
   }
 
-  if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+  // Fallback: write ~/.claude/.mcp.json (legacy, may not be read by Claude Code)
+  if (!claudeRegistered) {
+    const claudeDir = path.join(HOME, ".claude");
+    fs.mkdirSync(claudeDir, { recursive: true });
 
-  const alreadyRegistered = !!mcpConfig.mcpServers.deliberation;
-  mcpConfig.mcpServers.deliberation = {
-    command: "node",
-    args: [toForwardSlash(path.join(INSTALL_DIR, "index.js"))],
-  };
+    let mcpConfig = {};
+    if (fs.existsSync(MCP_CONFIG)) {
+      try {
+        mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, "utf-8"));
+      } catch {
+        mcpConfig = {};
+      }
+    }
 
-  fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-  log(alreadyRegistered
-    ? "   → Existing registration updated"
-    : "   → Registered successfully");
+    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+
+    const alreadyRegistered = !!mcpConfig.mcpServers.deliberation;
+    mcpConfig.mcpServers.deliberation = {
+      command: "node",
+      args: [serverEntryPoint],
+    };
+
+    fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+    log(alreadyRegistered
+      ? "   → Fallback: existing registration updated in .mcp.json"
+      : "   → Fallback: registered in .mcp.json");
+    log("   ⚠️ Claude CLI not found. Run manually if server isn't detected:");
+    log(`     claude mcp add deliberation -s user -- node "${serverEntryPoint}"`);
+  }
 
   // Step 5: Register Gemini CLI MCP server
   log("🔧 Registering Gemini CLI MCP server...");
@@ -283,14 +313,24 @@ Skill path:   ${SKILL_DEST}
 } else if (args.includes("--uninstall") || args.includes("uninstall")) {
   console.log("\n🗑️ Deliberation MCP Server — Uninstalling\n");
 
-  // Remove from Claude MCP config
+  // Remove from Claude Code MCP registration
+  let claudeUnregistered = false;
+  if (commandExists("claude")) {
+    try {
+      execSync("claude mcp remove deliberation -s user", { stdio: "pipe" });
+      log("Claude Code MCP server unregistered via 'claude mcp remove'");
+      claudeUnregistered = true;
+    } catch { /* may not exist */ }
+  }
+
+  // Also clean up legacy .mcp.json fallback
   if (fs.existsSync(MCP_CONFIG)) {
     try {
       const mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, "utf-8"));
       if (mcpConfig.mcpServers?.deliberation) {
         delete mcpConfig.mcpServers.deliberation;
         fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-        log("Claude Code MCP server unregistered");
+        if (!claudeUnregistered) log("Claude Code MCP server unregistered from .mcp.json");
       }
     } catch { /* ignore */ }
   }
