@@ -138,6 +138,8 @@ function install() {
   // Prefer `claude mcp add` — this is the only method Claude Code reliably reads
   if (commandExists("claude")) {
     try {
+      // Remove existing registration first (ignore errors if not registered)
+      try { execSync("claude mcp remove deliberation -s user", { stdio: "pipe" }); } catch { /* ok */ }
       execSync(`claude mcp add deliberation -s user -- node "${serverEntryPoint}"`, {
         stdio: "pipe",
       });
