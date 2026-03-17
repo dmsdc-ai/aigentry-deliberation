@@ -33,7 +33,7 @@ MCP Deliberation Server — Multi-session AI deliberation with smart speaker ord
 원클릭 설치 — 어떤 프로젝트 환경에서든 동작합니다:
 
 ```bash
-npx @dmsdc-ai/aigentry-deliberation install
+npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install
 ```
 
 이 명령은:
@@ -62,7 +62,7 @@ cd aigentry-deliberation && npm install && node install.js
 ### 제거
 
 ```bash
-npx @dmsdc-ai/aigentry-deliberation uninstall
+npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install --uninstall
 ```
 
 MCP 서버 등록 해제 + 설치 파일 삭제 + 스킬 파일 정리까지 자동 처리됩니다.
@@ -87,7 +87,7 @@ open demo/forum/index.html
 MCP 연결 문제 자동 진단:
 
 ```bash
-npx @dmsdc-ai/aigentry-deliberation doctor
+npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-doctor
 ```
 
 Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제를 진단합니다.
@@ -101,6 +101,7 @@ Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제�
 | `deliberation_synthesize` | Generate synthesis report |
 | `deliberation_status` | Check session status |
 | `deliberation_context` | Load project context |
+| `deliberation_inject_context` | Inject structured context or external experiment history into an active session |
 | `deliberation_history` | View discussion history |
 | `deliberation_list_active` | List active sessions |
 | `deliberation_list` | List archived sessions |
@@ -110,8 +111,10 @@ Claude Code, Codex CLI, Gemini CLI의 MCP 설정을 자동 점검하고 문제�
 | `deliberation_browser_llm_tabs` | List browser LLM tabs |
 | `deliberation_browser_auto_turn` | Auto-send turn to browser LLM |
 | `deliberation_route_turn` | Route turn to appropriate transport |
+| `deliberation_run_until_blocked` | Auto-run mixed transports until completion or a manual block |
 | `deliberation_request_review` | Request code review |
 | `deliberation_cli_auto_turn` | Auto-send turn to CLI speaker |
+| `deliberation_ingest_remote_reply` | Canonical semantic ingress for remote replies with explicit source metadata |
 | `deliberation_cli_config` | Configure CLI settings |
 
 ## Start Flow
@@ -132,10 +135,95 @@ Raw candidate tokens cannot start a deliberation.
 Telepty-managed sessions are now routed through the telepty bus instead of raw PTY inject guidance.
 
 - `deliberation_route_turn` publishes a typed `turn_request` envelope on `ws://localhost:3848/api/bus`
+- `deliberation_run_until_blocked` can continue across `cli_respond`, `browser_auto`, and `telepty_bus` speakers until a manual block is reached
 - transport delivery is tracked with a 5-second `inject_written` ack window
 - semantic completion is tracked with a 60-second self-submit window
 - `session_health` bus events are cached for operator visibility
 - `deliberation_synthesize` validates and emits typed `deliberation_completed` envelopes for downstream automation
+- telepty envelopes now carry top-level `version: 1` and optional `source_host`
+
+### Cross-Machine Event Catalog
+
+Canonical boundary split with telepty:
+
+- **Guaranteed (daemon-emitted):** `inject_written`, `session_health`, `session_register`, `session.replaced`, `session.idle`, `thread.opened`, `thread.closed`, `handoff.*`, `message_routed`
+- **Best-effort (bus relay only):** `turn_request`, `turn_completed`, `deliberation_completed`
+- `kind` is the canonical event discriminator
+- `target` identifies the telepty session target
+- `payload.prompt` is the canonical prompt field for `turn_request`
+- `source_host` is optional transport metadata for cross-machine tracing
+
+### Remote Reply Ingress
+
+If a remote participant cannot call local MCP tools directly, do **not** proxy-synthesize a reply. Use the deliberation-owned semantic ingress:
+
+```text
+deliberation_ingest_remote_reply(
+  session_id: "...",
+  speaker: "...",
+  turn_id: "...",
+  content: "...",
+  source_machine_id: "peer-01",
+  source_session_id: "remote-gemini-001",
+  transport_scope: "remote_mcp",
+  artifact_refs: ["results.jsonl"]
+)
+```
+
+This preserves explicit provenance instead of inferring semantics from raw bus events.
+
+### Gemini Recovery
+
+Canonical repair path today is still installer-based:
+
+```bash
+npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-doctor
+npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install
+```
+
+Use doctor first; if Gemini MCP registration/path/runtime drift is detected, rerun install and restart Gemini CLI.
+
+## Experiment Retrospectives
+
+For autoresearch-style keep/discard reviews, inject a compact experiment bundle after the session starts instead of bloating `topic`.
+
+Recommended rules:
+- keep the injected JSON around `1.5KB` to `2KB`
+- include only the last `3-5` relevant experiments
+- keep `key_changes` to at most `3` scalar before/after pairs
+- reference bulky artifacts (`results.tsv`, full `program.md`, JSONL logs) by path only
+
+Example:
+
+```text
+deliberation_start(...)
+deliberation_inject_context(
+  session_id: "experiment-review-123",
+  speaker: "dustcraw",
+  context: "{\"past_experiments\":[{\"experiment_id\":\"dg-20260310-001\",\"signal_kind\":\"INTEREST_DRIFT\",\"patch_summary\":\"Raised relevanceThreshold from 0.30 to 0.35\",\"patch_kind\":\"config\",\"key_changes\":{\"relevanceThreshold\":{\"before\":0.3,\"after\":0.35}},\"score\":0.08,\"score_label\":\"promotion_rate_delta\",\"metric_name\":\"promotion_rate_delta\",\"metric_delta\":0.08,\"verdict\":\"positive\",\"followup_action\":\"kept\",\"reasoning\":\"Threshold raise reduced noise; promotion quality improved 8%\"}],\"experiment_count\":1,\"success_rate\":1.0}"
+)
+```
+
+If your synthesis needs an explicit experiment verdict, `structured` can now include `experiment_outcome`:
+
+```json
+{
+  "summary": "Lower the blast radius and re-run with stricter constraints.",
+  "decisions": [
+    "Keep the experiment loop bounded to one editable file",
+    "Retry after restoring the failing test baseline"
+  ],
+  "actionable_tasks": [
+    { "id": 1, "task": "Tighten editable globs", "project": "aigentry-devkit", "priority": "high" }
+  ],
+  "experiment_outcome": {
+    "verdict": "modify",
+    "suggested_action": "iterate",
+    "confidence": 0.78,
+    "measurement_window_hours": 24
+  }
+}
+```
 
 ## Speaker Ordering Strategies
 
@@ -196,7 +284,7 @@ Inserts multi-AI verification gates at key [superpowers](https://github.com/obra
 
 **Fallback:** MCP 미설치 시 self-criticism 기반 자가 검증으로 대체 (Silver 등급). MCP 설치 시 멀티-AI 토론 (Gold 등급).
 
-**Install:** `npx @dmsdc-ai/aigentry-deliberation install` 실행 시 자동 설치됩니다.
+**Install:** `npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install` 실행 시 자동 설치됩니다.
 
 수동 설치:
 ```bash

@@ -15,7 +15,7 @@
  *
  * Usage:
  *   node doctor.js
- *   npx @dmsdc-ai/aigentry-deliberation doctor
+ *   npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-doctor
  */
 
 import fs from "node:fs";
@@ -209,7 +209,7 @@ function suggestFix(serverName, server, issue) {
   switch (issue) {
     case "path_missing":
       if (serverName === "deliberation" || serverName === "mcp-deliberation") {
-        return `npx @dmsdc-ai/aigentry-deliberation install`;
+        return `npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install`;
       }
       if (serverName.includes("brain") || serverName.includes("aigentry-brain")) {
         return `npx @dmsdc-ai/aigentry-brain install`;
@@ -223,7 +223,7 @@ function suggestFix(serverName, server, issue) {
     case "temp_path": {
       const tempArg = (server.args || []).find((a) => isTempPath(a));
       if (serverName === "deliberation" || serverName === "mcp-deliberation") {
-        return `npx @dmsdc-ai/aigentry-deliberation install  # reinstall to permanent path`;
+        return `npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install  # reinstall to permanent path`;
       }
       if (serverName.includes("brain") || serverName.includes("aigentry-brain")) {
         return `npx @dmsdc-ai/aigentry-brain install  # reinstall to permanent path`;
@@ -357,7 +357,7 @@ function runDiagnostics() {
         if (mod.includes("aigentry-brain") || mod.includes("brain")) {
           fix = `npx @dmsdc-ai/aigentry-brain install  # temporary path → reinstall to permanent path`;
         } else if (mod.includes("deliberation") || mod.includes("mcp-deliberation")) {
-          fix = `npx @dmsdc-ai/aigentry-deliberation install  # temporary path → reinstall to permanent path`;
+          fix = `npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install  # temporary path -> reinstall to permanent path`;
         } else {
           fix = `# temporary path (${mod}) — change to permanent path in MCP config`;
         }
@@ -387,7 +387,7 @@ function runDiagnostics() {
   } else {
     totalIssues++;
     console.log(`   ❌ Server file not found: ${selfPath}`);
-    console.log(`      fix: npx @dmsdc-ai/aigentry-deliberation install`);
+    console.log(`      fix: npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install`);
   }
 
   // Check node_modules
@@ -407,7 +407,7 @@ function runDiagnostics() {
   } catch {
     totalIssues++;
     console.log(`   ❌ Syntax error detected`);
-    console.log(`      fix: npx @dmsdc-ai/aigentry-deliberation install`);
+    console.log(`      fix: npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install`);
   }
 
   // ── Summary ──

@@ -4,7 +4,7 @@
  * Deliberation MCP Server — One-click installer
  *
  * Usage:
- *   npx @dmsdc-ai/aigentry-deliberation install
+ *   npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install
  *   node install.js
  *
  * What it does:
@@ -293,7 +293,7 @@ if (args.includes("--help") || args.includes("-h")) {
 Deliberation MCP Server Installer
 
 Usage:
-  npx @dmsdc-ai/aigentry-deliberation install
+  npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install
   node install.js
 
 Options:

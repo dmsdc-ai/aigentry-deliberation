@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTeleptyTurnRequestEnvelope,
+  buildTeleptyTurnCompletedEnvelope,
   buildTeleptySynthesisEnvelope,
   registerPendingTeleptyTurnRequest,
   handleTeleptyBusMessage,
@@ -18,6 +19,12 @@ function makeState() {
     topic: 'Cross-session routing',
     current_round: 2,
     max_rounds: 3,
+    current_speaker: 'codex',
+    status: 'active',
+    log: [
+      { speaker: 'aigentry-telepty-001', round: 2, content: 'done' },
+    ],
+    orchestrator_session_id: 'aigentry-orchestrator-001',
     speaker_roles: {
       'aigentry-telepty-001': 'implementer',
     },
@@ -38,6 +45,8 @@ describe('telepty bus envelopes', () => {
       },
     });
 
+    expect(envelope.version).toBe(1);
+    expect(typeof envelope.source_host).toBe('string');
     expect(envelope.kind).toBe('turn_request');
     expect(envelope.target).toBe('aigentry-telepty-001');
     expect(envelope.payload).toMatchObject({
@@ -58,12 +67,68 @@ describe('telepty bus envelopes', () => {
         summary: 'done',
         decisions: ['keep bus routing'],
         actionable_tasks: [{ id: 1, task: 'ship it', priority: 'high' }],
+        experiment_outcome: {
+          verdict: 'modify',
+          suggested_action: 'iterate',
+          confidence: 0.78,
+        },
       },
     });
 
+    expect(envelope.version).toBe(1);
+    expect(typeof envelope.source_host).toBe('string');
     expect(envelope.kind).toBe('deliberation_completed');
     expect(envelope.payload.structured_synthesis.summary).toBe('done');
     expect(envelope.payload.structured_synthesis.actionable_tasks).toHaveLength(1);
+    expect(envelope.payload.structured_synthesis.experiment_outcome).toMatchObject({
+      verdict: 'modify',
+      suggested_action: 'iterate',
+      confidence: 0.78,
+    });
+    expect(envelope.payload.execution_contract).toMatchObject({
+      version: 'v1',
+      source_session_id: 'delib-1',
+      summary: 'done',
+      tasks: [{ id: 1, task: 'ship it', priority: 'high' }],
+      experiment_outcome: {
+        verdict: 'modify',
+        suggested_action: 'iterate',
+        confidence: 0.78,
+      },
+      unresolved_questions: [],
+      artifact_refs: [],
+    });
+    expect(envelope.payload.execution_contract.generated_from.structured_synthesis_hash).toHaveLength(40);
+  });
+
+  it('builds a typed turn_completed envelope', () => {
+    const envelope = buildTeleptyTurnCompletedEnvelope({
+      state: makeState(),
+      entry: {
+        speaker: 'aigentry-telepty-001',
+        round: 2,
+        turn_id: 'turn-3',
+        channel_used: 'telepty_bus',
+        fallback_reason: null,
+      },
+    });
+
+    expect(envelope.version).toBe(1);
+    expect(typeof envelope.source_host).toBe('string');
+    expect(envelope.kind).toBe('turn_completed');
+    expect(envelope.reply_to).toBe('aigentry-orchestrator-001');
+    expect(envelope.payload).toMatchObject({
+      turn_id: 'turn-3',
+      speaker: 'aigentry-telepty-001',
+      round: 2,
+      max_rounds: 3,
+      next_speaker: 'codex',
+      next_round: 2,
+      status: 'active',
+      total_responses: 1,
+      channel_used: 'telepty_bus',
+      orchestrator_session_id: 'aigentry-orchestrator-001',
+    });
   });
 });
 

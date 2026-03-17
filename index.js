@@ -22,9 +22,10 @@ if (_cliArg === "--help" || _cliArg === "-h") {
 MCP Deliberation Server
 
 Usage:
-  npx @dmsdc-ai/aigentry-deliberation install     Install (register MCP server)
-  npx @dmsdc-ai/aigentry-deliberation uninstall    Uninstall
+  npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install     Install (preferred)
+  npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-install --uninstall
   npx @dmsdc-ai/aigentry-deliberation              Run MCP server (stdio)
+  npx --yes --package @dmsdc-ai/aigentry-deliberation deliberation-doctor      Diagnose MCP wiring
 
 After installation, restart Claude Code to start using it.
 `);
@@ -143,18 +144,42 @@ const StructuredActionableTaskSchema = z.object({
   priority: z.enum(["high", "medium", "low"]).optional(),
 });
 
+const StructuredExperimentOutcomeSchema = z.object({
+  verdict: z.enum(["keep", "discard", "modify"]),
+  confidence: z.number().min(0).max(1).optional(),
+  measurement_window_hours: z.number().nonnegative().optional(),
+  patches: z.array(z.unknown()).optional(),
+  suggested_action: z.enum(["advance", "revert", "iterate"]).optional(),
+});
+
 const StructuredSynthesisSchema = z.object({
   summary: z.string(),
   decisions: z.array(z.string()),
   actionable_tasks: z.array(StructuredActionableTaskSchema),
+  experiment_outcome: StructuredExperimentOutcomeSchema.optional(),
+});
+
+const StructuredExecutionContractSchema = z.object({
+  version: z.literal("v1"),
+  source_session_id: z.string().min(1),
+  summary: z.string(),
+  tasks: z.array(StructuredActionableTaskSchema),
+  experiment_outcome: StructuredExperimentOutcomeSchema.nullable().optional(),
+  unresolved_questions: z.array(z.string()),
+  artifact_refs: z.array(z.string()),
+  generated_from: z.object({
+    structured_synthesis_hash: z.string().length(40),
+  }),
 });
 
 const TeleptyEnvelopeSchema = z.object({
+  version: z.number().int().positive().optional(),
   message_id: z.string().min(1),
   session_id: z.string().min(1),
   project: z.string().min(1),
   kind: z.string().min(1),
   source: z.string().min(1),
+  source_host: z.string().min(1).optional(),
   target: z.string().min(1),
   reply_to: z.string().nullable().optional(),
   trace: z.array(z.string()),
@@ -169,20 +194,37 @@ const TeleptyTurnRequestPayloadSchema = z.object({
   speaker: z.string().min(1),
   role: z.string().nullable().optional(),
   prompt: z.string().min(1),
+  content: z.string().min(1).describe("PTY-compatible alias for prompt field"),
   prompt_sha1: z.string().length(40),
   history_entries: z.number().int().nonnegative().optional(),
   transport_timeout_ms: z.number().int().positive(),
   semantic_timeout_ms: z.number().int().positive(),
 });
 
+const TeleptyTurnCompletedPayloadSchema = z.object({
+  turn_id: z.string().nullable().optional(),
+  speaker: z.string().min(1),
+  round: z.number().int().positive(),
+  max_rounds: z.number().int().positive(),
+  next_speaker: z.string().min(1),
+  next_round: z.number().int().positive(),
+  status: z.string().min(1),
+  total_responses: z.number().int().nonnegative(),
+  channel_used: z.string().nullable().optional(),
+  fallback_reason: z.string().nullable().optional(),
+  orchestrator_session_id: z.string().nullable().optional(),
+});
+
 const TeleptyDeliberationCompletedPayloadSchema = z.object({
   topic: z.string(),
   synthesis: z.string(),
   structured_synthesis: StructuredSynthesisSchema.nullable().optional(),
+  execution_contract: StructuredExecutionContractSchema.nullable().optional(),
 });
 
 const TELEPTY_ENVELOPE_PAYLOAD_SCHEMAS = {
   turn_request: TeleptyTurnRequestPayloadSchema,
+  turn_completed: TeleptyTurnCompletedPayloadSchema,
   deliberation_completed: TeleptyDeliberationCompletedPayloadSchema,
 };
 
@@ -500,6 +542,53 @@ function hashPromptText(value) {
   return createHash("sha1").update(String(value || "")).digest("hex");
 }
 
+function sortJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = sortJsonValue(value[key]);
+        return acc;
+      }, {});
+  }
+  return value;
+}
+
+function hashStructuredSynthesis(structured) {
+  return hashPromptText(JSON.stringify(sortJsonValue(structured || null)));
+}
+
+/**
+ * Build a deterministic execution contract from structured synthesis.
+ *
+ * Data model canonical roles:
+ * - structured_synthesis: human + reasoning canonical — rich context for
+ *   human review (decisions rationale, experiment outcomes, full task descriptions).
+ * - execution_contract: automation canonical — minimal, deterministic task list
+ *   derived from structured_synthesis via SHA-1 hash for provenance tracking.
+ *   Consumers (inbox-watcher, devkit, registry, orchestrator) MUST prefer
+ *   execution_contract when available; fall back to structured_synthesis only
+ *   when execution_contract is absent.
+ */
+function buildExecutionContract({ state, structured }) {
+  if (!structured) return null;
+  return {
+    version: "v1",
+    source_session_id: state.id,
+    summary: structured.summary || "",
+    tasks: structured.actionable_tasks || [],
+    experiment_outcome: structured.experiment_outcome || null,
+    unresolved_questions: [],
+    artifact_refs: [],
+    generated_from: {
+      structured_synthesis_hash: hashStructuredSynthesis(structured),
+    },
+  };
+}
+
 function createEnvelopeId(prefix = "env") {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -513,13 +602,24 @@ function validateTeleptyEnvelope(envelope) {
   return parsed;
 }
 
-function buildTeleptyEnvelope({ session_id, project, kind, source, target, reply_to = null, trace = [], payload, ts = new Date().toISOString(), message_id = createEnvelopeId(kind) }) {
+function resolveTeleptySourceHost() {
+  const explicit = process.env.TELEPTY_SOURCE_HOST;
+  if (typeof explicit === "string" && explicit.trim()) {
+    return explicit.trim();
+  }
+  const hostname = os.hostname();
+  return typeof hostname === "string" && hostname.trim() ? hostname.trim() : undefined;
+}
+
+function buildTeleptyEnvelope({ session_id, project, kind, source, source_host = resolveTeleptySourceHost(), target, reply_to = null, trace = [], payload, ts = new Date().toISOString(), message_id = createEnvelopeId(kind) }) {
   return validateTeleptyEnvelope({
+    version: 1,
     message_id,
     session_id,
     project,
     kind,
     source,
+    source_host,
     target,
     reply_to,
     trace,
@@ -552,6 +652,7 @@ function buildTeleptyTurnRequestEnvelope({ state, speaker, turnId, turnPrompt, i
       speaker,
       role,
       prompt: turnPrompt,
+      content: turnPrompt,
       prompt_sha1: hashPromptText(turnPrompt),
       history_entries: includeHistoryEntries,
       transport_timeout_ms: TELEPTY_TRANSPORT_TIMEOUT_MS,
@@ -560,7 +661,40 @@ function buildTeleptyTurnRequestEnvelope({ state, speaker, turnId, turnPrompt, i
   });
 }
 
-function buildTeleptySynthesisEnvelope({ state, synthesis, structured }) {
+function buildTeleptyTurnCompletedEnvelope({ state, entry }) {
+  return buildTeleptyEnvelope({
+    session_id: state.id,
+    project: state.project || getProjectSlug(),
+    kind: "turn_completed",
+    source: `deliberation:${state.id}`,
+    target: "telepty-bus",
+    reply_to: state.orchestrator_session_id || state.id,
+    trace: [
+      `project:${state.project || getProjectSlug()}`,
+      `speaker:${entry.speaker}`,
+      `turn:${entry.turn_id || "none"}`,
+    ],
+    payload: {
+      turn_id: entry.turn_id || null,
+      speaker: entry.speaker,
+      round: entry.round,
+      max_rounds: state.max_rounds,
+      next_speaker: state.current_speaker || "none",
+      next_round: state.current_round,
+      status: state.status,
+      total_responses: Array.isArray(state.log) ? state.log.length : 0,
+      channel_used: entry.channel_used || null,
+      fallback_reason: entry.fallback_reason || null,
+      orchestrator_session_id: state.orchestrator_session_id || null,
+    },
+  });
+}
+
+function buildTeleptySynthesisEnvelope({ state, synthesis, structured, executionContract }) {
+  const derivedExecutionContract =
+    executionContract !== undefined
+      ? executionContract
+      : (structured ? buildExecutionContract({ state, structured }) : (state.execution_contract || null));
   return buildTeleptyEnvelope({
     session_id: state.id,
     project: state.project || getProjectSlug(),
@@ -576,6 +710,7 @@ function buildTeleptySynthesisEnvelope({ state, synthesis, structured }) {
       topic: state.topic,
       synthesis,
       structured_synthesis: structured || null,
+      execution_contract: derivedExecutionContract || null,
     },
   });
 }
@@ -823,6 +958,130 @@ async function notifyTeleptyBus(event) {
     appendRuntimeLog("WARN", `HANDOFF: Telepty bus notification failed: ${err.message}`);
     return { ok: false, error: err.message };
   }
+}
+
+function getDefaultOrchestratorSessionId() {
+  // Check multiple env vars that may indicate an orchestrator context
+  const candidates = [
+    process.env.TELEPTY_SESSION_ID,
+    process.env.DELIBERATION_ORCHESTRATOR_ID,
+    process.env.ORCHESTRATOR_SESSION_ID,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function buildTurnCompletionNotificationText(state, entry) {
+  const nextSpeaker = state.current_speaker || "none";
+  const turnId = entry.turn_id || "(none)";
+  if (state.status === "awaiting_synthesis") {
+    return [
+      `[deliberation turn complete]`,
+      `session_id: ${state.id}`,
+      `speaker: ${entry.speaker}`,
+      `turn_id: ${turnId}`,
+      `round: ${entry.round}/${state.max_rounds}`,
+      `status: awaiting_synthesis`,
+      `responses: ${state.log.length}`,
+      `all rounds complete; run deliberation_synthesize(session_id: "${state.id}")`,
+      `no further reply needed.`,
+    ].join("\n");
+  }
+
+  return [
+    `[deliberation turn complete]`,
+    `session_id: ${state.id}`,
+    `speaker: ${entry.speaker}`,
+    `turn_id: ${turnId}`,
+    `round: ${entry.round}/${state.max_rounds}`,
+    `status: ${state.status}`,
+    `next_speaker: ${nextSpeaker}`,
+    `next_round: ${state.current_round}/${state.max_rounds}`,
+    `responses: ${state.log.length}`,
+    `informational notification only.`,
+    `no further reply needed.`,
+  ].join("\n");
+}
+
+async function notifyTeleptySessionInject({ targetSessionId, prompt, fromSessionId, replyToSessionId = null, host = TELEPTY_DEFAULT_HOST }) {
+  if (!targetSessionId || !prompt) return { ok: false, error: "missing target or prompt" };
+  const token = loadTeleptyAuthToken();
+  if (!token) return { ok: false, error: "telepty auth token unavailable" };
+
+  try {
+    const response = await fetch(`http://${host}:${TELEPTY_PORT}/api/sessions/${encodeURIComponent(targetSessionId)}/inject`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-telepty-token": token,
+      },
+      body: JSON.stringify({
+        prompt,
+        from: fromSessionId || null,
+        reply_to: replyToSessionId || null,
+        deliberation_session_id: null,
+        thread_id: null,
+      }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, error: data?.error || `HTTP ${response.status}` };
+    }
+    return { ok: true, inject_id: data?.inject_id || null };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function dispatchTeleptyTurnRequest({ state, speaker, prompt = null, includeHistoryEntries = 4, awaitSemantic = false }) {
+  const { profile } = resolveTransportForSpeaker(state, speaker);
+  const turnId = state.pending_turn_id || generateTurnId();
+  const turnPrompt = buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries);
+  const busReady = await ensureTeleptyBusSubscriber();
+  const envelope = buildTeleptyTurnRequestEnvelope({
+    state,
+    speaker,
+    turnId,
+    turnPrompt,
+    includeHistoryEntries,
+    profile,
+  });
+  const pending = registerPendingTeleptyTurnRequest({ envelope, profile, speaker });
+  const publishResult = await notifyTeleptyBus(envelope);
+  const health = profile?.telepty_session_id ? getTeleptySessionHealth(profile.telepty_session_id) : null;
+
+  if (!publishResult.ok) {
+    cleanupPendingTeleptyTurn(envelope.message_id);
+    return {
+      ok: false,
+      stage: "publish",
+      envelope,
+      turnPrompt,
+      publishResult,
+      busReady,
+      health,
+    };
+  }
+
+  const transportResult = await pending.transportPromise;
+  let semanticResult = null;
+  if (awaitSemantic && transportResult.ok) {
+    semanticResult = await pending.semanticPromise;
+  }
+
+  return {
+    ok: !awaitSemantic ? transportResult.ok : Boolean(semanticResult?.ok),
+    stage: awaitSemantic ? (semanticResult?.ok ? "semantic" : (semanticResult?.code || "semantic_timeout")) : (transportResult.ok ? "transport" : (transportResult?.code || "transport_timeout")),
+    envelope,
+    turnPrompt,
+    publishResult,
+    transportResult,
+    semanticResult,
+    busReady,
+    health,
+  };
 }
 
 function getArchiveDir(projectSlug = getProjectSlug()) {
@@ -1371,19 +1630,27 @@ function detectCallerSpeaker() {
   const hinted = normalizeSpeaker(process.env.DELIBERATION_CALLER_SPEAKER);
   if (hinted) return hinted;
 
+  const envKeys = Object.keys(process.env).join(" ");
   const pathHint = process.env.PATH || "";
-  if (/\bCODEX_[A-Z0-9_]+\b/.test(Object.keys(process.env).join(" "))) {
-    return "codex";
-  }
-  if (pathHint.includes("/.codex/")) {
+
+  // Codex detection
+  if (/\bCODEX_[A-Z0-9_]+\b/.test(envKeys) || pathHint.includes("/.codex/")) {
     return "codex";
   }
 
-  if (/\bCLAUDE_[A-Z0-9_]+\b/.test(Object.keys(process.env).join(" "))) {
+  // Claude detection
+  if (/\bCLAUDE_[A-Z0-9_]+\b/.test(envKeys) || pathHint.includes("/.claude/")) {
     return "claude";
   }
-  if (pathHint.includes("/.claude/")) {
-    return "claude";
+
+  // Gemini detection
+  if (/\bGOOGLE_GENAI_[A-Z0-9_]+\b/.test(envKeys) || /\bGEMINI_[A-Z0-9_]+\b/.test(envKeys) || pathHint.includes("/.gemini/")) {
+    return "gemini";
+  }
+
+  // Aider detection
+  if (/\bAIDER_[A-Z0-9_]+\b/.test(envKeys) || pathHint.includes("/aider/")) {
+    return "aider";
   }
 
   return null;
@@ -2518,6 +2785,20 @@ function cleanupSyncMarkdown(state) {
   try { fs.unlinkSync(cwdPath); } catch { /* ignore */ }
 }
 
+function formatSourceMetadataLine(meta) {
+  if (!meta || typeof meta !== "object") return "";
+  const parts = [];
+  if (meta.source_machine_id) parts.push(`machine: ${meta.source_machine_id}`);
+  if (meta.source_session_id) parts.push(`session: ${meta.source_session_id}`);
+  if (meta.transport_scope) parts.push(`transport: ${meta.transport_scope}`);
+  if (meta.reply_origin) parts.push(`origin: ${meta.reply_origin}`);
+  if (meta.timestamp) parts.push(`timestamp: ${meta.timestamp}`);
+  if (Array.isArray(meta.artifact_refs) && meta.artifact_refs.length > 0) {
+    parts.push(`artifacts: ${meta.artifact_refs.join(", ")}`);
+  }
+  return parts.length > 0 ? `> _source: ${parts.join(" | ")}_\n\n` : "";
+}
+
 function stateToMarkdown(s) {
   const speakerOrder = buildSpeakerOrder(s.speakers, s.current_speaker, "end");
   let md = `---
@@ -2547,6 +2828,14 @@ tags: [deliberation]
     md += `## Synthesis\n\n${s.synthesis}\n\n---\n\n`;
   }
 
+  if (s.structured_synthesis) {
+    md += `## Structured Synthesis\n\n\`\`\`json\n${JSON.stringify(s.structured_synthesis, null, 2)}\n\`\`\`\n\n---\n\n`;
+  }
+
+  if (s.execution_contract) {
+    md += `## Execution Contract\n\n\`\`\`json\n${JSON.stringify(s.execution_contract, null, 2)}\n\`\`\`\n\n---\n\n`;
+  }
+
   md += `## Debate Log\n\n`;
   for (const entry of s.log) {
     md += `### ${entry.speaker} — Round ${entry.round}\n\n`;
@@ -2556,6 +2845,7 @@ tags: [deliberation]
       if (entry.fallback_reason) parts.push(`fallback: ${entry.fallback_reason}`);
       md += `> _${parts.join(" | ")}_\n\n`;
     }
+    md += formatSourceMetadataLine(entry.source_metadata);
     md += `${entry.content}\n\n`;
     if (entry.attachments && entry.attachments.length > 0) {
       for (const att of entry.attachments) {
@@ -2579,6 +2869,21 @@ function archiveState(state) {
   const filename = `deliberation-${ts}-${slug}.md`;
   const dest = path.join(getArchiveDir(state.project), filename);
   writeTextAtomic(dest, stateToMarkdown(state));
+
+  // Write machine-readable execution_contract sidecar for automation consumers
+  if (state.execution_contract) {
+    const contractDest = dest.replace(/\.md$/, ".contract.json");
+    writeTextAtomic(contractDest, JSON.stringify({
+      ...state.execution_contract,
+      _meta: {
+        archived_from: state.id,
+        project: state.project,
+        topic: state.topic,
+        archived_at: new Date().toISOString(),
+      },
+    }, null, 2));
+  }
+
   return dest;
 }
 
@@ -3224,6 +3529,21 @@ function buildCliAutoTurnFailureText({ state, speaker, hint, err, effectiveTimeo
   );
 }
 
+function buildActiveReportingSection(state, speaker) {
+  const orchestratorSessionId = state?.orchestrator_session_id;
+  if (!orchestratorSessionId) return "";
+
+  return `\n[active_reporting_rule]
+- After you successfully submit this turn with \`deliberation_respond(...)\`, send a brief status update to the orchestrator session.
+- Primary method (telepty available):
+\`telepty inject --from \"$TELEPTY_SESSION_ID\" --reply-to ${orchestratorSessionId} ${orchestratorSessionId} \"[deliberation status] session_id: ${state.id} speaker: ${speaker} round: ${state.current_round}/${state.max_rounds} submitted. no further reply needed.\"\`
+- Fallback (telepty unavailable): Include the status in your next tool call or response context.
+- Keep it to one short line. Do not wait for a reply.
+- This rule applies regardless of transport type (CLI, browser, telepty_bus).
+[/active_reporting_rule]
+`;
+}
+
 function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries = 4) {
   const promptBudget = getPromptBudgetForSpeaker(speaker, includeHistoryEntries);
   const recent = formatRecentLogForPrompt(state, promptBudget.maxEntries, promptBudget);
@@ -3232,6 +3552,7 @@ function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries 
   const noToolRule = speaker === "codex"
     ? `\n- Do not inspect files, run shell commands, browse, or call tools. Answer only from the provided discussion context.`
     : "";
+  const activeReportingSection = buildActiveReportingSection(state, speaker);
 
   // Role prompt injection
   const speakerRole = (state.speaker_roles || {})[speaker] || "free";
@@ -3246,7 +3567,7 @@ project: ${state.project}
 topic: ${topic}
 round: ${state.current_round}/${state.max_rounds}
 target_speaker: ${speaker}
-required_turn: ${state.current_speaker}${roleSection}
+required_turn: ${state.current_speaker}${roleSection}${activeReportingSection}
 
 [recent_log]
 ${recent}
@@ -3262,7 +3583,7 @@ ${recent}
 `;
 }
 
-function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason, attachments }) {
+function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason, attachments, source_metadata }) {
   const resolved = resolveSessionId(session_id);
   if (!resolved) {
     return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
@@ -3271,7 +3592,9 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
     return { content: [{ type: "text", text: multipleSessionsError() }] };
   }
 
-  return withSessionLock(resolved, () => {
+  let completionState = null;
+  let completionEntry = null;
+  const result = withSessionLock(resolved, () => {
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
       return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
@@ -3316,7 +3639,7 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
     const suggestedRole = inferSuggestedRole(content);
     const assignedRole = (state.speaker_roles || {})[normalizedSpeaker] || "free";
     const roleDrift = assignedRole !== "free" && suggestedRole !== "free" && assignedRole !== suggestedRole;
-    state.log.push({
+    const logEntry = {
       round: state.current_round,
       speaker: normalizedSpeaker,
       content,
@@ -3328,13 +3651,15 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
       role_drift: roleDrift || undefined,
       attachments: attachments || undefined,
-    });
+      source_metadata: source_metadata || undefined,
+    };
+    state.log.push(logEntry);
     completePendingTeleptySemantic({
       sessionId: state.id,
       speaker: normalizedSpeaker,
       turnId: state.pending_turn_id || turn_id || null,
     });
-    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | attachments: ${attachments ? attachments.length : 0}`);
+    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | attachments: ${attachments ? attachments.length : 0}${source_metadata?.source_machine_id ? ` | source_machine: ${source_metadata.source_machine_id}` : ""}`);
 
     state.current_speaker = selectNextSpeaker(state);
 
@@ -3362,6 +3687,17 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       state.pending_turn_id = generateTurnId();
     }
 
+    if (!state.orchestrator_session_id) {
+      state.orchestrator_session_id = getDefaultOrchestratorSessionId() || null;
+    }
+    completionEntry = {
+      ...logEntry,
+      turn_id: logEntry.turn_id || turn_id || null,
+    };
+    completionState = {
+      ...state,
+      log: [...state.log],
+    };
     saveSession(state);
     return {
       content: [{
@@ -3370,6 +3706,23 @@ function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel
       }],
     };
   });
+
+  if (completionState && completionEntry) {
+    const envelope = buildTeleptyTurnCompletedEnvelope({ state: completionState, entry: completionEntry });
+    notifyTeleptyBus(envelope).catch(() => {});
+
+    const orchestratorSessionId = completionState.orchestrator_session_id || null;
+    if (orchestratorSessionId) {
+      const notificationText = buildTurnCompletionNotificationText(completionState, completionEntry);
+      notifyTeleptySessionInject({
+        targetSessionId: orchestratorSessionId,
+        prompt: notificationText,
+        fromSessionId: `deliberation:${completionState.id}`,
+      }).catch(() => {});
+    }
+  }
+
+  return result;
 }
 
 // ── MCP Server ─────────────────────────────────────────────────
@@ -3453,8 +3806,11 @@ server.tool(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("If true, automatically create a handoff task in the inbox when synthesis completes. Enables the Autonomous Deliberation Handoff pattern."),
-    },
-    safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, selection_token, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset, auto_execute }) => {
+    mode: z.enum(["standard", "lite"]).default("standard").describe("Deliberation mode. 'lite' caps speakers to 3 and rounds to 2 for quick decisions."),
+    orchestrator_session_id: z.string().trim().min(1).max(128).optional()
+      .describe("Optional telepty session ID to notify on turn completion. Defaults to TELEPTY_SESSION_ID when available."),
+  },
+  safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, selection_token, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset, auto_execute, mode, orchestrator_session_id }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
@@ -3577,10 +3933,20 @@ server.tool(
       || normalizeSpeaker(hasManualSpeakers ? selectedSpeakers?.[0] : callerSpeaker)
       || normalizeSpeaker(selectedSpeakers?.[0])
       || DEFAULT_SPEAKERS[0];
-    const speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
+    let speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
 
     if (effectiveRequireManual) {
       clearSpeakerSelectionToken();
+    }
+
+    // Lite mode: cap speakers and rounds for quick decisions
+    if (mode === "lite") {
+      if (speakerOrder.length > 3) {
+        speakerOrder.splice(3);
+      }
+      if (rounds > 2) {
+        rounds = 2;
+      }
     }
 
     // Warn if only 1 speaker — deliberation requires 2+
@@ -3634,6 +4000,8 @@ server.tool(
       speaker_roles: speaker_roles || (role_preset ? applyRolePreset(role_preset, speakerOrder) : {}),
       degradation: degradationLevels,
       auto_execute: auto_execute || false,
+      mode: mode || "standard",
+      orchestrator_session_id: orchestrator_session_id || getDefaultOrchestratorSessionId() || null,
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
     };
@@ -3922,28 +4290,22 @@ server.tool(
     let manualFallbackPrompt = false;
 
     if (transport === "telepty_bus") {
-      turnPrompt = buildClipboardTurnPrompt(state, speaker, prompt, include_history_entries);
-      const busReady = await ensureTeleptyBusSubscriber();
-      const envelope = buildTeleptyTurnRequestEnvelope({
+      const dispatchResult = await dispatchTeleptyTurnRequest({
         state,
         speaker,
-        turnId: turnId || generateTurnId(),
-        turnPrompt,
+        prompt,
         includeHistoryEntries: include_history_entries,
-        profile,
+        awaitSemantic: false,
       });
-      const pending = registerPendingTeleptyTurnRequest({ envelope, profile, speaker });
-      const publishResult = await notifyTeleptyBus(envelope);
-      const health = profile?.telepty_session_id ? getTeleptySessionHealth(profile.telepty_session_id) : null;
+      turnPrompt = dispatchResult.turnPrompt;
+      const { envelope, publishResult, transportResult, busReady, health } = dispatchResult;
 
-      if (!publishResult.ok) {
-        cleanupPendingTeleptyTurn(envelope.message_id);
+      if (!dispatchResult.ok && dispatchResult.stage === "publish") {
         manualFallbackPrompt = true;
         extra += `\n\n❌ Telepty bus publish failed: ${publishResult.error || publishResult.status || "unknown error"}\n` +
                  `Fallback: use manual telepty inject for this turn.`;
         guidance = formatTransportGuidance("manual", state, speaker);
       } else {
-        const transportResult = await pending.transportPromise;
         const healthLine = health
           ? `\n**Session health:** alive=${health.payload?.alive === true ? "yes" : "no"}, pid=${health.payload?.pid || "n/a"}, age=${Math.max(0, Math.round((health.age_ms || 0) / 1000))}s${health.stale ? " (stale)" : ""}`
           : "";
@@ -4288,6 +4650,226 @@ async function runCliAutoTurnCore(sessionId, speaker, timeoutSec = 120) {
   }
 }
 
+async function runBrowserAutoTurnCore(sessionId, speaker, timeoutSec = 45) {
+  const state = loadSession(sessionId);
+  if (!state || state.status !== "active") {
+    return { ok: false, error: "Session not active" };
+  }
+
+  const { transport, profile } = resolveTransportForSpeaker(state, speaker);
+  if (transport !== "browser_auto") {
+    return { ok: false, error: `Speaker "${speaker}" is not browser_auto type` };
+  }
+
+  const turnId = state.pending_turn_id || generateTurnId();
+  const port = getBrowserPort();
+  const effectiveProvider = profile?.provider || "chatgpt";
+  const modelSelection = getModelSelectionForTurn(state, speaker, effectiveProvider);
+  const turnPrompt = buildClipboardTurnPrompt(state, speaker, null, 3);
+  const startTime = Date.now();
+
+  try {
+    const attachResult = await port.attach(sessionId, {
+      provider: effectiveProvider,
+      url: profile?.url || undefined,
+    });
+    if (!attachResult.ok) {
+      return { ok: false, error: `attach failed: ${attachResult.error?.message || "unknown error"}` };
+    }
+
+    const loginCheck = await port.checkLogin(sessionId);
+    if (loginCheck && !loginCheck.loggedIn) {
+      await port.detach(sessionId);
+      return { ok: false, error: `login required: ${loginCheck.reason || "not logged in"}` };
+    }
+
+    if (modelSelection.model !== "default") {
+      await port.switchModel(sessionId, modelSelection.model);
+    }
+
+    const sendResult = await port.sendTurnWithDegradation(sessionId, turnId, turnPrompt);
+    if (!sendResult.ok) {
+      await port.detach(sessionId);
+      return { ok: false, error: `send failed: ${sendResult.error?.message || "unknown error"}` };
+    }
+
+    const waitResult = await port.waitTurnResult(sessionId, turnId, timeoutSec);
+    await port.detach(sessionId);
+    if (!waitResult.ok || !waitResult.data?.response) {
+      return { ok: false, error: waitResult.error?.message || "no response received" };
+    }
+
+    submitDeliberationTurn({
+      session_id: sessionId,
+      speaker,
+      content: waitResult.data.response,
+      turn_id: turnId,
+      channel_used: "browser_auto",
+    });
+
+    return {
+      ok: true,
+      response: waitResult.data.response,
+      elapsedMs: Date.now() - startTime,
+      model: modelSelection.model,
+      provider: effectiveProvider,
+    };
+  } catch (err) {
+    try { await port.detach(sessionId); } catch {}
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+async function runTeleptyBusAutoTurnCore(sessionId, speaker, includeHistoryEntries = 4) {
+  const state = loadSession(sessionId);
+  if (!state || state.status !== "active") {
+    return { ok: false, error: "Session not active" };
+  }
+
+  const { transport } = resolveTransportForSpeaker(state, speaker);
+  if (transport !== "telepty_bus") {
+    return { ok: false, error: `Speaker "${speaker}" is not telepty_bus type` };
+  }
+
+  const startTime = Date.now();
+  const dispatchResult = await dispatchTeleptyTurnRequest({
+    state,
+    speaker,
+    includeHistoryEntries,
+    awaitSemantic: true,
+  });
+  if (!dispatchResult.publishResult?.ok) {
+    return {
+      ok: false,
+      blocked: true,
+      error: dispatchResult.publishResult?.error || dispatchResult.publishResult?.status || "telepty bus publish failed",
+      envelope: dispatchResult.envelope,
+      turnPrompt: dispatchResult.turnPrompt,
+    };
+  }
+  if (!dispatchResult.transportResult?.ok) {
+    return {
+      ok: false,
+      blocked: true,
+      error: dispatchResult.transportResult?.code || "transport timeout",
+      envelope: dispatchResult.envelope,
+      turnPrompt: dispatchResult.turnPrompt,
+    };
+  }
+  if (!dispatchResult.semanticResult?.ok) {
+    return {
+      ok: false,
+      blocked: true,
+      error: dispatchResult.semanticResult?.code || "semantic timeout",
+      envelope: dispatchResult.envelope,
+      turnPrompt: dispatchResult.turnPrompt,
+    };
+  }
+
+  return {
+    ok: true,
+    elapsedMs: Date.now() - startTime,
+    envelope: dispatchResult.envelope,
+    publishResult: dispatchResult.publishResult,
+    transportResult: dispatchResult.transportResult,
+    semanticResult: dispatchResult.semanticResult,
+  };
+}
+
+async function runUntilBlockedCore(sessionId, {
+  maxTurns = 12,
+  cliTimeoutSec = 120,
+  browserTimeoutSec = 45,
+  includeHistoryEntries = 4,
+} = {}) {
+  const steps = [];
+
+  for (let iteration = 0; iteration < maxTurns; iteration += 1) {
+    const state = loadSession(sessionId);
+    if (!state) {
+      return { ok: false, status: "missing", error: "Session not found", steps };
+    }
+    if (state.status !== "active" || state.current_speaker === "none") {
+      return { ok: true, status: state.status, steps };
+    }
+
+    const speaker = state.current_speaker;
+    const { transport } = resolveTransportForSpeaker(state, speaker);
+    const callerSpeaker = detectCallerSpeaker();
+    if (transport === "cli_respond" && callerSpeaker && normalizeSpeaker(callerSpeaker) === normalizeSpeaker(speaker)) {
+      return {
+        ok: true,
+        status: "blocked",
+        block_reason: "self_turn",
+        speaker,
+        transport,
+        turn_prompt: buildClipboardTurnPrompt(state, speaker, null, includeHistoryEntries),
+        steps,
+      };
+    }
+
+    if (transport === "manual" || transport === "clipboard") {
+      return {
+        ok: true,
+        status: "blocked",
+        block_reason: "manual_transport",
+        speaker,
+        transport,
+        turn_prompt: buildClipboardTurnPrompt(state, speaker, null, includeHistoryEntries),
+        steps,
+      };
+    }
+
+    let result = null;
+    if (transport === "cli_respond") {
+      result = await runCliAutoTurnCore(sessionId, speaker, cliTimeoutSec);
+    } else if (transport === "browser_auto") {
+      result = await runBrowserAutoTurnCore(sessionId, speaker, browserTimeoutSec);
+    } else if (transport === "telepty_bus") {
+      result = await runTeleptyBusAutoTurnCore(sessionId, speaker, includeHistoryEntries);
+    } else {
+      return {
+        ok: true,
+        status: "blocked",
+        block_reason: "unsupported_transport",
+        speaker,
+        transport,
+        turn_prompt: buildClipboardTurnPrompt(state, speaker, null, includeHistoryEntries),
+        steps,
+      };
+    }
+
+    steps.push({
+      speaker,
+      transport,
+      ok: Boolean(result?.ok),
+      error: result?.error || null,
+      elapsedMs: result?.elapsedMs || null,
+      blocked: Boolean(result?.blocked),
+    });
+
+    if (!result?.ok) {
+      return {
+        ok: Boolean(result?.blocked),
+        status: result?.blocked ? "blocked" : "error",
+        block_reason: result?.blocked ? (result.error || "transport_blocked") : null,
+        speaker,
+        transport,
+        error: result?.error || null,
+        turn_prompt: result?.turnPrompt || null,
+        steps,
+      };
+    }
+  }
+
+  const finalState = loadSession(sessionId);
+  return {
+    ok: true,
+    status: finalState?.status === "active" ? "max_turns_reached" : (finalState?.status || "completed"),
+    steps,
+  };
+}
+
 /**
  * Generate structured synthesis by calling a CLI speaker with a synthesis prompt.
  */
@@ -4409,27 +4991,14 @@ async function runAutoHandoff(sessionId) {
 
       appendRuntimeLog("INFO", `AUTO_HANDOFF_TURN: ${sessionId} | speaker: ${speaker} | round: ${state.current_round}/${state.max_rounds}`);
 
-      const result = await runCliAutoTurnCore(sessionId, speaker);
-      if (!result.ok) {
-        appendRuntimeLog("WARN", `AUTO_HANDOFF_TURN_FAIL: ${sessionId} | speaker: ${speaker} | ${result.error}`);
-        // Skip this speaker, continue with next
-        const freshState = loadSession(sessionId);
-        if (freshState) {
-          // Advance to next speaker manually
-          const idx = freshState.speakers.indexOf(speaker);
-          const nextIdx = (idx + 1) % freshState.speakers.length;
-          freshState.current_speaker = freshState.speakers[nextIdx];
-          if (nextIdx === 0) freshState.current_round++;
-          if (freshState.current_round > freshState.max_rounds) {
-            freshState.status = "awaiting_synthesis";
-            freshState.current_speaker = "none";
-          }
-          saveSession(freshState);
-        }
-        continue;
+      const runResult = await runUntilBlockedCore(sessionId, { maxTurns: 1, includeHistoryEntries: 3 });
+      const step = runResult.steps.at(-1) || null;
+      if (!runResult.ok || runResult.status === "blocked") {
+        appendRuntimeLog("WARN", `AUTO_HANDOFF_TURN_BLOCKED: ${sessionId} | speaker: ${speaker} | ${runResult.block_reason || runResult.error || "unknown"}`);
+        break;
       }
 
-      appendRuntimeLog("INFO", `AUTO_HANDOFF_TURN_OK: ${sessionId} | speaker: ${speaker} | ${result.elapsedMs}ms`);
+      appendRuntimeLog("INFO", `AUTO_HANDOFF_TURN_OK: ${sessionId} | speaker: ${speaker} | ${step?.elapsedMs || 0}ms`);
     }
 
     // Phase 2: Generate structured synthesis
@@ -4470,6 +5039,7 @@ async function runAutoHandoff(sessionId) {
       if (!loaded) return;
       loaded.synthesis = markdownSynthesis;
       loaded.structured_synthesis = structured;
+      loaded.execution_contract = buildExecutionContract({ state: loaded, structured });
       loaded.status = "completed";
       loaded.current_speaker = "none";
       saveSession(loaded);
@@ -4725,6 +5295,56 @@ server.tool(
 );
 
 server.tool(
+  "deliberation_run_until_blocked",
+  "Auto-run a deliberation across mixed transports until it completes or reaches a manual/blocking turn.",
+  {
+    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
+    max_turns: z.number().int().min(1).max(50).default(12).describe("Maximum number of turns to auto-run before stopping"),
+    cli_timeout_sec: z.number().int().min(30).max(900).default(120).describe("CLI auto-turn timeout (seconds)"),
+    browser_timeout_sec: z.number().int().min(15).max(300).default(45).describe("Browser auto-turn timeout (seconds)"),
+    include_history_entries: z.number().int().min(0).max(12).default(4).describe("Recent log entries to include for telepty turns"),
+  },
+  safeToolHandler("deliberation_run_until_blocked", async ({ session_id, max_turns, cli_timeout_sec, browser_timeout_sec, include_history_entries }) => {
+    const resolved = resolveSessionId(session_id);
+    if (!resolved) {
+      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+    }
+    if (resolved === "MULTIPLE") {
+      return { content: [{ type: "text", text: multipleSessionsError() }] };
+    }
+
+    const initialState = loadSession(resolved);
+    if (!initialState || initialState.status !== "active") {
+      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+    }
+
+    const result = await runUntilBlockedCore(resolved, {
+      maxTurns: max_turns,
+      cliTimeoutSec: cli_timeout_sec,
+      browserTimeoutSec: browser_timeout_sec,
+      includeHistoryEntries: include_history_entries,
+    });
+    const finalState = loadSession(resolved);
+    const stepsText = (result.steps || []).length > 0
+      ? result.steps.map((step, index) => `- ${index + 1}. ${step.speaker} [${step.transport}] → ${step.ok ? "ok" : (step.blocked ? `blocked (${step.error || "blocked"})` : `error (${step.error || "unknown"})`)}${step.elapsedMs ? ` (${step.elapsedMs}ms)` : ""}`).join("\n")
+      : "- none";
+
+    let summary = `## Run Until Blocked — ${resolved}\n\n`;
+    summary += `**Result:** ${result.status}\n`;
+    summary += `**Current state:** ${finalState?.status || initialState.status}\n`;
+    summary += `**Current speaker:** ${finalState?.current_speaker || initialState.current_speaker}\n`;
+    if (result.block_reason) summary += `**Block reason:** ${result.block_reason}\n`;
+    if (result.error) summary += `**Error:** ${result.error}\n`;
+    if (result.turn_prompt) {
+      summary += `\n### [turn_prompt]\n\`\`\`markdown\n${result.turn_prompt}\n\`\`\`\n`;
+    }
+    summary += `\n### Steps\n${stepsText}\n`;
+
+    return { content: [{ type: "text", text: summary }] };
+  })
+);
+
+server.tool(
   "deliberation_respond",
   "Submit a response for the current turn.",
   {
@@ -4804,6 +5424,51 @@ server.tool(
     }
 
     return submitDeliberationTurn({ session_id, speaker, content: finalContent || "(Image response)", turn_id, channel_used: "cli_respond", attachments });
+  })
+);
+
+server.tool(
+  "deliberation_ingest_remote_reply",
+  "Canonical semantic ingress for replies produced on another machine/session. Use this instead of reconstructing deliberation state from transport events.",
+  {
+    session_id: z.string().describe("Deliberation session ID"),
+    speaker: z.string().describe("Speaker name"),
+    turn_id: z.string().min(1).describe("Turn ID associated with the issued turn_request"),
+    content: z.string().min(1).describe("Remote reply content"),
+    source_machine_id: z.string().min(1).describe("Source machine or peer identifier"),
+    source_session_id: z.string().min(1).describe("Source remote session identifier"),
+    transport_scope: z.string().min(1).describe("Transport scope used to carry the remote reply"),
+    artifact_refs: z.array(z.string().min(1)).optional().describe("Optional artifact references the reply depends on"),
+    reply_origin: z.string().optional().describe("Optional origin hint, e.g. remote_mcp, telepty_thread"),
+    timestamp: z.string().optional().describe("Optional source timestamp"),
+  },
+  safeToolHandler("deliberation_ingest_remote_reply", async ({
+    session_id,
+    speaker,
+    turn_id,
+    content,
+    source_machine_id,
+    source_session_id,
+    transport_scope,
+    artifact_refs,
+    reply_origin,
+    timestamp,
+  }) => {
+    return submitDeliberationTurn({
+      session_id,
+      speaker,
+      content,
+      turn_id,
+      channel_used: `remote_ingress:${transport_scope}`,
+      source_metadata: {
+        source_machine_id,
+        source_session_id,
+        transport_scope,
+        artifact_refs: artifact_refs || [],
+        reply_origin: reply_origin || null,
+        timestamp: timestamp || new Date().toISOString(),
+      },
+    });
   })
 );
 
@@ -5012,6 +5677,7 @@ server.tool(
 
       loaded.synthesis = synthesis;
       loaded.structured_synthesis = structured || null;
+      loaded.execution_contract = buildExecutionContract({ state: loaded, structured: structured || null });
       loaded.status = "completed";
       loaded.current_speaker = "none";
       saveSession(loaded);
@@ -5033,6 +5699,7 @@ server.tool(
       state,
       synthesis,
       structured,
+      executionContract: state.execution_contract || null,
     });
 
     // Immediately force-close monitor terminal (including physical Terminal) on deliberation end
@@ -6027,4 +6694,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
+export { selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };

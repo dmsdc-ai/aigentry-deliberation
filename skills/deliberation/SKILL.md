@@ -27,10 +27,13 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
 | `deliberation_speaker_candidates` | 참가 가능한 speaker 후보 목록 조회 | 불필요 |
 | `deliberation_list_active` | 진행 중인 모든 세션 목록 | 불필요 |
 | `deliberation_status` | 토론 상태 조회 | 선택적* |
+| `deliberation_inject_context` | 외부 실험 결과/추가 컨텍스트 주입 | 선택적 |
 | `deliberation_context` | 프로젝트 컨텍스트 로드 | 불필요 |
 | `deliberation_browser_llm_tabs` | 브라우저 LLM 탭 목록 (웹 기반 LLM 참여용) | 불필요 |
 | `deliberation_route_turn` | 현재 차례 speaker의 transport(CLI/browser_auto/manual)를 자동 라우팅 | 선택적* |
+| `deliberation_run_until_blocked` | CLI/browser_auto/telepty_bus를 자동 진행하다 막히는 지점에서 중단 | 선택적 |
 | `deliberation_respond` | 현재 차례의 응답 제출 | 선택적* |
+| `deliberation_ingest_remote_reply` | 원격 머신 reply를 명시적 source metadata와 함께 semantic ingest | 선택적 |
 | `deliberation_history` | 전체 토론 기록 조회 | 선택적* |
 | `deliberation_synthesize` | 합성 보고서 생성 및 토론 완료 | 선택적* |
 | `deliberation_list` | 과거 토론 아카이브 목록 | 불필요 |
@@ -63,9 +66,11 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
    - CLI speaker → `deliberation_cli_auto_turn`으로 실제 CLI 실행
    - browser_auto → CDP로 자동 전송/수집
    - clipboard/manual → 클립보드 준비 + 사용자 안내
+   - 완전 자동으로 여러 턴을 밀고 싶으면 `deliberation_run_until_blocked`를 사용합니다. 이 도구는 `cli_respond`, `browser_auto`, `telepty_bus`를 연속 실행하고, 수동 transport 또는 self-turn에서 멈춥니다.
 3. **NEVER** — 오케스트레이터(자기 자신)가 다른 speaker를 대신하여 `deliberation_respond`에 응답을 작성하지 마세요. 이것은 "역할극"이며 실제 deliberation이 아닙니다. MCP 서버가 이를 감지하고 차단합니다.
 4. **NEVER** — `deliberation_respond`를 직접 호출하지 마세요 (자기 자신의 응답 제외). 다른 speaker의 턴은 반드시 `deliberation_route_turn` 또는 `deliberation_cli_auto_turn`/`deliberation_browser_auto_turn`을 통해 진행합니다.
 5. **MUST** — 자기 자신(오케스트레이터 역할의 claude)이 speaker인 경우에만 직접 `deliberation_respond`로 응답을 제출할 수 있습니다.
+6. **MUST** — 원격 머신/세션에서 들어온 응답을 semantic reply로 반영할 때는 raw bus event를 해석하지 말고 `deliberation_ingest_remote_reply`를 사용하세요. transport trace와 semantic ingest를 섞지 마세요.
 
 ## 워크플로우
 
@@ -94,7 +99,9 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
 5. **`deliberation_route_turn` 호출 (필수)** → 현재 차례 speaker transport 자동 결정 및 실행
    - CLI speaker → `deliberation_cli_auto_turn`이 실제 CLI를 실행하고 응답 수집
    - browser_auto → CDP로 자동 전송/수집
+   - telepty_bus → structured `turn_request` publish + remote self-submit 대기
    - 자기 자신(claude)이 speaker → 직접 `deliberation_respond`로 응답 제출
+   - 여러 턴을 한 번에 진행하려면 `deliberation_run_until_blocked(session_id)` 사용
 6. 반복 후 `deliberation_synthesize(session_id)` → 합성 완료
 7. 구현이 필요하면 `deliberation-executor` 스킬로 handoff
    예: "session_id {id} 합의안 구현해줘"
@@ -106,7 +113,71 @@ Claude/Codex를 포함해 MCP를 지원하는 임의 CLI들이 구조화된 토�
 4. 각 세션을 `session_id`로 명시해 독립 진행
 5. 각각 `deliberation_synthesize`로 개별 종료
 
-### C. 자동 진행 (스크립트)
+### C. 실험 회고 / keep-discard review
+autoresearch 스타일 실험 루프를 검토할 때는 긴 컨텍스트를 `topic`에 섞지 말고, 시작 후 `deliberation_inject_context`로 compact bundle을 넣습니다.
+
+권장 규칙:
+- inject payload는 `1.5KB ~ 2KB` 목표
+- 최근 `3~5`개 실험만 포함
+- `key_changes`는 최대 `3`개 scalar before/after만 유지
+- 전체 `results.tsv` / 전체 `program.md`는 넣지 말고 artifact path만 남김
+
+예:
+```text
+1. deliberation_start(topic: "experiment retrospective / keep-discard review", ...)
+2. deliberation_inject_context(
+     session_id: "<session_id>",
+     speaker: "dustcraw",
+     context: JSON.stringify({
+       past_experiments: [{
+         experiment_id: "dg-20260310-001",
+         signal_kind: "INTEREST_DRIFT",
+         patch_summary: "Raised relevanceThreshold from 0.30 to 0.35",
+         patch_kind: "config",
+         key_changes: {
+           relevanceThreshold: { before: 0.30, after: 0.35 }
+         },
+         score: 0.08,
+         score_label: "promotion_rate_delta",
+         metric_name: "promotion_rate_delta",
+         metric_delta: 0.08,
+         verdict: "positive",
+         followup_action: "kept",
+         reasoning: "Threshold raise reduced noise; promotion quality improved 8%"
+       }],
+       experiment_count: 1,
+       success_rate: 1.0
+     })
+   )
+3. deliberation_route_turn(...) 반복
+4. deliberation_synthesize(..., structured: {
+     summary: "...",
+     decisions: ["..."],
+     actionable_tasks: [...],
+     experiment_outcome: {
+       verdict: "modify",
+       suggested_action: "iterate",
+       confidence: 0.78,
+       measurement_window_hours: 24
+     }
+   })
+```
+
+원격 reply를 semantic turn으로 넣어야 할 때:
+
+```text
+deliberation_ingest_remote_reply(
+  session_id: "<session_id>",
+  speaker: "<speaker>",
+  turn_id: "<pending_turn_id>",
+  content: "<reply markdown>",
+  source_machine_id: "peer-01",
+  source_session_id: "remote-gemini-001",
+  transport_scope: "remote_mcp"
+)
+```
+
+### D. 자동 진행 (스크립트)
 ```bash
 # 새 토론
 bash auto-deliberate.sh "저장소 전략"
@@ -118,7 +189,7 @@ bash auto-deliberate.sh "API 설계" 5
 bash auto-deliberate.sh --resume <session_id>
 ```
 
-### D. 모니터링
+### E. 모니터링
 ```bash
 # 모든 활성 세션 모니터링
 bash deliberation-monitor.sh
@@ -130,14 +201,14 @@ bash deliberation-monitor.sh <session_id>
 bash deliberation-monitor.sh --tmux
 ```
 
-### E. 브라우저 LLM 자동 연결 (CDP Auto-Activation)
+### F. 브라우저 LLM 자동 연결 (CDP Auto-Activation)
 - 브라우저 LLM speaker가 선택되면 CDP(Chrome DevTools Protocol)가 자동으로 활성화됩니다.
 - macOS에서는 Chrome이 실행되지 않은 경우 `--remote-debugging-port=9222`로 자동 실행을 시도합니다.
 - **Chrome이 이미 CDP 없이 실행 중인 경우**: Chrome을 완전히 종료한 후 다시 시도해야 합니다. (최초 1회만 필요)
 - CDP 연결 성공 시 모든 브라우저 speaker는 ⚡자동 모드로 동작합니다.
 - Windows/Linux에서는 사용자가 직접 Chrome을 `--remote-debugging-port=9222`로 실행해야 합니다.
 
-### F. Chrome 확장 프로그램 사이드패널 지원
+### G. Chrome 확장 프로그램 사이드패널 지원
 - **Chrome 확장 프로그램 사이드패널 (chrome-extension:// URL)은 지원됩니다.**
 - Claude, ChatGPT, Gemini 등의 Chrome 확장 사이드패널도 CDP를 통해 deliberation 참가자로 사용 가능합니다.
 - 사이드패널은 title 기반 매칭으로 감지됩니다 (extension ID가 아닌 탭 제목으로 식별).
@@ -182,3 +253,36 @@ bash deliberation-monitor.sh --tmux
 
 - **deliberation-gate**: superpowers 워크플로우 통합 스킬. brainstorming/code-review/debugging 의사결정 지점에 멀티-AI 검증 게이트를 삽입합니다. `~/.claude/skills/deliberation-gate/SKILL.md`에 설치.
 - **deliberation-executor**: deliberation 합의안을 실제 코드 구현으로 전환하는 실행 전용 스킬.
+
+## Data Model: Canonical Roles
+
+Deliberation produces two complementary data artifacts after synthesis:
+
+| Artifact | Role | Consumers |
+|----------|------|-----------|
+| `structured_synthesis` | **Human + reasoning canonical** | Human reviewers, LLM context, decision history |
+| `execution_contract` | **Automation canonical** | inbox-watcher, devkit, registry, orchestrator agents |
+
+### structured_synthesis (Human Canonical)
+Rich context for human review. Contains:
+- `summary`: natural language overview
+- `decisions`: reasoning and rationale
+- `actionable_tasks`: full task descriptions with context
+- `experiment_outcome`: optional verdict (keep/discard/modify)
+
+### execution_contract (Automation Canonical)
+Minimal, deterministic task list for machines. Contains:
+- `version`: contract schema version (currently "v1")
+- `source_session_id`: originating deliberation session
+- `summary`: brief summary for log context
+- `tasks`: flattened actionable task list (same shape as `actionable_tasks`)
+- `generated_from.structured_synthesis_hash`: SHA-1 provenance hash
+
+**Rule**: Automation consumers MUST prefer `execution_contract` when present.
+Fall back to `structured_synthesis` only when `execution_contract` is `null`.
+
+### Archive Outputs
+When a deliberation completes:
+1. **Markdown archive**: `~/.local/lib/mcp-deliberation/state/{project}/archive/deliberation-{ts}-{slug}.md`
+2. **Contract sidecar**: `~/.local/lib/mcp-deliberation/state/{project}/archive/deliberation-{ts}-{slug}.contract.json`
+3. **Telepty envelope**: `deliberation_completed` event with both artifacts in payload

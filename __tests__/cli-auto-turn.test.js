@@ -90,4 +90,21 @@ describe('cli auto-turn helpers', () => {
     }, 'codex', null, 3);
     expect(prompt).toContain('Do not inspect files, run shell commands, browse, or call tools');
   });
+
+  it('injects an active reporting rule when an orchestrator session is present', () => {
+    const prompt = buildClipboardTurnPrompt({
+      id: 's1',
+      project: 'proj',
+      topic: 'Discuss architecture tradeoffs.',
+      current_round: 1,
+      max_rounds: 2,
+      current_speaker: 'gemini',
+      speaker_roles: {},
+      orchestrator_session_id: 'aigentry-orchestrator-001',
+      log: [],
+    }, 'gemini', null, 3);
+    expect(prompt).toContain('[active_reporting_rule]');
+    expect(prompt).toContain('aigentry-orchestrator-001');
+    expect(prompt).toContain('telepty inject --from "$TELEPTY_SESSION_ID"');
+  });
 });
