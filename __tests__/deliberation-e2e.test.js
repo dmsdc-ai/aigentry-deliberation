@@ -293,7 +293,7 @@ describe('deliberation e2e flows', () => {
 
     // Phase B: Verify contract sidecar contains machine-readable execution_contract
     const contract = JSON.parse(fs.readFileSync(contractFiles[0], 'utf-8'));
-    expect(contract.version).toBe('v2');
+    expect(contract.schema_version).toBe(2);
     expect(contract.source_session_id).toBe(sessionId);
     expect(contract.tasks).toHaveLength(1);
     expect(contract._meta.project).toBe(project);
@@ -312,7 +312,7 @@ describe('deliberation e2e flows', () => {
       measurement_window_hours: 24,
     });
     expect(envelope.payload.execution_contract).toMatchObject({
-      version: 'v2',
+      schema_version: 2,
       source_session_id: sessionId,
       summary: 'Retry with a narrower editable scope.',
       tasks: [

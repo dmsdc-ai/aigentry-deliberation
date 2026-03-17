@@ -86,7 +86,7 @@ describe('telepty bus envelopes', () => {
       confidence: 0.78,
     });
     expect(envelope.payload.execution_contract).toMatchObject({
-      version: 'v2',
+      schema_version: 2,
       source_session_id: 'delib-1',
       summary: 'done',
       tasks: [{ id: 1, task: 'ship it', priority: 'high' }],

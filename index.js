@@ -160,7 +160,7 @@ const StructuredSynthesisSchema = z.object({
 });
 
 const StructuredExecutionContractSchema = z.object({
-  version: z.enum(["v1", "v2"]),
+  schema_version: z.number().int().positive(),
   source_session_id: z.string().min(1),
   deliberation_id: z.string().min(1),
   summary: z.string(),
@@ -578,7 +578,7 @@ function hashStructuredSynthesis(structured) {
 function buildExecutionContract({ state, structured }) {
   if (!structured) return null;
   return {
-    version: "v2",
+    schema_version: 2,
     source_session_id: state.id,
     deliberation_id: state.id,
     summary: structured.summary || "",
@@ -940,23 +940,20 @@ async function ensureTeleptyBusSubscriber() {
 }
 
 async function callBrainIngest(executionContract) {
-  const endpoint = process.env.BRAIN_MCP_ENDPOINT;
-  if (!endpoint || !executionContract) return { ok: false, reason: "not_configured" };
-  let client;
+  if (!executionContract) return { ok: false, reason: "no_contract" };
   try {
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-    client = new Client({ name: "deliberation-handoff", version: "1.0.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(endpoint));
-    await client.connect(transport);
-    await client.callTool({ name: "brain_deliberation_ingest", arguments: executionContract });
-    appendRuntimeLog("INFO", `BRAIN_INGEST: delivered execution_contract ${executionContract.deliberation_id} to ${endpoint}`);
-    return { ok: true };
+    const inboxDir = path.join(os.homedir(), ".aigentry", "inbox");
+    if (!fs.existsSync(inboxDir)) {
+      fs.mkdirSync(inboxDir, { recursive: true });
+    }
+    const fileName = `handoff-${executionContract.deliberation_id}.json`;
+    const filePath = path.join(inboxDir, fileName);
+    fs.writeFileSync(filePath, JSON.stringify(executionContract, null, 2), "utf8");
+    appendRuntimeLog("INFO", `BRAIN_INGEST: wrote handoff file ${filePath}`);
+    return { ok: true, path: filePath };
   } catch (err) {
-    appendRuntimeLog("WARN", `BRAIN_INGEST: failed to deliver to ${endpoint}: ${err.message}`);
+    appendRuntimeLog("WARN", `BRAIN_INGEST: failed to write handoff file: ${err.message}`);
     return { ok: false, error: err.message };
-  } finally {
-    if (client) await client.close().catch(() => {});
   }
 }
 
