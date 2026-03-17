@@ -330,6 +330,81 @@ describe('deliberation e2e flows', () => {
     expect(envelope.payload.execution_contract.generated_from.structured_synthesis_hash).toHaveLength(40);
   });
 
+  it('writes brain inbox handoff file after deliberation_synthesize', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+
+    const project = `test-brain-inbox-${Date.now()}`;
+    const sessionId = `session-brain-inbox-${Date.now()}`;
+    const session = makeSession(project, sessionId, {
+      topic: 'Brain inbox handoff verification',
+      current_speaker: 'codex',
+      speakers: ['codex', 'claude'],
+      participant_profiles: [
+        { speaker: 'codex', type: 'cli' },
+        { speaker: 'claude', type: 'cli' },
+      ],
+    });
+    writeJson(getSessionFile(harness.homeDir, project, sessionId), session);
+
+    const structured = {
+      summary: 'Adopt narrower editable scope for next iteration.',
+      decisions: [
+        'Restrict editable globs to src/ only',
+        'Re-run baseline after scope change',
+      ],
+      actionable_tasks: [
+        { id: 1, task: 'Update editable glob config', project: 'aigentry-devkit', priority: 'high' },
+        { id: 2, task: 'Run regression suite', project: 'aigentry-devkit', priority: 'medium' },
+      ],
+      experiment_outcome: {
+        verdict: 'modify',
+        suggested_action: 'iterate',
+        confidence: 0.75,
+        measurement_window_hours: 12,
+      },
+    };
+
+    const synthResult = await harness.callTool('deliberation_synthesize', {
+      session_id: sessionId,
+      synthesis: '# Synthesis\n\nAdopt narrower editable scope for next iteration.',
+      structured,
+    });
+
+    expect(getText(synthResult)).toContain('Deliberation complete');
+
+    // Verify the brain inbox handoff file was written
+    const inboxDir = path.join(harness.homeDir, '.aigentry', 'inbox');
+    const handoffPath = path.join(inboxDir, `handoff-${sessionId}.json`);
+
+    // Allow a brief moment for the fire-and-forget callBrainIngest to complete
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    expect(fs.existsSync(handoffPath)).toBe(true);
+
+    const contract = readJson(handoffPath);
+
+    // Verify execution_contract v2 schema
+    expect(contract.schema_version).toBe(2);
+    expect(contract.deliberation_id).toBe(sessionId);
+    expect(contract.source_session_id).toBe(sessionId);
+    expect(contract.summary).toBe('Adopt narrower editable scope for next iteration.');
+    expect(contract.decisions).toEqual([
+      'Restrict editable globs to src/ only',
+      'Re-run baseline after scope change',
+    ]);
+    expect(contract.tasks).toHaveLength(2);
+    expect(contract.tasks[0]).toMatchObject({ id: 1, task: 'Update editable glob config', priority: 'high' });
+    expect(contract.tasks[1]).toMatchObject({ id: 2, task: 'Run regression suite', priority: 'medium' });
+    expect(contract.experiment_outcome).toMatchObject({
+      verdict: 'modify',
+      suggested_action: 'iterate',
+      confidence: 0.75,
+      measurement_window_hours: 12,
+    });
+    expect(contract.generated_from.structured_synthesis_hash).toHaveLength(40);
+  });
+
   it('supports explicit remote reply ingress with source metadata', async () => {
     const harness = await createHarness();
     harnesses.push(harness);
