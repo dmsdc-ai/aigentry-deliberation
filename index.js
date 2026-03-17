@@ -160,9 +160,11 @@ const StructuredSynthesisSchema = z.object({
 });
 
 const StructuredExecutionContractSchema = z.object({
-  version: z.literal("v1"),
+  version: z.enum(["v1", "v2"]),
   source_session_id: z.string().min(1),
+  deliberation_id: z.string().min(1),
   summary: z.string(),
+  decisions: z.array(z.string()),
   tasks: z.array(StructuredActionableTaskSchema),
   experiment_outcome: StructuredExperimentOutcomeSchema.nullable().optional(),
   unresolved_questions: z.array(z.string()),
@@ -576,9 +578,11 @@ function hashStructuredSynthesis(structured) {
 function buildExecutionContract({ state, structured }) {
   if (!structured) return null;
   return {
-    version: "v1",
+    version: "v2",
     source_session_id: state.id,
+    deliberation_id: state.id,
     summary: structured.summary || "",
+    decisions: structured.decisions || [],
     tasks: structured.actionable_tasks || [],
     experiment_outcome: structured.experiment_outcome || null,
     unresolved_questions: [],
@@ -933,6 +937,27 @@ async function ensureTeleptyBusSubscriber() {
     teleptyBusState.connectPromise = null;
   }
   return result;
+}
+
+async function callBrainIngest(executionContract) {
+  const endpoint = process.env.BRAIN_MCP_ENDPOINT;
+  if (!endpoint || !executionContract) return { ok: false, reason: "not_configured" };
+  let client;
+  try {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+    client = new Client({ name: "deliberation-handoff", version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(endpoint));
+    await client.connect(transport);
+    await client.callTool({ name: "brain_deliberation_ingest", arguments: executionContract });
+    appendRuntimeLog("INFO", `BRAIN_INGEST: delivered execution_contract ${executionContract.deliberation_id} to ${endpoint}`);
+    return { ok: true };
+  } catch (err) {
+    appendRuntimeLog("WARN", `BRAIN_INGEST: failed to deliver to ${endpoint}: ${err.message}`);
+    return { ok: false, error: err.message };
+  } finally {
+    if (client) await client.close().catch(() => {});
+  }
 }
 
 async function notifyTeleptyBus(event) {
@@ -5709,6 +5734,9 @@ server.tool(
     if (state.auto_execute) {
       notifyTeleptyBus(synthesisEnvelope).catch(() => {}); // fire-and-forget
     }
+
+    // Notify brain ingest if endpoint configured
+    callBrainIngest(state.execution_contract).catch(() => {}); // fire-and-forget
 
     return {
       content: [{
