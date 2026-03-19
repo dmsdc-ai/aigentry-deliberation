@@ -152,6 +152,32 @@ import {
   detectDegradationLevels,
   formatDegradationReport,
 } from "./lib/speaker-discovery.js";
+import {
+  initSessionDeps,
+  generateSessionId,
+  generateTurnId,
+  detectContextDirs,
+  readContextFromDirs,
+  getArchiveDir,
+  findSessionRecord,
+  ensureDirs,
+  loadSession,
+  saveSession,
+  listActiveSessions,
+  resolveSessionId,
+  syncMarkdown,
+  cleanupSyncMarkdown,
+  formatSourceMetadataLine,
+  stateToMarkdown,
+  archiveState,
+  multipleSessionsError,
+  truncatePromptText,
+  getPromptBudgetForSpeaker,
+  formatRecentLogForPrompt,
+  buildActiveReportingSection,
+  buildClipboardTurnPrompt,
+  submitDeliberationTurn,
+} from "./lib/session.js";
 import { readClipboardText, writeClipboardText, hasClipboardImage, captureClipboardImage } from "./clipboard.js";
 import {
   DECISION_STAGES, STAGE_TRANSITIONS,
@@ -293,45 +319,8 @@ function listStateProjects() {
   }
 }
 
-function findSessionRecord(sessionRef, { preferProject, activeOnly = false } = {}) {
-  if (!sessionRef) return null;
-
-  if (typeof sessionRef === "object" && sessionRef !== null && sessionRef.id) {
-    const project = getSessionProject(sessionRef, preferProject);
-    const file = getSessionFile(sessionRef.id, project);
-    const state = readJsonFileSafe(file);
-    if (!state) return null;
-    const normalized = normalizeSessionActors(state);
-    if (activeOnly && normalized.status !== "active" && normalized.status !== "awaiting_synthesis") {
-      return null;
-    }
-    return { file, project, state: normalized };
-  }
-
-  const sessionId = String(sessionRef);
-  const preferred = normalizeProjectSlug(preferProject);
-  const projects = [...new Set([preferred, ...listStateProjects()])];
-  for (const project of projects) {
-    const file = getSessionFile(sessionId, project);
-    const state = readJsonFileSafe(file);
-    if (!state) continue;
-    const normalized = normalizeSessionActors(state);
-    if (activeOnly && normalized.status !== "active" && normalized.status !== "awaiting_synthesis") {
-      continue;
-    }
-    return { file, project: normalized.project || project, state: normalized };
-  }
-  return null;
-}
-
-function getArchiveDir(projectSlug = getProjectSlug()) {
-  const slug = normalizeProjectSlug(projectSlug);
-  const obsidianDir = path.join(OBSIDIAN_PROJECTS, slug, "deliberations");
-  if (fs.existsSync(path.join(OBSIDIAN_PROJECTS, slug))) {
-    return obsidianDir;
-  }
-  return path.join(getProjectStateDir(slug), "archive");
-}
+// findSessionRecord — moved to lib/session.js
+// getArchiveDir — moved to lib/session.js
 
 function getLocksDir(projectSlug = getProjectSlug()) {
   return path.join(getProjectStateDir(projectSlug), LOCKS_SUBDIR);
@@ -495,256 +484,8 @@ function getBrowserPort() {
   }
   return _browserPort;
 }
-// ── Session ID generation ─────────────────────────────────────
-
-function generateSessionId(topic) {
-  const slug = topic
-    .replace(/[^a-zA-Z0-9가-힣\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .toLowerCase()
-    .slice(0, 20);
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).slice(2, 6);
-  return `${slug}-${ts}${rand}`;
-}
-
-function generateTurnId() {
-  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-// ── Context detection ──────────────────────────────────────────
-
-function detectContextDirs() {
-  const dirs = [];
-  const slug = getProjectSlug();
-
-  if (process.env.DELIBERATION_CONTEXT_DIR) {
-    dirs.push(process.env.DELIBERATION_CONTEXT_DIR);
-  }
-  dirs.push(process.cwd());
-
-  const obsidianProject = path.join(OBSIDIAN_PROJECTS, slug);
-  if (fs.existsSync(obsidianProject)) {
-    dirs.push(obsidianProject);
-  }
-
-  return [...new Set(dirs)];
-}
-
-function readContextFromDirs(dirs, maxChars = 15000) {
-  let context = "";
-  const seen = new Set();
-
-  for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-
-    const files = fs.readdirSync(dir)
-      .filter(f => f.endsWith(".md") && !f.startsWith("_") && !f.startsWith("."))
-      .sort();
-
-    for (const file of files) {
-      if (seen.has(file)) continue;
-      seen.add(file);
-
-      const fullPath = path.join(dir, file);
-      let raw;
-      try { raw = fs.readFileSync(fullPath, "utf-8"); } catch { continue; }
-
-      let body = raw;
-      if (body.startsWith("---")) {
-        const end = body.indexOf("---", 3);
-        if (end !== -1) body = body.slice(end + 3).trim();
-      }
-
-      const truncated = body.length > 1200
-        ? body.slice(0, 1200) + "\n(...)"
-        : body;
-
-      context += `### ${file.replace(".md", "")}\n${truncated}\n\n---\n\n`;
-
-      if (context.length > maxChars) {
-        context = context.slice(0, maxChars) + "\n\n(...context truncated)";
-        return context;
-      }
-    }
-  }
-  return context || "(No context files found)";
-}
-
-// ── State helpers ──────────────────────────────────────────────
-
-function ensureDirs(projectSlug = getProjectSlug()) {
-  fs.mkdirSync(getSessionsDir(projectSlug), { recursive: true });
-  fs.mkdirSync(getArchiveDir(projectSlug), { recursive: true });
-  fs.mkdirSync(getLocksDir(projectSlug), { recursive: true });
-}
-
-function loadSession(sessionRef) {
-  const record = findSessionRecord(sessionRef);
-  return record?.state || null;
-}
-
-function saveSession(state) {
-  ensureDirs(state.project);
-  state.updated = new Date().toISOString();
-  writeTextAtomic(getSessionFile(state), JSON.stringify(state, null, 2));
-  syncMarkdown(state);
-}
-
-function listActiveSessions(projectSlug) {
-  const projects = projectSlug
-    ? [normalizeProjectSlug(projectSlug)]
-    : [...new Set([getProjectSlug(), ...listStateProjects()])];
-
-  return projects.flatMap(project => {
-    const dir = getSessionsDir(project);
-    if (!fs.existsSync(dir)) return [];
-
-    return fs.readdirSync(dir)
-      .filter(f => f.endsWith(".json"))
-      .map(f => {
-        try {
-          const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
-          return normalizeSessionActors(data);
-        } catch {
-          return null;
-        }
-      })
-      .filter(s => s && (s.status === "active" || s.status === "awaiting_synthesis"));
-  });
-}
-
-function resolveSessionId(sessionId) {
-  // Use session_id directly if provided
-  if (sessionId) return sessionId;
-
-  // Auto-select when only one active session
-  const active = listActiveSessions();
-  if (active.length === 0) return null;
-  if (active.length === 1) return active[0].id;
-
-  // null if multiple (need to show list)
-  return "MULTIPLE";
-}
-
-function syncMarkdown(state) {
-  const filename = `deliberation-${state.id}.md`;
-  const mdPath = path.join(getProjectStateDir(state.project), filename);
-  try {
-    writeTextAtomic(mdPath, stateToMarkdown(state));
-  } catch { /* ignore sync failures */ }
-}
-
-function cleanupSyncMarkdown(state) {
-  const filename = `deliberation-${state.id}.md`;
-  const statePath = path.join(getProjectStateDir(state.project), filename);
-  try { fs.unlinkSync(statePath); } catch { /* ignore */ }
-  // Also clean up legacy files in CWD (from older versions)
-  const cwdPath = path.join(process.cwd(), filename);
-  try { fs.unlinkSync(cwdPath); } catch { /* ignore */ }
-}
-
-function formatSourceMetadataLine(meta) {
-  if (!meta || typeof meta !== "object") return "";
-  const parts = [];
-  if (meta.source_machine_id) parts.push(`machine: ${meta.source_machine_id}`);
-  if (meta.source_session_id) parts.push(`session: ${meta.source_session_id}`);
-  if (meta.transport_scope) parts.push(`transport: ${meta.transport_scope}`);
-  if (meta.reply_origin) parts.push(`origin: ${meta.reply_origin}`);
-  if (meta.timestamp) parts.push(`timestamp: ${meta.timestamp}`);
-  if (Array.isArray(meta.artifact_refs) && meta.artifact_refs.length > 0) {
-    parts.push(`artifacts: ${meta.artifact_refs.join(", ")}`);
-  }
-  return parts.length > 0 ? `> _source: ${parts.join(" | ")}_\n\n` : "";
-}
-
-function stateToMarkdown(s) {
-  const speakerOrder = buildSpeakerOrder(s.speakers, s.current_speaker, "end");
-  let md = `---
-title: "Deliberation - ${s.topic}"
-session_id: "${s.id}"
-created: ${s.created}
-updated: ${s.updated || new Date().toISOString()}
-type: deliberation
-status: ${s.status}
-project: "${s.project}"
-participants: ${JSON.stringify(speakerOrder)}
-rounds: ${s.max_rounds}
-current_round: ${s.current_round}
-current_speaker: "${s.current_speaker}"
-tags: [deliberation]
----
-
-# Deliberation: ${s.topic}
-
-**Session:** ${s.id} | **Project:** ${s.project} | **Status:** ${s.status} | **Round:** ${s.current_round}/${s.max_rounds} | **Next:** ${s.current_speaker}
-
----
-
-`;
-
-  if (s.synthesis) {
-    md += `## Synthesis\n\n${s.synthesis}\n\n---\n\n`;
-  }
-
-  if (s.structured_synthesis) {
-    md += `## Structured Synthesis\n\n\`\`\`json\n${JSON.stringify(s.structured_synthesis, null, 2)}\n\`\`\`\n\n---\n\n`;
-  }
-
-  if (s.execution_contract) {
-    md += `## Execution Contract\n\n\`\`\`json\n${JSON.stringify(s.execution_contract, null, 2)}\n\`\`\`\n\n---\n\n`;
-  }
-
-  md += `## Debate Log\n\n`;
-  for (const entry of s.log) {
-    md += `### ${entry.speaker} — Round ${entry.round}\n\n`;
-    if (entry.channel_used || entry.fallback_reason) {
-      const parts = [];
-      if (entry.channel_used) parts.push(`channel: ${entry.channel_used}`);
-      if (entry.fallback_reason) parts.push(`fallback: ${entry.fallback_reason}`);
-      md += `> _${parts.join(" | ")}_\n\n`;
-    }
-    md += formatSourceMetadataLine(entry.source_metadata);
-    md += `${entry.content}\n\n`;
-    if (entry.attachments && entry.attachments.length > 0) {
-      for (const att of entry.attachments) {
-        if (att.type === "image") {
-          md += `![Attachment](${att.path})\n\n`;
-        }
-      }
-    }
-    md += `---\n\n`;
-  }
-  return md;
-}
-
-function archiveState(state) {
-  ensureDirs(state.project);
-  const slug = state.topic
-    .replace(/[^a-zA-Z0-9가-힣\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .slice(0, 30);
-  const ts = new Date().toISOString().slice(0, 16).replace(/:/g, "");
-  const filename = `deliberation-${ts}-${slug}.md`;
-  const dest = path.join(getArchiveDir(state.project), filename);
-  writeTextAtomic(dest, stateToMarkdown(state));
-
-  // Write machine-readable execution_contract sidecar for automation consumers
-  if (state.execution_contract) {
-    const contractDest = dest.replace(/\.md$/, ".contract.json");
-    writeTextAtomic(contractDest, JSON.stringify({
-      ...state.execution_contract,
-      _meta: {
-        archived_from: state.id,
-        project: state.project,
-        topic: state.topic,
-        archived_at: new Date().toISOString(),
-      },
-    }, null, 2));
-  }
-
-  return dest;
-}
+// Session ID generation, context detection, state helpers, markdown sync,
+// archival — all moved to lib/session.js
 
 // ── Terminal management ────────────────────────────────────────
 
@@ -1248,73 +989,8 @@ function closeAllMonitorTerminals() {
   } catch { /* ignore */ }
 }
 
-function multipleSessionsError() {
-  const active = listActiveSessions();
-  const list = active.map(s => `- **${s.id}** [${s.project || "unknown"}]: "${s.topic}" (Round ${s.current_round}/${s.max_rounds}, next: ${s.current_speaker})`).join("\n");
-  return t(`Multiple active sessions found. Please specify session_id:\n\n${list}`, `여러 활성 세션이 있습니다. session_id를 지정하세요:\n\n${list}`, "en");
-}
-
-function truncatePromptText(text, maxChars) {
-  const value = String(text || "").trim();
-  if (!value || !Number.isFinite(maxChars) || maxChars <= 0 || value.length <= maxChars) {
-    return value;
-  }
-  const remaining = value.length - maxChars;
-  return `${value.slice(0, maxChars).trimEnd()}\n...(truncated ${remaining} chars)`;
-}
-
-function getPromptBudgetForSpeaker(speaker, includeHistoryEntries = 4) {
-  const defaultBudget = {
-    maxEntries: Math.max(0, includeHistoryEntries),
-    maxCharsPerEntry: 1600,
-    maxTotalChars: 6400,
-    maxTopicChars: 3200,
-  };
-  switch (speaker) {
-    case "codex":
-      return {
-        maxEntries: Math.min(Math.max(0, includeHistoryEntries), 3),
-        maxCharsPerEntry: 1200,
-        maxTotalChars: 3600,
-        maxTopicChars: 2200,
-      };
-    case "gemini":
-      return {
-        maxEntries: Math.min(Math.max(0, includeHistoryEntries), 4),
-        maxCharsPerEntry: 1400,
-        maxTotalChars: 5600,
-        maxTopicChars: 2800,
-      };
-    default:
-      return defaultBudget;
-  }
-}
-
-function formatRecentLogForPrompt(state, maxEntries = 4, options = {}) {
-  const entries = Array.isArray(state.log) ? state.log.slice(-Math.max(0, maxEntries)) : [];
-  if (entries.length === 0) {
-    return "(No previous responses yet)";
-  }
-  const maxCharsPerEntry = options.maxCharsPerEntry || 1600;
-  const maxTotalChars = options.maxTotalChars || maxCharsPerEntry * entries.length;
-  const rendered = [];
-  let usedChars = 0;
-
-  for (const entry of entries) {
-    const header = `- ${entry.speaker} (Round ${entry.round})`;
-    const remainingChars = Math.max(0, maxTotalChars - usedChars - header.length - 1);
-    const entryBudget = Math.max(200, Math.min(maxCharsPerEntry, remainingChars || maxCharsPerEntry));
-    const content = truncatePromptText(entry.content, entryBudget);
-    const block = `${header}\n${content}`;
-    rendered.push(block);
-    usedChars += block.length + 2;
-    if (usedChars >= maxTotalChars) {
-      break;
-    }
-  }
-
-  return rendered.join("\n\n");
-}
+// multipleSessionsError, truncatePromptText, getPromptBudgetForSpeaker,
+// formatRecentLogForPrompt — moved to lib/session.js
 
 function getCliAutoTurnTimeoutSec({ speaker, requestedTimeoutSec, promptLength, priorTurns }) {
   const requested = Number.isFinite(requestedTimeoutSec) ? requestedTimeoutSec : 120;
@@ -1388,201 +1064,8 @@ function buildCliAutoTurnFailureText({ state, speaker, hint, err, effectiveTimeo
   );
 }
 
-function buildActiveReportingSection(state, speaker) {
-  const orchestratorSessionId = state?.orchestrator_session_id;
-  if (!orchestratorSessionId) return "";
-
-  return `\n[active_reporting_rule]
-- After you successfully submit this turn with \`deliberation_respond(...)\`, send a brief status update to the orchestrator session.
-- Primary method (telepty available):
-\`telepty inject --from \"$TELEPTY_SESSION_ID\" --reply-to ${orchestratorSessionId} ${orchestratorSessionId} \"[deliberation status] session_id: ${state.id} speaker: ${speaker} round: ${state.current_round}/${state.max_rounds} submitted. no further reply needed.\"\`
-- Fallback (telepty unavailable): Include the status in your next tool call or response context.
-- Keep it to one short line. Do not wait for a reply.
-- This rule applies regardless of transport type (CLI, browser, telepty_bus).
-[/active_reporting_rule]
-`;
-}
-
-function buildClipboardTurnPrompt(state, speaker, prompt, includeHistoryEntries = 4) {
-  const promptBudget = getPromptBudgetForSpeaker(speaker, includeHistoryEntries);
-  const recent = formatRecentLogForPrompt(state, promptBudget.maxEntries, promptBudget);
-  const extraPrompt = prompt ? `\n[Additional instructions]\n${prompt}\n` : "";
-  const topic = truncatePromptText(state.topic, promptBudget.maxTopicChars);
-  const noToolRule = speaker === "codex"
-    ? `\n- Do not inspect files, run shell commands, browse, or call tools. Answer only from the provided discussion context.`
-    : "";
-  const activeReportingSection = buildActiveReportingSection(state, speaker);
-
-  // Role prompt injection
-  const speakerRole = (state.speaker_roles || {})[speaker] || "free";
-  const rolePromptText = loadRolePrompt(speakerRole);
-  const roleSection = rolePromptText
-    ? `\n[role]\nrole: ${speakerRole}\n${rolePromptText}\n[/role]\n`
-    : "";
-
-  return `[deliberation_turn_request]
-session_id: ${state.id}
-project: ${state.project}
-topic: ${topic}
-round: ${state.current_round}/${state.max_rounds}
-target_speaker: ${speaker}
-required_turn: ${state.current_speaker}${roleSection}${activeReportingSection}
-
-[recent_log]
-${recent}
-[/recent_log]${extraPrompt}
-
-[response_rule]
-- Write only ${speaker}'s response for this turn reflecting the discussion context above
-- Output markdown body only (no unnecessary headers/footers)${speakerRole !== "free" ? `\n- Analyze and respond from the perspective of assigned role (${speakerRole})` : ""}
-- Keep the response concise and decision-oriented${noToolRule}
-- Must include one of [AGREE], [DISAGREE], or [CONDITIONAL: reason] at the end of response
-[/response_rule]
-[/deliberation_turn_request]
-`;
-}
-
-function submitDeliberationTurn({ session_id, speaker, content, turn_id, channel_used, fallback_reason, attachments, source_metadata }) {
-  const resolved = resolveSessionId(session_id);
-  if (!resolved) {
-    return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
-  }
-  if (resolved === "MULTIPLE") {
-    return { content: [{ type: "text", text: multipleSessionsError() }] };
-  }
-
-  let completionState = null;
-  let completionEntry = null;
-  const result = withSessionLock(resolved, () => {
-    const state = loadSession(resolved);
-    if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
-    }
-
-    const normalizedSpeaker = normalizeSpeaker(speaker);
-    if (!normalizedSpeaker) {
-      return { content: [{ type: "text", text: t("Speaker value is empty. Please specify a speaker name.", "speaker 값이 비어 있습니다. 응답자 이름을 지정하세요.", "en") }] };
-    }
-
-    state.speakers = buildSpeakerOrder(state.speakers, state.current_speaker, "end");
-    const normalizedCurrentSpeaker = normalizeSpeaker(state.current_speaker);
-    if (!normalizedCurrentSpeaker || !state.speakers.includes(normalizedCurrentSpeaker)) {
-      state.current_speaker = state.speakers[0];
-    } else {
-      state.current_speaker = normalizedCurrentSpeaker;
-    }
-
-    if (state.current_speaker !== normalizedSpeaker) {
-      return {
-        content: [{
-          type: "text",
-          text: t(`[${state.id}] It is currently **${state.current_speaker}**'s turn. ${normalizedSpeaker} please wait.`, `[${state.id}] 지금은 **${state.current_speaker}** 차례입니다. ${normalizedSpeaker}는 대기하세요.`, state?.lang),
-        }],
-      };
-    }
-
-    // turn_id validation (optional — must match if provided)
-    if (turn_id && state.pending_turn_id && turn_id !== state.pending_turn_id) {
-      return {
-        content: [{
-          type: "text",
-          text: t(`[${state.id}] turn_id mismatch. Expected: "${state.pending_turn_id}", received: "${turn_id}". May be a stale request or duplicate submission.`, `[${state.id}] turn_id 불일치. 예상: "${state.pending_turn_id}", 수신: "${turn_id}". 오래된 요청이거나 중복 제출일 수 있습니다.`, state?.lang),
-        }],
-      };
-    }
-
-    const votes = parseVotes(content);
-    if (votes.length === 0) {
-      appendRuntimeLog("WARN", `INVALID_TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | reason: no_vote_marker`);
-    }
-    const suggestedRole = inferSuggestedRole(content);
-    const assignedRole = (state.speaker_roles || {})[normalizedSpeaker] || "free";
-    const roleDrift = assignedRole !== "free" && suggestedRole !== "free" && assignedRole !== suggestedRole;
-    const logEntry = {
-      round: state.current_round,
-      speaker: normalizedSpeaker,
-      content,
-      timestamp: new Date().toISOString(),
-      turn_id: state.pending_turn_id || null,
-      channel_used: channel_used || null,
-      fallback_reason: fallback_reason || null,
-      votes: votes.length > 0 ? votes : undefined,
-      suggested_next_role: suggestedRole !== "free" ? suggestedRole : undefined,
-      role_drift: roleDrift || undefined,
-      attachments: attachments || undefined,
-      source_metadata: source_metadata || undefined,
-    };
-    state.log.push(logEntry);
-    completePendingTeleptySemantic({
-      sessionId: state.id,
-      speaker: normalizedSpeaker,
-      turnId: state.pending_turn_id || turn_id || null,
-    });
-    appendRuntimeLog("INFO", `TURN: ${state.id} | R${state.current_round} | speaker: ${normalizedSpeaker} | votes: ${votes.length > 0 ? votes.map(v => v.vote).join(",") : "none"} | channel: ${channel_used || "respond"} | attachments: ${attachments ? attachments.length : 0}${source_metadata?.source_machine_id ? ` | source_machine: ${source_metadata.source_machine_id}` : ""}`);
-
-    state.current_speaker = selectNextSpeaker(state);
-
-    // Round transition: check if all speakers have spoken this round
-    const roundEntries = state.log.filter(e => e.round === state.current_round);
-    const spokeSpeakers = new Set(roundEntries.map(e => e.speaker));
-    const allSpoke = state.speakers.every(s => spokeSpeakers.has(s));
-
-    if (allSpoke) {
-      if (state.current_round >= state.max_rounds) {
-        state.status = "awaiting_synthesis";
-        state.current_speaker = "none";
-        saveSession(state);
-        return {
-          content: [{
-            type: "text",
-            text: t(`✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} complete. Forum updated (${state.log.length} responses accumulated).\n\n🏁 **All rounds complete!**\nCreate a synthesis report with deliberation_synthesize(session_id: "${state.id}").`, `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n🏁 **모든 라운드 종료!**\ndeliberation_synthesize(session_id: "${state.id}")로 합성 보고서를 작성하세요.`, state?.lang),
-          }],
-        };
-      }
-      state.current_round += 1;
-    }
-
-    if (state.status === "active") {
-      state.pending_turn_id = generateTurnId();
-    }
-
-    if (!state.orchestrator_session_id) {
-      state.orchestrator_session_id = getDefaultOrchestratorSessionId() || null;
-    }
-    completionEntry = {
-      ...logEntry,
-      turn_id: logEntry.turn_id || turn_id || null,
-    };
-    completionState = {
-      ...state,
-      log: [...state.log],
-    };
-    saveSession(state);
-    return {
-      content: [{
-        type: "text",
-        text: t(`✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} complete. Forum updated (${state.log.length} responses accumulated).\n\n**Next:** ${state.current_speaker} (Round ${state.current_round})`, `✅ [${state.id}] ${normalizedSpeaker} Round ${state.log[state.log.length - 1].round} 완료. Forum 업데이트됨 (${state.log.length}건 응답 축적).\n\n**다음:** ${state.current_speaker} (Round ${state.current_round})`, state?.lang),
-      }],
-    };
-  });
-
-  if (completionState && completionEntry) {
-    const envelope = buildTeleptyTurnCompletedEnvelope({ state: completionState, entry: completionEntry });
-    notifyTeleptyBus(envelope).catch(() => {});
-
-    const orchestratorSessionId = completionState.orchestrator_session_id || null;
-    if (orchestratorSessionId) {
-      const notificationText = buildTurnCompletionNotificationText(completionState, completionEntry);
-      notifyTeleptySessionInject({
-        targetSessionId: orchestratorSessionId,
-        prompt: notificationText,
-        fromSessionId: `deliberation:${completionState.id}`,
-      }).catch(() => {});
-    }
-  }
-
-  return result;
-}
+// buildActiveReportingSection, buildClipboardTurnPrompt,
+// submitDeliberationTurn — moved to lib/session.js
 
 // ── MCP Server ─────────────────────────────────────────────────
 
@@ -1628,6 +1111,25 @@ initTeleptyDeps({
   resolveTransportForSpeaker,
   generateTurnId,
   buildClipboardTurnPrompt,
+});
+
+// ── Initialize session module dependencies ──
+initSessionDeps({
+  appendRuntimeLog,
+  writeTextAtomic,
+  readJsonFileSafe,
+  writeJsonFileAtomic,
+  withSessionLock,
+  getProjectSlug,
+  normalizeProjectSlug,
+  getProjectStateDir,
+  getSessionsDir,
+  getSessionFile,
+  getSessionProject,
+  listStateProjects,
+  getLocksDir,
+  GLOBAL_STATE_DIR,
+  OBSIDIAN_PROJECTS,
 });
 
 const server = new McpServer({
