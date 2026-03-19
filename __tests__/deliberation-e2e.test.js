@@ -82,6 +82,7 @@ async function createHarness() {
     env: {
       ...process.env,
       HOME: homeDir,
+      AIGENTRY_TIER: 'pro',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
