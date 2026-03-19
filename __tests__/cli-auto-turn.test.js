@@ -67,12 +67,24 @@ describe('cli auto-turn helpers', () => {
   });
 
   it('forces codex exec into a lower-friction profile', () => {
-    expect(getCliExecArgs('codex')).toEqual([
+    expect(getCliExecArgs('codex', null)).toEqual([
       'exec',
       '--ephemeral',
       '-c', 'approval_policy="never"',
       '-c', 'sandbox_mode="read-only"',
       '-c', 'model_reasoning_effort="low"',
+      '-',
+    ]);
+  });
+
+  it('passes model flag to codex when model is provided', () => {
+    expect(getCliExecArgs('codex', 'gpt-4.5')).toEqual([
+      'exec',
+      '--ephemeral',
+      '-c', 'approval_policy="never"',
+      '-c', 'sandbox_mode="read-only"',
+      '-c', 'model_reasoning_effort="low"',
+      '-m', 'gpt-4.5',
       '-',
     ]);
   });
