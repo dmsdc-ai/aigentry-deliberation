@@ -1,7 +1,7 @@
 {
   "name": "@dmsdc-ai/aigentry-deliberation",
-  "version": "0.0.39",
-  "description": "MCP Deliberation Server — Multi-session AI deliberation with smart speaker ordering and persona roles",
+  "version": "0.0.40",
+  "description": "MCP server for structured multi-AI discussions — deliberate across Claude, GPT, Gemini and more before committing to decisions",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -43,6 +43,8 @@
     "selectors/**",
     "skills/**",
     "public/**",
+    "lib/**",
+    "examples/**",
     "LICENSE",
     "README.md"
   ],
@@ -66,10 +68,14 @@
     "ai",
     "multi-agent",
     "debate",
+    "discussion",
+    "consensus",
     "claude",
     "chatgpt",
     "gemini",
-    "codex"
+    "codex",
+    "model-context-protocol",
+    "structured-output"
   ],
   "devDependencies": {
     "vitest": "^4.0.18"

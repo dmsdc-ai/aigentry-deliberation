@@ -154,6 +154,8 @@ import {
 } from "./lib/speaker-discovery.js";
 import {
   initSessionDeps,
+  DEFAULT_SESSION_TTL_MS,
+  isSessionExpired,
   generateSessionId,
   generateTurnId,
   detectContextDirs,
@@ -311,6 +313,7 @@ function loadDeliberationConfig() {
 
 function saveDeliberationConfig(config) {
   const configPath = path.join(INSTALL_DIR, "config.json");
+  fs.mkdirSync(INSTALL_DIR, { recursive: true });
   config.updated = new Date().toISOString();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
@@ -351,6 +354,34 @@ function getSessionFile(sessionRef, projectSlug) {
     ? sessionRef.id
     : sessionRef;
   return path.join(getSessionsDir(getSessionProject(sessionRef, projectSlug)), `${sessionId}.json`);
+}
+
+function getExecutionStatusFile(sessionId, projectSlug) {
+  return path.join(getProjectStateDir(projectSlug || getProjectSlug()), `exec-status-${sessionId}.json`);
+}
+
+function loadExecutionStatus(sessionId, projectSlug) {
+  // Search across all projects if projectSlug not given
+  const projects = projectSlug
+    ? [normalizeProjectSlug(projectSlug)]
+    : [getProjectSlug(), ...listStateProjects()];
+  for (const p of [...new Set(projects)]) {
+    const file = getExecutionStatusFile(sessionId, p);
+    try {
+      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
+      if (data && data.session_id === sessionId) return data;
+    } catch { /* not found */ }
+  }
+  return null;
+}
+
+function saveExecutionStatus(sessionId, projectSlug, patch) {
+  const file = getExecutionStatusFile(sessionId, normalizeProjectSlug(projectSlug || getProjectSlug()));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const existing = (() => { try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return {}; } })();
+  const updated = { ...existing, ...patch, session_id: sessionId, updated_at: new Date().toISOString() };
+  fs.writeFileSync(file, JSON.stringify(updated, null, 2));
+  return updated;
 }
 
 function listStateProjects() {
@@ -542,7 +573,21 @@ function withSessionLock(sessionRef, fn, options) {
 
 // ── MCP Server ─────────────────────────────────────────────────
 
+// Gracefully handle EPIPE on stdout/stderr (MCP client disconnect)
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err) => {
+    if (err?.code === "EPIPE" || err?.code === "ERR_STREAM_DESTROYED") {
+      process.exit(0);
+    }
+  });
+}
+
 process.on("uncaughtException", (error) => {
+  // EPIPE = MCP client disconnected (normal shutdown). Exit cleanly.
+  if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") {
+    try { appendRuntimeLog("INFO", "Client disconnected (EPIPE). Shutting down."); } catch { /* noop */ }
+    process.exit(0);
+  }
   const message = formatRuntimeError(error);
   appendRuntimeLog("UNCAUGHT_EXCEPTION", message);
   try {
@@ -553,6 +598,11 @@ process.on("uncaughtException", (error) => {
 });
 
 process.on("unhandledRejection", (reason) => {
+  // EPIPE = MCP client disconnected (normal shutdown). Exit cleanly.
+  if (reason?.code === "EPIPE" || reason?.code === "ERR_STREAM_DESTROYED") {
+    try { appendRuntimeLog("INFO", "Client disconnected (EPIPE). Shutting down."); } catch { /* noop */ }
+    process.exit(0);
+  }
   const message = formatRuntimeError(reason);
   appendRuntimeLog("UNHANDLED_REJECTION", message);
   try {
@@ -670,11 +720,17 @@ server.tool(
       (v) => (typeof v === "string" ? v === "true" : v),
       z.boolean().optional()
     ).describe("If true, automatically create a handoff task in the inbox when synthesis completes. Enables the Autonomous Deliberation Handoff pattern."),
+    auto_synthesize: z.preprocess(
+      (v) => (typeof v === "string" ? v === "true" : v),
+      z.boolean().optional()
+    ).describe("If true, automatically generate synthesis when all rounds complete. Lighter than auto_execute (no handoff)."),
     mode: z.enum(["standard", "lite"]).default("standard").describe("Deliberation mode. 'lite' caps speakers to 3 and rounds to 2 for quick decisions."),
+    session_ttl_ms: z.number().int().min(60000).max(86400000).optional()
+      .describe("Session TTL in milliseconds. Sessions expire after this duration. Default: 7200000 (2 hours). Max: 86400000 (24 hours)."),
     orchestrator_session_id: z.string().trim().min(1).max(128).optional()
       .describe("Optional telepty session ID to notify on turn completion. Defaults to TELEPTY_SESSION_ID when available."),
   },
-  safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, selection_token, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset, auto_execute, mode, orchestrator_session_id }) => {
+  safeToolHandler("deliberation_start", async ({ topic, session_id, rounds, first_speaker, selection_token, speakers, speaker_instructions, require_manual_speakers, auto_discover_speakers, include_browser_speakers, participant_types, ordering_strategy, speaker_roles, role_preset, auto_execute, auto_synthesize, mode, session_ttl_ms, orchestrator_session_id }) => {
     // ── First-time onboarding guard ──
     const config = loadDeliberationConfig();
     if (!config.setup_complete) {
@@ -864,7 +920,9 @@ server.tool(
       speaker_roles: speaker_roles || (role_preset ? applyRolePreset(role_preset, speakerOrder) : {}),
       degradation: degradationLevels,
       auto_execute: auto_execute || false,
+      auto_synthesize: auto_synthesize || auto_execute || false,
       mode: mode || "standard",
+      session_ttl_ms: session_ttl_ms || DEFAULT_SESSION_TTL_MS,
       orchestrator_session_id: orchestrator_session_id || getDefaultOrchestratorSessionId() || null,
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
@@ -935,7 +993,9 @@ server.tool(
     appendRuntimeLog("INFO", `SESSION_CREATED: ${sessionId} | topic: ${topic.slice(0, 60)} | speakers: ${speakerOrder.join(",")} | rounds: ${rounds}`);
 
     // Auto-handoff: kick off background orchestration
-    if (auto_execute) {
+    // auto_execute = full handoff (turns + synthesis + bus notification)
+    // auto_synthesize = lighter (turns + synthesis only, no bus notification)
+    if (auto_execute || auto_synthesize) {
       // Fire-and-forget — runs in background
       runAutoHandoff(sessionId).catch(err => {
         appendRuntimeLog("ERROR", `AUTO_HANDOFF_SPAWN_ERROR: ${sessionId} | ${err.message}`);
@@ -1054,10 +1114,27 @@ server.tool(
       return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
     }
 
+    if (isSessionExpired(state)) {
+      state.status = "expired";
+      state.current_speaker = "none";
+      state.expired_reason = "ttl_exceeded";
+      saveSession(state);
+      return {
+        content: [{
+          type: "text",
+          text: `⏰ Session "${resolved}" has expired (TTL exceeded).\nTopic: ${state.topic}\nCreated: ${state.created}\n\nUse \`deliberation_reset(session_id: "${resolved}")\` to clean up, or start a new deliberation.`,
+        }],
+      };
+    }
+
+    const execStatus = loadExecutionStatus(state.id, state.project);
+    const execLine = execStatus
+      ? `\n**Execution status:** ${execStatus.execution_status}${execStatus.tasks_total > 0 ? ` (${execStatus.tasks_done}/${execStatus.tasks_total} tasks)` : ""}${execStatus.note ? ` — ${execStatus.note}` : ""}`
+      : "";
     return {
       content: [{
         type: "text",
-        text: `📋 **Forum Status** — ${state.id}\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Status:** ${state.status === "active" ? "active" : state.status === "awaiting_synthesis" ? "awaiting synthesis" : state.status === "completed" ? "completed" : state.status} (Round ${state.current_round}/${state.max_rounds})\n**Participants:** ${state.speakers.join(", ")}\n**Current turn:** ${state.current_speaker}\n**Accumulated responses:** ${state.log.length}${state.degradation ? `\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}` : ""}`,
+        text: `📋 **Forum Status** — ${state.id}\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Status:** ${state.status === "active" ? "active" : state.status === "awaiting_synthesis" ? "awaiting synthesis" : state.status === "completed" ? "completed" : state.status} (Round ${state.current_round}/${state.max_rounds})${execLine}\n**Participants:** ${state.speakers.join(", ")}\n**Current turn:** ${state.current_speaker}\n**Accumulated responses:** ${state.log.length}${state.degradation ? `\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}` : ""}`,
       }],
     };
   }
@@ -2020,6 +2097,14 @@ server.tool(
       saveSession(loaded);
       archivePath = archiveState(loaded);
       cleanupSyncMarkdown(loaded);
+      // Write execution_status sidecar (persists after session file is deleted)
+      saveExecutionStatus(loaded.id, loaded.project, {
+        execution_status: loaded.auto_execute ? "executing" : "pending",
+        tasks_total: loaded.execution_contract?.tasks?.length ?? 0,
+        tasks_done: 0,
+        project: loaded.project,
+        topic: loaded.topic,
+      });
 
       // Clean up the active session JSON file upon completion
       const sessionFile = getSessionFile(loaded);
@@ -2050,10 +2135,70 @@ server.tool(
     // Notify brain ingest if endpoint configured
     callBrainIngest(state.execution_contract).catch(() => {}); // fire-and-forget
 
+    // Emit lesson_learned events for orchestrator lessons.json auto-population
+    if (state.execution_contract?.decisions?.length > 0) {
+      const lessonEvent = {
+        type: "lesson_learned",
+        session_id: state.id,
+        timestamp: new Date().toISOString(),
+        project: state.project || getProjectSlug(),
+        category: "decision",
+        lesson: state.execution_contract.summary || state.synthesis?.slice(0, 200) || "",
+        decisions: state.execution_contract.decisions,
+      };
+      notifyTeleptyBus(lessonEvent).catch(() => {}); // fire-and-forget
+      appendRuntimeLog("INFO", `LESSON_LEARNED: ${state.id} | decisions: ${state.execution_contract.decisions.length} | project: ${lessonEvent.project}`);
+    }
+
     return {
       content: [{
         type: "text",
         text: `✅ [${state.id}] Deliberation complete! Forum finalized.\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Rounds:** ${state.max_rounds}\n**Responses:** ${state.log.length}\n\n📁 Final forum: ${archivePath}\n🖥️ Monitor terminal force-closed.`,
+      }],
+    };
+  })
+);
+
+server.tool(
+  "deliberation_set_execution_status",
+  "Update the execution status of a completed deliberation's handoff. Used by executor agents to report implementation progress.",
+  {
+    session_id: z.string().min(1).describe("Session ID of the completed deliberation"),
+    status: z.enum(["pending", "executing", "implemented", "failed"]).describe("New execution status"),
+    tasks_done: z.number().int().min(0).optional().describe("Number of tasks completed so far"),
+    tasks_total: z.number().int().min(0).optional().describe("Total number of tasks (if known)"),
+    note: z.string().max(200).optional().describe("Short progress note (max 200 chars)"),
+    project: z.string().optional().describe("Project slug (auto-detected if omitted)"),
+  },
+  safeToolHandler("deliberation_set_execution_status", async ({ session_id, status, tasks_done, tasks_total, note, project }) => {
+    const patch = { execution_status: status };
+    if (tasks_done !== undefined) patch.tasks_done = tasks_done;
+    if (tasks_total !== undefined) patch.tasks_total = tasks_total;
+    if (note !== undefined) patch.note = note;
+
+    const saved = saveExecutionStatus(session_id, project, patch);
+
+    // Notify telepty bus so other MCP processes can react
+    const statusEvent = {
+      kind: "execution_status_update",
+      session_id,
+      project: project || getProjectSlug(),
+      execution_status: status,
+      tasks_done: saved.tasks_done ?? 0,
+      tasks_total: saved.tasks_total ?? 0,
+      note: note || null,
+      timestamp: new Date().toISOString(),
+    };
+    notifyTeleptyBus(statusEvent).catch(() => {});
+    appendRuntimeLog("INFO", `EXECUTION_STATUS: ${session_id} | status: ${status} | tasks: ${saved.tasks_done ?? 0}/${saved.tasks_total ?? 0}`);
+
+    const taskLine = (saved.tasks_total ?? 0) > 0
+      ? ` (${saved.tasks_done ?? 0}/${saved.tasks_total} tasks)`
+      : "";
+    return {
+      content: [{
+        type: "text",
+        text: `✅ Execution status updated\n\n**Session:** ${session_id}\n**Status:** ${status}${taskLine}${note ? `\n**Note:** ${note}` : ""}`,
       }],
     };
   })
@@ -2793,6 +2938,21 @@ server.tool(
       actionPlan = state.actionPlan;
 
       appendRuntimeLog("INFO", `DECISION_COMPLETE: ${resolved} | conflicts_resolved: ${responses.length} | decision: ${(actionPlan?.decision || "").slice(0, 60)}`);
+
+      // Emit lesson_learned for decision outcomes
+      if (actionPlan?.decision) {
+        const lessonEvent = {
+          type: "lesson_learned",
+          session_id: resolved,
+          timestamp: new Date().toISOString(),
+          project: state.project || getProjectSlug(),
+          category: "decision",
+          lesson: actionPlan.decision,
+          decisions: actionPlan.decision ? [actionPlan.decision] : [],
+        };
+        notifyTeleptyBus(lessonEvent).catch(() => {}); // fire-and-forget
+        appendRuntimeLog("INFO", `LESSON_LEARNED: ${resolved} | decision: ${actionPlan.decision.slice(0, 60)}`);
+      }
     });
 
     if (synthesisText.startsWith("❌")) {

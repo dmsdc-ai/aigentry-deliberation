@@ -55,7 +55,7 @@ const FILES_TO_COPY = [
   "package-lock.json",
 ];
 
-const DIRS_TO_COPY = ["selectors", "public", "skills"];
+const DIRS_TO_COPY = ["selectors", "public", "skills", "lib"];
 
 function log(msg) {
   console.log(`  ${msg}`);
