@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aigentry-deliberation",
-  "version": "0.0.41",
+  "version": "0.0.43",
   "description": "MCP server for structured multi-AI discussions — deliberate across Claude, GPT, Gemini and more before committing to decisions",
   "type": "module",
   "license": "MIT",
