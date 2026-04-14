@@ -62,6 +62,54 @@ const LOG_LOCATIONS = [
   path.join(HOME, ".local", "lib", "mcp-deliberation", "runtime.log"),
 ];
 
+// Runtime log size-check thresholds (env-configurable).
+// Doctor DIAGNOSES only — it never mutates log files.
+const LOG_SIZE_WARN_MB = Number(process.env.DELIBERATION_LOG_SIZE_WARN_MB) > 0
+  ? Number(process.env.DELIBERATION_LOG_SIZE_WARN_MB)
+  : 50;
+const LOG_SIZE_ERROR_MB = Number(process.env.DELIBERATION_LOG_SIZE_ERROR_MB) > 0
+  ? Number(process.env.DELIBERATION_LOG_SIZE_ERROR_MB)
+  : 500;
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "? B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/**
+ * Inspect ~/.local/lib/mcp-deliberation/ for runtime.log* files and report on
+ * total footprint. Returns { level, totalBytes, topFiles } without mutating
+ * anything (doctor is diagnostic-only).
+ */
+function checkRuntimeLogFootprint(installDir) {
+  const result = { level: "ok", totalBytes: 0, topFiles: [], dir: installDir };
+  try {
+    if (!fs.existsSync(installDir)) return result;
+    const entries = [];
+    for (const name of fs.readdirSync(installDir)) {
+      if (!/^runtime\.log(\.|$)/.test(name)) continue;
+      const p = path.join(installDir, name);
+      try {
+        const st = fs.statSync(p);
+        if (!st.isFile()) continue;
+        entries.push({ path: p, size: st.size });
+        result.totalBytes += st.size;
+      } catch { /* skip */ }
+    }
+    entries.sort((a, b) => b.size - a.size);
+    result.topFiles = entries.slice(0, 3);
+    if (result.totalBytes >= LOG_SIZE_ERROR_MB * 1024 * 1024) {
+      result.level = "error";
+    } else if (result.totalBytes >= LOG_SIZE_WARN_MB * 1024 * 1024) {
+      result.level = "warn";
+    }
+  } catch { /* ignore */ }
+  return result;
+}
+
 // ── TOML parser (minimal, mcp_servers only) ────────────────────
 
 function parseMcpServersFromToml(content) {
@@ -380,6 +428,34 @@ function runDiagnostics() {
         "mcp-deliberation"
       )
     : path.join(HOME, ".local", "lib", "mcp-deliberation");
+
+  // Runtime log footprint check — diagnose only, never mutate.
+  const logCheck = checkRuntimeLogFootprint(installDir);
+  if (logCheck.totalBytes > 0) {
+    const sizeStr = formatBytes(logCheck.totalBytes);
+    if (logCheck.level === "error") {
+      totalIssues++;
+      console.log(`   ❌ runtime.log footprint: ${sizeStr} (>= ${LOG_SIZE_ERROR_MB} MB ERROR threshold)`);
+    } else if (logCheck.level === "warn") {
+      totalIssues++;
+      console.log(`   ⚠️  runtime.log footprint: ${sizeStr} (>= ${LOG_SIZE_WARN_MB} MB WARN threshold)`);
+    } else {
+      console.log(`   ✅ runtime.log footprint: ${sizeStr}`);
+    }
+    if (logCheck.level !== "ok" && logCheck.topFiles.length > 0) {
+      console.log(`      top offenders:`);
+      for (const f of logCheck.topFiles) {
+        console.log(`        - ${formatBytes(f.size).padStart(10)}  ${f.path}`);
+      }
+      console.log(`      fix: upgrade to v0.0.45+ and let normal rotation / budget enforcement reclaim space. Immediate: rm ${path.join(installDir, 'runtime.log.old')} && : > ${path.join(installDir, 'runtime.log')}`);
+      allIssues.push({
+        config: "logs",
+        server: "runtime.log",
+        issue: logCheck.level === "error" ? "log dir >= 500 MB" : "log dir >= 50 MB",
+        fix: "upgrade to v0.0.45+ or manual cleanup",
+      });
+    }
+  }
 
   const selfPath = path.join(installDir, "index.js");
   if (checkPathExists(selfPath)) {

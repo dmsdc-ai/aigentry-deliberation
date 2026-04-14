@@ -413,22 +413,154 @@ function formatRuntimeError(error) {
   return String(error);
 }
 
+// ── Runtime log configuration (env-overridable) ────────────────
+const LOG_MAX_SIZE_MB = Number(process.env.DELIBERATION_LOG_MAX_SIZE_MB) > 0
+  ? Number(process.env.DELIBERATION_LOG_MAX_SIZE_MB)
+  : 1;
+const LOG_TOTAL_BUDGET_MB = Number(process.env.DELIBERATION_LOG_TOTAL_BUDGET_MB) > 0
+  ? Number(process.env.DELIBERATION_LOG_TOTAL_BUDGET_MB)
+  : 10;
+const LOG_DEDUP_MS = Number.isFinite(Number(process.env.DELIBERATION_LOG_DEDUP_MS)) && Number(process.env.DELIBERATION_LOG_DEDUP_MS) >= 0
+  ? Number(process.env.DELIBERATION_LOG_DEDUP_MS)
+  : 1000;
+const LOG_HARD_CAP_BYTES = LOG_MAX_SIZE_MB * 2 * 1024 * 1024; // race fallback: 2× per-file threshold
+const LOG_TAIL_BYTES = 500 * 1024; // truncate to last 500 KB on hard-cap overflow
+const LOG_PRE_UPGRADE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Module-level dedup state
+let _dedupLastKey = null;
+let _dedupLastWriteMs = 0;
+let _dedupLastMessage = null;
+let _dedupPendingCount = 0;
+
+// Module-level upgrade-safety guard (once per process)
+let _logUpgradeSafetyRan = false;
+
+function _flushDedupToFile() {
+  if (_dedupPendingCount <= 0) return;
+  try {
+    const elapsed = Date.now() - _dedupLastWriteMs;
+    const summary = `${new Date().toISOString()} [DEDUP] [${_dedupPendingCount}x in ${elapsed}ms] ${_dedupLastMessage || ""}\n`;
+    fs.appendFileSync(GLOBAL_RUNTIME_LOG, summary, "utf-8");
+  } catch { /* ignore */ }
+  _dedupPendingCount = 0;
+}
+
+function _runLogUpgradeSafetyOnce() {
+  if (_logUpgradeSafetyRan) return;
+  _logUpgradeSafetyRan = true;
+  try {
+    const dir = path.dirname(GLOBAL_RUNTIME_LOG);
+    if (!fs.existsSync(dir)) return;
+    const markerPath = path.join(dir, ".log-upgrade-v0.0.45");
+    if (!fs.existsSync(markerPath)) {
+      let totalSize = 0;
+      const candidates = [];
+      for (const name of fs.readdirSync(dir)) {
+        if (!/^runtime\.log(\.|$)/.test(name)) continue;
+        if (name.startsWith("runtime.log.pre-")) continue;
+        const p = path.join(dir, name);
+        try {
+          const s = fs.statSync(p).size;
+          totalSize += s;
+          candidates.push(p);
+        } catch { /* skip */ }
+      }
+      if (totalSize > 1024 * 1024) {
+        const preBackup = GLOBAL_RUNTIME_LOG + ".pre-0.0.45";
+        try {
+          if (fs.existsSync(GLOBAL_RUNTIME_LOG) && !fs.existsSync(preBackup)) {
+            fs.renameSync(GLOBAL_RUNTIME_LOG, preBackup);
+          }
+          // Any other rotated files (runtime.log.old etc.) — removed so normal
+          // rotation can start fresh. The .pre-0.0.45 backup retains the latest.
+          for (const p of candidates) {
+            if (p === preBackup) continue;
+            if (!fs.existsSync(p)) continue;
+            try { fs.unlinkSync(p); } catch { /* ignore */ }
+          }
+        } catch { /* ignore */ }
+      }
+      try { fs.writeFileSync(markerPath, new Date().toISOString()); } catch { /* ignore */ }
+    }
+    // Expire .pre-0.0.45 after 7 days OR on budget overflow
+    try {
+      const preBackup = GLOBAL_RUNTIME_LOG + ".pre-0.0.45";
+      if (fs.existsSync(preBackup)) {
+        const preStat = fs.statSync(preBackup);
+        let totalDir = preStat.size;
+        try {
+          for (const name of fs.readdirSync(dir)) {
+            if (!/^runtime\.log(\.|$)/.test(name)) continue;
+            if (name === "runtime.log.pre-0.0.45") continue;
+            try { totalDir += fs.statSync(path.join(dir, name)).size; } catch { /* skip */ }
+          }
+        } catch { /* skip */ }
+        const age = Date.now() - preStat.mtimeMs;
+        if (age > LOG_PRE_UPGRADE_EXPIRY_MS || totalDir > LOG_TOTAL_BUDGET_MB * 1024 * 1024) {
+          try { fs.unlinkSync(preBackup); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+  } catch { /* ignore */ }
+}
+
+function _rotateOrTruncate() {
+  try {
+    if (!fs.existsSync(GLOBAL_RUNTIME_LOG)) return;
+    const stats = fs.statSync(GLOBAL_RUNTIME_LOG);
+    // Hard cap: if file exceeds 2× per-file threshold (race under concurrent writers),
+    // truncate in place to the last LOG_TAIL_BYTES to prevent runaway growth.
+    if (stats.size > LOG_HARD_CAP_BYTES) {
+      try {
+        const fd = fs.openSync(GLOBAL_RUNTIME_LOG, "r");
+        try {
+          const tailStart = Math.max(0, stats.size - LOG_TAIL_BYTES);
+          const buf = Buffer.alloc(stats.size - tailStart);
+          fs.readSync(fd, buf, 0, buf.length, tailStart);
+          fs.writeFileSync(GLOBAL_RUNTIME_LOG, buf, "utf-8");
+        } finally {
+          try { fs.closeSync(fd); } catch { /* ignore */ }
+        }
+      } catch { /* fall through */ }
+      return;
+    }
+    if (stats.size > LOG_MAX_SIZE_MB * 1024 * 1024) {
+      const oldLog = GLOBAL_RUNTIME_LOG + ".old";
+      // Explicit cleanup: delete previous .old before rename (robustness over
+      // atomic-rename-overwrite assumption, especially under concurrent writers).
+      try {
+        if (fs.existsSync(oldLog)) fs.unlinkSync(oldLog);
+      } catch { /* ignore */ }
+      try { fs.renameSync(GLOBAL_RUNTIME_LOG, oldLog); } catch { /* ignore */ }
+    }
+  } catch { /* ignore rotation failures */ }
+}
+
 function appendRuntimeLog(level, message) {
   try {
     fs.mkdirSync(path.dirname(GLOBAL_RUNTIME_LOG), { recursive: true });
-    
-    // Simple rotation: if log > 1MB, truncate it
-    try {
-      if (fs.existsSync(GLOBAL_RUNTIME_LOG)) {
-        const stats = fs.statSync(GLOBAL_RUNTIME_LOG);
-        if (stats.size > 1024 * 1024) { // 1MB
-          const oldLog = GLOBAL_RUNTIME_LOG + ".old";
-          fs.renameSync(GLOBAL_RUNTIME_LOG, oldLog);
-        }
-      }
-    } catch { /* ignore rotation failures */ }
+    _runLogUpgradeSafetyOnce();
 
-    const line = `${new Date().toISOString()} [${level}] ${message}\n`;
+    const safeMessage = String(message ?? "");
+    const key = `${level}:${safeMessage.slice(0, 200)}`;
+    const now = Date.now();
+
+    // Dedup: suppress repeated identical messages within window
+    if (_dedupLastKey === key && (now - _dedupLastWriteMs) < LOG_DEDUP_MS) {
+      _dedupPendingCount += 1;
+      return;
+    }
+
+    // New key or window expired — flush prior suppression summary first
+    if (_dedupPendingCount > 0) _flushDedupToFile();
+    _dedupLastKey = key;
+    _dedupLastWriteMs = now;
+    _dedupLastMessage = `[${level}] ${safeMessage}`;
+
+    _rotateOrTruncate();
+
+    const line = `${new Date(now).toISOString()} [${level}] ${safeMessage}\n`;
     fs.appendFileSync(GLOBAL_RUNTIME_LOG, line, "utf-8");
   } catch {
     // ignore logging failures
@@ -582,34 +714,48 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
+// Module-level reentrance guard. Once a fatal handler has fired, subsequent
+// invocations become no-ops. This breaks the EPIPE self-amplifying loop where
+// writing the previous error's log line itself triggered another EPIPE.
+let _hasHandledFatalError = false;
+
+function _isBrokenStdioError(err) {
+  if (!err) return false;
+  const code = err.code;
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END") return true;
+  const message = String(err?.message ?? err ?? "");
+  return /EPIPE|write after end/i.test(message);
+}
+
 process.on("uncaughtException", (error) => {
-  // EPIPE = MCP client disconnected (normal shutdown). Exit cleanly.
-  if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") {
+  if (_hasHandledFatalError) return;
+  if (_isBrokenStdioError(error)) {
+    _hasHandledFatalError = true;
+    try { _flushDedupToFile(); } catch { /* noop */ }
     try { appendRuntimeLog("INFO", "Client disconnected (EPIPE). Shutting down."); } catch { /* noop */ }
-    process.exit(0);
+    try { process.exit(0); } catch { /* noop */ }
+    return;
   }
-  const message = formatRuntimeError(error);
-  appendRuntimeLog("UNCAUGHT_EXCEPTION", message);
-  try {
-    process.stderr.write(`[mcp-deliberation] uncaughtException: ${message}\n`);
-  } catch {
-    // ignore stderr write failures
-  }
+  // Non-stdio fatal: log to file only. process.stderr.write was REMOVED here
+  // because it was the re-trigger source when stdio was the broken channel.
+  try { appendRuntimeLog("UNCAUGHT_EXCEPTION", formatRuntimeError(error)); } catch { /* noop */ }
 });
 
 process.on("unhandledRejection", (reason) => {
-  // EPIPE = MCP client disconnected (normal shutdown). Exit cleanly.
-  if (reason?.code === "EPIPE" || reason?.code === "ERR_STREAM_DESTROYED") {
+  if (_hasHandledFatalError) return;
+  if (_isBrokenStdioError(reason)) {
+    _hasHandledFatalError = true;
+    try { _flushDedupToFile(); } catch { /* noop */ }
     try { appendRuntimeLog("INFO", "Client disconnected (EPIPE). Shutting down."); } catch { /* noop */ }
-    process.exit(0);
+    try { process.exit(0); } catch { /* noop */ }
+    return;
   }
-  const message = formatRuntimeError(reason);
-  appendRuntimeLog("UNHANDLED_REJECTION", message);
-  try {
-    process.stderr.write(`[mcp-deliberation] unhandledRejection: ${message}\n`);
-  } catch {
-    // ignore stderr write failures
-  }
+  try { appendRuntimeLog("UNHANDLED_REJECTION", formatRuntimeError(reason)); } catch { /* noop */ }
+});
+
+// Flush any pending dedup summary on graceful exit so the tail summary is not lost
+process.on("exit", () => {
+  try { _flushDedupToFile(); } catch { /* noop */ }
 });
 
 // Read version from package.json (single source of truth)
@@ -3109,4 +3255,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { checkToolEntitlement, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
+export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, checkToolEntitlement, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
