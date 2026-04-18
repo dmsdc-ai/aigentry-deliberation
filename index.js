@@ -69,6 +69,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync, spawn } from "child_process";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -112,6 +113,7 @@ import {
   clearSpeakerSelectionToken,
   validateSpeakerSelectionSnapshot,
   confirmSpeakerSelectionToken,
+  markSelectionTokenConsumed,
   validateSpeakerSelectionRequest,
   // Browser participant helpers
   hasExplicitBrowserParticipantSelection,
@@ -404,6 +406,179 @@ function getLocksDir(projectSlug = getProjectSlug()) {
 
 function getSpeakerSelectionFile(projectSlug = getProjectSlug()) {
   return path.join(getProjectStateDir(projectSlug), SPEAKER_SELECTION_FILE);
+}
+
+// ── ADR-264 helpers ─────────────────────────────────────────────
+
+// §2.2 Proxy Response Submission: verify external_output via SHA-256 digest
+// so an orchestrator that pre-spawned a CLI/browser can submit responses
+// without the server re-running the CLI. `verify: "none"` + source
+// "trusted_orchestrator" is an explicit opt-out used only at a trust boundary.
+export function verifyExternalOutputProof({
+  external_output,
+  external_output_proof,
+  verify = "hash",
+} = {}) {
+  if (typeof external_output !== "string" || external_output.length === 0) {
+    return { ok: false, code: "E_EXTERNAL_OUTPUT_MISSING" };
+  }
+
+  if (verify === "none") {
+    if (external_output_proof?.source !== "trusted_orchestrator") {
+      return { ok: false, code: "E_EXTERNAL_OUTPUT_PROOF_SOURCE_REQUIRED" };
+    }
+    return {
+      ok: true,
+      audit: {
+        source: "trusted_orchestrator",
+        verify: "none",
+        length: Buffer.byteLength(external_output, "utf-8"),
+      },
+    };
+  }
+
+  if (!external_output_proof || typeof external_output_proof !== "object") {
+    return { ok: false, code: "E_EXTERNAL_OUTPUT_PROOF_MISSING" };
+  }
+  if (external_output_proof.algo !== "sha256") {
+    return { ok: false, code: "E_EXTERNAL_OUTPUT_PROOF_ALGO_UNSUPPORTED", algo: external_output_proof.algo };
+  }
+  const expected = String(external_output_proof.digest || "").toLowerCase();
+  const actual = crypto.createHash("sha256").update(external_output, "utf-8").digest("hex");
+  if (expected !== actual) {
+    return { ok: false, code: "E_EXTERNAL_OUTPUT_PROOF_MISMATCH", expected, actual };
+  }
+  return {
+    ok: true,
+    audit: {
+      source: external_output_proof.source || "unspecified",
+      verify: "hash",
+      digest: actual,
+    },
+  };
+}
+
+// §2.3 step 5 — reuse the same safeId regex as withSessionLock (lib/speaker-discovery
+// invariant: only a-z A-Z 0-9 가-힣 . _ - survive). Prevents `../`, `/`, and
+// null-byte path traversal when a caller supplies session_id.
+export function sanitizeSessionDirName(sessionId) {
+  return String(sessionId).replace(/[^a-zA-Z0-9가-힣._-]/g, "_");
+}
+
+// §2.3 steps 1-4, 7, 8 — resolve and audit an optional spawn_cwd against a
+// prefix allowlist. Symlinks are allowed only if the realpath still satisfies
+// the prefix check. Caller passes `allowedPrefixes` derived from
+// ~/.config/mcp-deliberation/allowed-cwd-prefixes.json when present; otherwise
+// defaults to $HOME + $TMPDIR so bench harnesses in /tmp work out of the box.
+export function validateSpawnCwd(input, { allowedPrefixes } = {}) {
+  if (typeof input !== "string" || input.length === 0) {
+    return { ok: false, code: "E_CWD_NOT_ABSOLUTE", input };
+  }
+  if (!path.isAbsolute(input)) {
+    return { ok: false, code: "E_CWD_NOT_ABSOLUTE", input };
+  }
+
+  let resolved;
+  try {
+    resolved = fs.realpathSync(input);
+  } catch (err) {
+    const code = err && err.code === "ENOENT" ? "E_CWD_NOT_FOUND" : "E_CWD_NOT_FOUND";
+    return { ok: false, code, input, error: err?.message };
+  }
+
+  const prefixesUnresolved = Array.isArray(allowedPrefixes) && allowedPrefixes.length > 0
+    ? allowedPrefixes
+    : [os.homedir(), os.tmpdir()];
+
+  // Resolve the prefixes themselves so callers can pass "/tmp" and still match
+  // realpath'd children like "/private/tmp/foo" on macOS.
+  const prefixesResolved = prefixesUnresolved.map((p) => {
+    try { return fs.realpathSync(p); } catch { return p; }
+  });
+  const prefixesAll = Array.from(new Set([...prefixesUnresolved, ...prefixesResolved]));
+
+  const matches = (candidate, prefixList) =>
+    prefixList.some((prefix) =>
+      candidate === prefix || candidate.startsWith(prefix + path.sep),
+    );
+
+  const inputLooksAllowed = matches(input, prefixesAll);
+  const resolvedLooksAllowed = matches(resolved, prefixesResolved);
+  const symlinkCrossed = resolved !== input;
+
+  // §2.3 step 3 — input path itself must be under an allowed prefix, so
+  // passing "/etc/passwd" when tmpRoot is allowed immediately fails.
+  if (!inputLooksAllowed) {
+    return { ok: false, code: "E_CWD_NOT_ALLOWED", input, resolved, allowed_prefixes: prefixesResolved };
+  }
+
+  // §2.3 step 4 — input looked allowed, but realpath escapes → symlink attack.
+  if (!resolvedLooksAllowed) {
+    return { ok: false, code: "E_CWD_SYMLINK_ESCAPE", input, resolved, allowed_prefixes: prefixesResolved };
+  }
+
+  return { ok: true, input, resolved, allowed_prefixes: prefixesResolved, symlink_crossed: symlinkCrossed };
+}
+
+// §2.3 step 6 — create a per-session subdir under the resolved cwd so two
+// concurrent cli_auto_turn calls do not share working state. Idempotent when
+// the caller has already pointed at a matching session folder.
+export function ensureSessionSubdir(resolvedCwd, sessionId) {
+  let safe = sanitizeSessionDirName(sessionId);
+  // `.` and `..` survive the ADR-specified regex but would climb out of
+  // resolvedCwd when joined. Rewrite to a literal segment so the subdir is
+  // always strictly nested.
+  if (safe === "." || safe === "..") {
+    safe = `_${safe.length === 2 ? "dotdot" : "dot"}`;
+  }
+  if (path.basename(resolvedCwd) === safe) {
+    return resolvedCwd;
+  }
+  const target = path.join(resolvedCwd, safe);
+  fs.mkdirSync(target, { recursive: true });
+  return target;
+}
+
+// §2.4 — normalize observability data into the {value, status} envelope that
+// downstream aggregators skip (status !== "ok") before arithmetic. Fields not
+// provided default to `adapter_missing`.
+const OBS_FIELDS = [
+  "tokens_in",
+  "tokens_out",
+  "estimated_cost_usd",
+  "model_reported_by_cli",
+  "actual_model_id",
+];
+
+export function buildObservabilityEnvelope(adapter) {
+  const src = adapter && typeof adapter === "object" ? adapter : {};
+  const out = {};
+  for (const field of OBS_FIELDS) {
+    const entry = src[field];
+    if (entry && typeof entry === "object" && "status" in entry) {
+      out[field] = { value: entry.value ?? null, status: String(entry.status) };
+    } else {
+      out[field] = { value: null, status: "adapter_missing" };
+    }
+  }
+  return out;
+}
+
+function loadAllowedCwdPrefixes() {
+  const overridePath = path.join(os.homedir(), ".config", "mcp-deliberation", "allowed-cwd-prefixes.json");
+  try {
+    const raw = fs.readFileSync(overridePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.prefixes) && parsed.prefixes.every((p) => typeof p === "string")) {
+      return parsed.prefixes;
+    }
+    appendRuntimeLog("WARN", `ALLOWED_CWD_PREFIXES_SCHEMA: ${overridePath} lacks { prefixes: string[] }, falling back to defaults`);
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      appendRuntimeLog("WARN", `ALLOWED_CWD_PREFIXES_LOAD: ${overridePath} parse failed (${err.message}), falling back to defaults`);
+    }
+  }
+  return null;
 }
 
 function formatRuntimeError(error) {
@@ -929,11 +1104,21 @@ server.tool(
     const manualSpeakersProvided = Array.isArray(speakers) && speakers.length > 0;
     let selectionValidation = { ok: true };
     if (effectiveRequireManual && manualSpeakersProvided) {
-      selectionValidation = validateSpeakerSelectionRequest({
-        selectionState: loadSpeakerSelectionToken(),
-        selection_token,
-        speakers,
-        includeBrowserSpeakers,
+      // ADR-264 §2.1 — read-validate-consume wrapped in withProjectLock so two
+      // MCP server processes racing on the same speaker-selection.json cannot
+      // both observe the same token as unconsumed.
+      selectionValidation = withProjectLock(getProjectSlug(), () => {
+        const persistedState = loadSpeakerSelectionToken();
+        const result = validateSpeakerSelectionRequest({
+          selectionState: persistedState,
+          selection_token,
+          speakers,
+          includeBrowserSpeakers,
+        });
+        if (result.ok) {
+          markSelectionTokenConsumed({ selectionState: persistedState });
+        }
+        return result;
       });
     }
     const hasManualSpeakers = manualSpeakersProvided && (!effectiveRequireManual || selectionValidation.ok);
@@ -1001,9 +1186,10 @@ server.tool(
       || DEFAULT_SPEAKERS[0];
     let speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
 
-    if (effectiveRequireManual) {
-      clearSpeakerSelectionToken();
-    }
+    // ADR-264 §2.1 — selection token has already been stamped `consumed_at`
+    // inside withProjectLock above. Leaving the file in place with the tombstone
+    // lets any racing caller surface `token_already_consumed` instead of the
+    // more ambiguous `missing_selection_state`. TTL garbage-collects it.
 
     // Lite mode: cap speakers and rounds for quick decisions
     if (mode === "lite") {
@@ -1166,9 +1352,21 @@ server.tool(
   },
   async ({ include_cli, include_browser }) => {
     const snapshot = await collectSpeakerCandidates({ include_cli, include_browser });
-    const selection = issueSpeakerSelectionToken({
-      candidates: snapshot.candidates,
-      include_browser,
+    // ADR-264 §2.1 — issue inside withProjectLock and warn when overwriting a
+    // confirmed-but-not-consumed state so racing consumers cannot silently
+    // invalidate a token already promised to a start call in flight.
+    const selection = withProjectLock(getProjectSlug(), () => {
+      const existing = loadSpeakerSelectionToken();
+      if (existing?.phase === "confirmed" && !existing.consumed_at) {
+        appendRuntimeLog(
+          "WARN",
+          `SELECTION_OVERWRITE_CONFIRMED: project=${getProjectSlug()} | token=${existing.token} | selected=${(existing.selected_speakers || []).join(",")}`,
+        );
+      }
+      return issueSpeakerSelectionToken({
+        candidates: snapshot.candidates,
+        include_browser,
+      });
     });
     const text = formatSpeakerCandidatesReport(snapshot);
     return {
@@ -1639,8 +1837,14 @@ server.tool(
   {
     session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
     timeout_sec: z.number().optional().default(120).describe("CLI response wait timeout (seconds)"),
+    // ADR-264 §2.3 — optional working directory for the spawned CLI. Validated
+    // against an allowlist (default: $HOME + $TMPDIR; override via
+    // ~/.config/mcp-deliberation/allowed-cwd-prefixes.json). The server creates
+    // a session-unique subdirectory under the resolved cwd so concurrent
+    // cli_auto_turn calls do not share working files.
+    spawn_cwd: z.string().optional().describe("Absolute path under an allowed prefix to use as CLI working directory. Used to isolate project CLAUDE.md/GEMINI.md context from the server's cwd."),
   },
-  safeToolHandler("deliberation_cli_auto_turn", async ({ session_id, timeout_sec }) => {
+  safeToolHandler("deliberation_cli_auto_turn", async ({ session_id, timeout_sec, spawn_cwd }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
       return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
@@ -1701,6 +1905,34 @@ server.tool(
       priorTurns: speakerPriorTurns,
     });
 
+    // ADR-264 §2.3 — validate optional spawn_cwd and allocate a session-unique
+    // subdirectory before we spawn the child. Structured error codes (E_CWD_*)
+    // surface via the return envelope so orchestrators can diagnose misuse.
+    let resolvedSpawnCwd;
+    if (typeof spawn_cwd === "string" && spawn_cwd.length > 0) {
+      const override = loadAllowedCwdPrefixes();
+      const cwdCheck = validateSpawnCwd(spawn_cwd, override ? { allowedPrefixes: override } : undefined);
+      if (!cwdCheck.ok) {
+        appendRuntimeLog(
+          "WARN",
+          `SPAWN_CWD_REJECTED: ${resolved} | speaker=${speaker} | code=${cwdCheck.code} | input=${cwdCheck.input} | resolved=${cwdCheck.resolved || "n/a"}`,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **spawn_cwd rejected**: \`${cwdCheck.code}\`\n\nInput: \`${cwdCheck.input}\`\nResolved: \`${cwdCheck.resolved || "n/a"}\`\nAllowed prefixes: ${(cwdCheck.allowed_prefixes || []).map((p) => `\`${p}\``).join(", ") || "(none)"}\n\nProvide an absolute path under one of the allowed prefixes, or configure \`~/.config/mcp-deliberation/allowed-cwd-prefixes.json\`.`,
+          }],
+        };
+      }
+      if (cwdCheck.symlink_crossed) {
+        appendRuntimeLog(
+          "WARN",
+          `SPAWN_CWD_SYMLINK: ${resolved} | speaker=${speaker} | input=${cwdCheck.input} | resolved=${cwdCheck.resolved}`,
+        );
+      }
+      resolvedSpawnCwd = ensureSessionSubdir(cwdCheck.resolved, resolved);
+    }
+
     // Spawn CLI process
     const startTime = Date.now();
     try {
@@ -1710,6 +1942,8 @@ server.tool(
         if (hint.envPrefix?.includes("CLAUDECODE=")) {
           delete env.CLAUDECODE;
         }
+        const spawnOpts = { env, windowsHide: true };
+        if (resolvedSpawnCwd) spawnOpts.cwd = resolvedSpawnCwd;
 
         let child;
         let stdout = "";
@@ -1733,22 +1967,22 @@ server.tool(
         // Different invocation patterns per CLI
         switch (speaker) {
           case "claude":
-            child = spawn("claude", getCliExecArgs("claude"), { env, windowsHide: true });
+            child = spawn("claude", getCliExecArgs("claude"), spawnOpts);
             child.stdin.write(turnPrompt);
             child.stdin.end();
             break;
           case "codex":
-            child = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
+            child = spawn("codex", getCliExecArgs("codex"), spawnOpts);
             child.stdin.write(turnPrompt);
             child.stdin.end();
             break;
           case "gemini":
-            child = spawn("gemini", ["-p", turnPrompt], { env, windowsHide: true });
+            child = spawn("gemini", ["-p", turnPrompt], spawnOpts);
             break;
           default: {
             // Generic: try command with prompt as argument
             const flags = hint.flags ? hint.flags.split(/\s+/) : [];
-            child = spawn(hint.cmd, [...flags, turnPrompt], { env, windowsHide: true });
+            child = spawn(hint.cmd, [...flags, turnPrompt], spawnOpts);
             break;
           }
         }
@@ -1828,11 +2062,26 @@ server.tool(
         fallback_reason: null,
       });
 
+      // ADR-264 §2.4 — Phase 0 observability envelope. Per-CLI adapters
+      // (claude/codex/gemini) that parse usage from stdout are a follow-up;
+      // until then every field reports `adapter_missing` so downstream
+      // aggregators can skip non-`ok` entries without NaN propagation.
+      const observability = buildObservabilityEnvelope(null);
+
       return {
         content: [{
           type: "text",
-          text: `✅ CLI auto-turn complete!\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n**Turn ID:** ${turnId}\n**Response length:** ${response.length} chars\n**Elapsed:** ${elapsedMs}ms\n\n${result.content[0].text}`,
+          text: `✅ CLI auto-turn complete!\n\n**Speaker:** ${speaker}\n**CLI:** ${hint.cmd}\n**Turn ID:** ${turnId}\n**Response length:** ${response.length} chars\n**Elapsed:** ${elapsedMs}ms${resolvedSpawnCwd ? `\n**spawn_cwd:** \`${resolvedSpawnCwd}\`` : ""}\n\n**Observability (ADR-264 §2.4, Phase 0):**\n- tokens_in: ${observability.tokens_in.status}\n- tokens_out: ${observability.tokens_out.status}\n- estimated_cost_usd: ${observability.estimated_cost_usd.status}\n- model_reported_by_cli: ${observability.model_reported_by_cli.status}\n- actual_model_id: ${observability.actual_model_id.status}\n\n${result.content[0].text}`,
         }],
+        structuredContent: {
+          speaker,
+          cli: hint.cmd,
+          turn_id: turnId,
+          response_length: response.length,
+          elapsed_ms: elapsedMs,
+          spawn_cwd: resolvedSpawnCwd ?? null,
+          ...observability,
+        },
       };
 
     } catch (err) {
@@ -1915,10 +2164,22 @@ server.tool(
     use_clipboard: z.boolean().optional().describe("Read content from system clipboard (alternative to content/content_file)"),
     include_clipboard_image: z.boolean().optional().describe("Capture and include image from system clipboard"),
     turn_id: z.string().optional().describe("Turn verification ID (value received from deliberation_route_turn)"),
+    // ADR-264 §2.2 — optional proxy submission. An orchestrator that pre-spawned
+    // the CLI/browser itself can submit the collected response here instead of
+    // asking the server to re-run the CLI. Default behavior (fields absent) is
+    // unchanged: proxy is blocked.
+    external_output: z.string().optional().describe("Pre-collected response body that the orchestrator obtained from a CLI/browser it spawned itself. Requires external_output_proof."),
+    external_output_proof: z.object({
+      algo: z.literal("sha256"),
+      digest: z.string().describe("Lowercase hex sha256 digest of external_output bytes."),
+      source: z.enum(["cli_stdout", "browser_dom", "trusted_orchestrator"]),
+    }).optional().describe("Proof payload for external_output. sha256 of the raw UTF-8 bytes."),
+    verify: z.enum(["hash", "none"]).optional().default("hash").describe("Proof verification mode. 'none' requires source=trusted_orchestrator and logs an explicit audit entry."),
   },
-  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, use_clipboard, include_clipboard_image, turn_id }) => {
+  safeToolHandler("deliberation_respond", async ({ session_id, speaker, content, content_file, use_clipboard, include_clipboard_image, turn_id, external_output, external_output_proof, verify }) => {
     // Guard: prevent orchestrator from fabricating responses for CLI/browser speakers
     const resolved = resolveSessionId(session_id);
+    let externalAcceptedContent = null;
     if (resolved && resolved !== "MULTIPLE") {
       const state = loadSession(resolved);
       if (state) {
@@ -1928,22 +2189,55 @@ server.tool(
           const callerSpeaker = detectCallerSpeaker();
           const callerIsSpeaker = callerSpeaker && (speaker === callerSpeaker);
           if (!callerIsSpeaker) {
-            return {
-              content: [{
-                type: "text",
-                text: t(
-                  `⚠️ **Proxy response blocked**: Speaker "${speaker}" has ${transport} transport.\n\nThe orchestrator is not allowed to write responses on behalf of other speakers.\nUse the following tools instead:\n- CLI speaker → \`deliberation_route_turn\` or \`deliberation_cli_auto_turn\`\n- Browser speaker → \`deliberation_route_turn\` or \`deliberation_browser_auto_turn\`\n\nThese tools run the actual CLI/browser to collect genuine responses.`,
-                  `⚠️ **대리 응답 차단**: speaker "${speaker}"는 ${transport} transport입니다.\n\n오케스트레이터가 다른 speaker를 대신하여 응답을 작성하는 것은 허용되지 않습니다.\n대신 다음 도구를 사용하세요:\n- CLI speaker → \`deliberation_route_turn\` 또는 \`deliberation_cli_auto_turn\`\n- 브라우저 speaker → \`deliberation_route_turn\` 또는 \`deliberation_browser_auto_turn\`\n\n이 도구들이 실제 CLI/브라우저를 실행하여 진짜 응답을 수집합니다.`,
-                  state?.lang),
-              }],
-            };
+            // ADR-264 §2.2 — accept pre-collected external_output when a proof
+            // is supplied. Failed verification surfaces a structured error code
+            // instead of falling back to the opaque "proxy blocked" message.
+            if (typeof external_output === "string" && external_output.length > 0) {
+              const proof = verifyExternalOutputProof({ external_output, external_output_proof, verify });
+              if (proof.ok) {
+                externalAcceptedContent = external_output;
+                appendRuntimeLog(
+                  "INFO",
+                  `EXTERNAL_OUTPUT_ACCEPTED: ${resolved} | speaker=${speaker} | transport=${transport} | source=${proof.audit?.source} | verify=${proof.audit?.verify} | len=${external_output.length}`,
+                );
+              } else {
+                const digestDetail = proof.expected
+                  ? `\n\nExpected digest: ${proof.expected}\nActual digest: ${proof.actual}`
+                  : "";
+                appendRuntimeLog(
+                  "WARN",
+                  `EXTERNAL_OUTPUT_REJECTED: ${resolved} | speaker=${speaker} | code=${proof.code}${proof.expected ? ` | expected=${proof.expected} | actual=${proof.actual}` : ""}`,
+                );
+                return {
+                  content: [{
+                    type: "text",
+                    text: t(
+                      `⚠️ **Proxy response rejected**: \`${proof.code}\`\n\nThe supplied external_output did not pass verification (verify=\"${verify || "hash"}\").${digestDetail}\n\nSupply a correct sha256 proof, or call \`deliberation_cli_auto_turn\` / \`deliberation_browser_auto_turn\` to let the server run the transport.`,
+                      `⚠️ **대리 응답 거부**: \`${proof.code}\`\n\n제공된 external_output 검증 실패 (verify=\"${verify || "hash"}\").${digestDetail}\n\n올바른 sha256 proof를 제공하거나, \`deliberation_cli_auto_turn\` / \`deliberation_browser_auto_turn\` 으로 서버가 직접 transport를 실행하게 하세요.`,
+                      state?.lang),
+                  }],
+                };
+              }
+            } else {
+              return {
+                content: [{
+                  type: "text",
+                  text: t(
+                    `⚠️ **Proxy response blocked**: Speaker "${speaker}" has ${transport} transport.\n\nThe orchestrator is not allowed to write responses on behalf of other speakers.\nUse the following tools instead:\n- CLI speaker → \`deliberation_route_turn\` or \`deliberation_cli_auto_turn\`\n- Browser speaker → \`deliberation_route_turn\` or \`deliberation_browser_auto_turn\`\n\nThese tools run the actual CLI/browser to collect genuine responses.\n\nAlternatively, the orchestrator can submit a response it spawned itself via \`external_output\` + \`external_output_proof\` (sha256 hex of the UTF-8 bytes).`,
+                    `⚠️ **대리 응답 차단**: speaker "${speaker}"는 ${transport} transport입니다.\n\n오케스트레이터가 다른 speaker를 대신하여 응답을 작성하는 것은 허용되지 않습니다.\n대신 다음 도구를 사용하세요:\n- CLI speaker → \`deliberation_route_turn\` 또는 \`deliberation_cli_auto_turn\`\n- 브라우저 speaker → \`deliberation_route_turn\` 또는 \`deliberation_browser_auto_turn\`\n\n이 도구들이 실제 CLI/브라우저를 실행하여 진짜 응답을 수집합니다.\n\n또는 오케스트레이터가 직접 spawn한 결과는 \`external_output\` + \`external_output_proof\` (sha256 hex) 로 제출할 수 있습니다.`,
+                    state?.lang),
+                }],
+              };
+            }
           }
         }
       }
     }
 
     // Support reading content from file or clipboard to avoid JSON escaping issues
-    let finalContent = content;
+    // ADR-264 §2.2 — external_output (when verified) takes precedence so proxy
+    // submissions don't conflict with stale content/content_file values.
+    let finalContent = externalAcceptedContent ?? content;
     if (use_clipboard && !content) {
       try {
         finalContent = readClipboardText();
@@ -3255,4 +3549,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, checkToolEntitlement, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
+export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, checkToolEntitlement, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, markSelectionTokenConsumed, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
