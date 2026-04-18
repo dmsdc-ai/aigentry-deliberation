@@ -122,3 +122,69 @@ npm run release:major    # Breaking changes
 | `package.json` | npm 메타데이터, 스크립트 |
 | `vitest.config.js` | 테스트 설정 |
 | `deliberation-tools.yaml` | MCP 도구 SSOT |
+
+## Project-wide INVARIANTS (모든 role 공통 — HARD RULE)
+
+이 프로젝트는 **에코 critical middleware**. 여러 orchestrator가 동시 사용 → 호환성 파괴 시 **전체 workflow 정지**. 다음은 어느 role(coder/architect/analyst/tester)이 수정하더라도 절대 위반 금지.
+
+### §Inv.1 NO MCP schema breaking change
+- **Rule**: 기존 tool의 `inputSchema.required` 필드 제거/타입 변경 금지. additive only.
+- **Why**: 여러 orchestrator가 동시 의존 — 호환성 파괴 시 기존 client 모두 크래시.
+- **Detection Signal**: 기존 tool 정의에서 `required: [...]` 항목 삭제 또는 필드 타입 변경.
+- **Correct**: 신규 기능은 optional 파라미터, default 지정으로 미지정 시 v1 동작 유지.
+
+### §Inv.2 NO state file format breakage
+- **Rule**: `~/.local/lib/mcp-deliberation/state/` JSON 파일 schema 파괴 금지. 필드 추가는 OK, 삭제/타입 변경 금지.
+- **Why**: in-flight deliberation 세션은 서버 재시작 시 state 파일에서 복원됨. 포맷 깨지면 진행 중 토론 전부 유실.
+- **Detection Signal**: 기존 state JSON 구조에서 필수 필드 제거 또는 타입 변경.
+- **Correct**: additive 필드, 구버전 파일 read 시 default 주입 (self-healing schema). ADR-76 §2.4, ADR-264 §6.4 패턴.
+
+### §Inv.3 NO new external dependencies (Rule 17 무의존 strict)
+- **Rule**: `package.json` dependencies/devDependencies 추가 금지. Node 기본 + 기존 codebase primitive만.
+- **Why**: 에코 critical middleware는 의존성 0이 원칙. 외부 lib 추가는 공급망/보안/호환성 리스크 증폭.
+- **Detection Signal**: `npm install X` 시도, 또는 ADR/SPEC이 "proper-lockfile / lodash / ..." 같은 lib 도입 제안.
+- **Correct**: 기존 primitive 확인 — `withFileLock` / `withProjectLock` / `withSessionLock` / `safeId` (index.js:486-559), `crypto.createHash`, `fs.openSync` 등. ADR-264 iter-2에서 검증된 재사용 패턴.
+
+### §Inv.4 NO breaking transport contract
+- **Rule**: 5종 transport (`cli_respond` / `browser_auto` / `clipboard` / `manual` / `telepty_bus`) 인터페이스 breaking 금지. 신규 참가자 타입 추가 시 기존 5종 영향 없음.
+- **Why**: 멀티 LLM + 멀티 세션 + 하이브리드 facilitator 역할 핵심. transport breaking = 에코 전체 토론 불능.
+- **Detection Signal**: 기존 transport handler 시그니처 변경.
+- **Correct**: 신규 transport는 별도 case 추가. 기존 분기 무변경.
+
+### §Inv.5 NO schema version regression
+- **Rule**: `ExecutionContractV2` 같은 outgoing schema는 version bump 없이 breaking 변경 금지.
+- **Why**: brain inbox handoff 등 downstream consumer가 이 schema 의존.
+- **Detection Signal**: `schema_version` 동일한데 필드 의미 변경.
+- **Correct**: 필드 추가 (schema_version 유지) 또는 schema_version 증가 + 구버전 parser 유지 (transition window).
+
+### §Inv.6 NO npm publish without version bump + CHANGELOG
+- **Rule**: 소스 변경 후 publish 시 `package.json` version 증가 + CHANGELOG.md 업데이트 필수.
+- **Why**: 멀티 머신 설치 사용자가 update 받으려면 버전 diff 필요.
+- **Detection Signal**: 소스 변경 후 version 동일, CHANGELOG 미변경.
+- **Correct**: `npm run release:patch|minor|major` 중 적절 선택. Breaking 변경이면 major (이 프로젝트에서 극도 자제).
+
+## FAILED APPROACHES (반복 금지 — HARD RULE)
+
+구조: Date / What happened / Root Cause / Lesson. 새 실패 발견 시 추가.
+
+### §F.1 v1 TTL 부재 오진단 (ADR-264 iter-0)
+- **Date**: 2026-04-18
+- **What happened**: architect가 ADR-264 초안에서 "v1에 TTL 없음 → 추가 필요" 라고 단정. 실제로는 `SPEAKER_SELECTION_TTL_MS = 10 * 60 * 1000` 이 `lib/speaker-discovery.js:101-103`에 이미 존재. BUG-001 원인은 TTL 부재가 아니라 race/consumption semantics.
+- **Root Cause**: 버그 증상만 보고 v1 상태를 추정. `lib/speaker-discovery.js` + `index.js` 실제 source 검증 없이 ADR 작성.
+- **Lesson**: 이 프로젝트 수정 ADR/SPEC 작성 시 반드시 관련 파일의 **실제 현재 코드** 확인. 특히 token / state / locking 같은 primitive는 이미 구축된 경우가 많음. codex 리뷰가 이 오류를 잡아냈음 (`docs/reviews/adr-264-review-codex.md:§Weaknesses-1`).
+
+### §F.2 AsyncLocalStorage in-process mutex for shared file (ADR-264 iter-1)
+- **Date**: 2026-04-18
+- **What happened**: ADR-264 iter-1에서 `speaker-selection.json` 동시성 보호로 `AsyncLocalStorage` in-process mutex 제안. 리뷰어 (codex + gemini 모두) 지적: MCP는 클라이언트별 프로세스 스폰 가능 → 서로 다른 Node 프로세스에서 shared 파일 접근 시 in-process mutex는 **cross-process 경쟁을 막지 못함**.
+- **Root Cause**: MCP 서버를 "single Node process"로 가정. 실제 아키텍처는 orchestrator마다 서버 프로세스 분리 가능.
+- **Lesson**: 공용 디스크 파일 동시성 보호는 **file-level lock** 필요. 기존 `withFileLock` / `withProjectLock` (index.js:486-559) 이 이미 `fs.openSync(..., "wx")` + stale detection 으로 cross-process safe. 새 locking 모델 도입 금지, 기존 primitive 재사용.
+
+### §F.3 proper-lockfile 외부 라이브러리 도입 유혹 (ADR-264 검토 중)
+- **Date**: 2026-04-18
+- **What happened**: gemini 리뷰가 file lock 문제 지적. 해결책으로 `proper-lockfile` NPM 라이브러리 도입 제안. 검토 후 **Rule 17 (무의존) 위반**으로 거절.
+- **Root Cause**: 문제 해결 시 익숙한 외부 라이브러리 먼저 고려. 기존 codebase primitive 확인 미실시.
+- **Lesson**: Rule 17 strict. 신규 라이브러리 도입 전 **기존 codebase 검색** (grep/ast-grep). 이 프로젝트는 이미 `withFileLock` 등 primitive 보유. ADR-264 iter-2에서 기존 재사용으로 해결됨.
+
+### §F.4 (이후 축적)
+
+새 실패 발견 시 이 섹션에 추가. 구조: Date / What / Root Cause / Lesson. 커밋 메시지에 `docs(agents): add FAILED approach §F.X` 포함.
