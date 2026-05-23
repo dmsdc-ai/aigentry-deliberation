@@ -236,6 +236,9 @@ import {
 } from "./decision-engine.js";
 import { detectLang, t } from "./i18n.js";
 import { checkToolEntitlement } from "./lib/entitlement.js";
+// δ2 (#440) — telemetry emit wrapper. emit-skip-with-warning when role
+// is unset; failures swallowed; never blocks the synthesis path.
+import { emitSynthesisEvent, emitHandoffEvent } from "./logger-emit.js";
 import {
   initTeleptyDeps,
   // Schemas
@@ -2557,6 +2560,27 @@ server.tool(
     }
 
     appendRuntimeLog("INFO", `SYNTHESIZED: ${resolved} | turns: ${state.log.length} | rounds: ${state.max_rounds}`);
+    emitSynthesisEvent(
+      {
+        session: resolved,
+        turns: state.log.length,
+        max_rounds: state.max_rounds,
+        speakers: state.speakers || [],
+        auto_execute: !!state.auto_execute,
+        has_structured: !!structured,
+      },
+      resolved,
+    );
+    if (state.execution_contract) {
+      emitHandoffEvent(
+        {
+          session: resolved,
+          tasks_total: state.execution_contract?.tasks?.length ?? 0,
+          auto_execute: !!state.auto_execute,
+        },
+        resolved,
+      );
+    }
     const synthesisEnvelope = buildTeleptySynthesisEnvelope({
       state,
       synthesis,

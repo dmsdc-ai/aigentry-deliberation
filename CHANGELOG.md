@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`@aigentry/logger` emit wiring at turn + synthesis sites (#440).**
+  ESM wrapper at `logger-emit.js` (no CJS bridge — package is `"type":
+  "module"`). Three emit call sites:
+  - `lib/session.js` `submitDeliberationTurn` → `state-change` /
+    `turn_complete` after a successful turn (correlated by `turn_id`).
+  - `index.js` `deliberation_synthesize` MCP tool → `report` / `synthesis`
+    on completion.
+  - `index.js` `deliberation_synthesize` → `report` / `handoff_v2` when an
+    `execution_contract` is built (auto-execute or manual handoff).
+
+  A1 mapping (spec event names → `payload.subtype` on closed ssot
+  `TelemetryEventKind` enum). Library-context emit-skip-with-warning
+  when `AIGENTRY_ROLE` is unset/invalid (option B, once-per-process).
+  Honors `AIGENTRY_LOGGER_DISABLED=1`. All transport failures swallowed
+  (§9 독립).
+- **Wrapper unit tests** at `__tests__/logger-emit.test.js` (9 cases).
+  Full suite 226/226 with the opt-out env.
+
+### Snyk note (pre-existing, not introduced by #440)
+
+Snyk At-Inception (#440 Phase 4) flagged a Medium-severity Path Traversal
+(CWE-23) at `index.js:376` (`fs.readFileSync(file, "utf-8")` under
+`getExecutionStatusFile()` — data flow originating from an MCP tool
+argument at line 1449). This finding pre-exists δ2 (`git blame` →
+e45a5a0e, 2026-03-13) and is unrelated to the logger emit wiring. Tracked
+for follow-up under the same telepty 0.4.3 pattern — fix in a dedicated
+input-sanitisation patch, not in a feat() commit.
+
 ## v0.0.45 — 2026-04-15
 
 ### Fixed (P0 disk exhaustion)

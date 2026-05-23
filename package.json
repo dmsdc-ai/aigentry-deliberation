@@ -38,6 +38,7 @@
     "observer.js",
     "browser-control-port.js",
     "degradation-state-machine.js",
+    "logger-emit.js",
     "session-monitor.sh",
     "session-monitor-win.js",
     "selectors/**",
@@ -59,6 +60,7 @@
     "release:major": "npm version major && git push && git push --tags"
   },
   "dependencies": {
+    "@aigentry/logger": "file:../aigentry-logger",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "ws": "^8.18.0"
   },
