@@ -365,18 +365,62 @@ print(json.dumps(content))
     echo -e "${CYAN}━━━ Synthesis ━━━${NC}"
     log "Generating synthesis report..."
 
+    local session_id_json
+    session_id_json=$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$session_id")
+
+    # Metadata stub — fallback when claude unavailable or LLM call returns empty.
     local synthesis_text
     synthesis_text=$(printf "# Auto-Deliberation Synthesis\n\nTopic: %s\nParticipants: %s\nRounds: %d\nSession: %s\n\nAll rounds completed. See full debate log in deliberation archive." \
         "$topic" "${speakers[*]}" "$rounds" "$session_id")
+
+    # Try LLM-composed synthesis (Claude sonnet) when claude CLI is on PATH.
+    if command -v claude &>/dev/null; then
+        local debate_history
+        debate_history=$(mcp_call "deliberation_history" "{\"session_id\":${session_id_json}}" 2>/dev/null || echo "")
+
+        if [[ -n "$debate_history" ]]; then
+            local prompt_file
+            prompt_file=$(mktemp -t auto-deliberate-synth.XXXXXX)
+            cat > "$prompt_file" <<SYNTH
+아래 deliberation 기록을 읽고 최종 합성 보고서를 한국어로 작성하세요.
+
+$debate_history
+
+---
+
+## 요청: 합성 보고서
+
+다음 형식으로 작성하세요:
+
+### 1. 합의된 결정사항 (Consensus)
+### 2. 미합의 쟁점 (Divergence)
+### 3. 액션 아이템 (Actions)
+### 4. 후속 토론 주제 (Follow-up)
+### 5. 한 줄 결론
+SYNTH
+
+            local llm_synthesis
+            llm_synthesis=$(env -u CLAUDECODE claude -p --model sonnet < "$prompt_file" 2>/dev/null) || llm_synthesis=""
+            rm -f "$prompt_file"
+
+            if [[ -n "$llm_synthesis" ]]; then
+                synthesis_text="$llm_synthesis"
+                success "LLM synthesis composed (${#llm_synthesis} chars)"
+            else
+                warn "LLM synthesis empty — falling back to metadata stub"
+            fi
+        else
+            warn "Debate history unavailable — falling back to metadata stub"
+        fi
+    else
+        warn "claude CLI not found — using metadata stub for synthesis"
+    fi
 
     local escaped_synthesis
     escaped_synthesis=$(python3 -c "
 import sys, json
 print(json.dumps(sys.stdin.read()))
 " <<< "$synthesis_text" 2>/dev/null)
-
-    local session_id_json
-    session_id_json=$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$session_id")
 
     local synth_result
     synth_result=$(mcp_call "deliberation_synthesize" \
