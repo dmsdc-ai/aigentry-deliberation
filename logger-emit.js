@@ -12,12 +12,12 @@
 //   synthesis_event  → report           + synthesis
 //   handoff_event    → report           + handoff_v2
 //
-// ESM module (package.json "type": "module"). @aigentry/logger is also
+// ESM module (package.json "type": "module"). @dmsdc-ai/aigentry-logger is also
 // ESM — direct `import` works.
 //
 // Failure mode (§9 독립): transport errors swallowed via try/catch.
 
-import { emit as loggerEmit } from "@aigentry/logger";
+import { emit as loggerEmit } from "@dmsdc-ai/aigentry-logger";
 
 const VALID_ROLES = new Set([
   "orchestrator",

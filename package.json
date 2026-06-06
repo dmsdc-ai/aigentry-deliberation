@@ -60,7 +60,7 @@
     "release:major": "npm version major && git push && git push --tags"
   },
   "dependencies": {
-    "@aigentry/logger": "file:../aigentry-logger",
+    "@dmsdc-ai/aigentry-logger": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "ws": "^8.18.0"
   },
