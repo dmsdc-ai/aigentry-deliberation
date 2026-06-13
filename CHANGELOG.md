@@ -32,6 +32,24 @@ e45a5a0e, 2026-03-13) and is unrelated to the logger emit wiring. Tracked
 for follow-up under the same telepty 0.4.3 pattern — fix in a dedicated
 input-sanitisation patch, not in a feat() commit.
 
+## v0.0.46 — 2026-06-13
+
+### Fixed
+
+- **tmux monitor window targeted by index for Hangul topics (#610).**
+  `lib/transport.js` now resolves the monitor window via
+  `parseTmuxWindowIndex` (window-index based) instead of matching the
+  Korean `winName` string, fixing the 전광판 (status board) selection for
+  Hangul deliberation topics. Landed on `main` at `d62a0c1`.
+
+### Release hygiene (#612)
+
+- **Version bump 0.0.45 → 0.0.46 to break the same-string drift.** The
+  installed copy (`~/.local/lib/mcp-deliberation`) and the repo had both
+  carried `0.0.45` while diverging in content, so the #610 fix never
+  propagated to the install. Bumping the version makes the installed copy
+  trackable and forces the `node install.js` sync to land the fix.
+
 ## v0.0.45 — 2026-04-15
 
 ### Fixed (P0 disk exhaustion)
