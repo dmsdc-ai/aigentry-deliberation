@@ -41,6 +41,7 @@ function toForwardSlash(p) {
 
 const FILES_TO_COPY = [
   "index.js",
+  "logger-emit.js",
   "observer.js",
   "clipboard.js",
   "decision-engine.js",
