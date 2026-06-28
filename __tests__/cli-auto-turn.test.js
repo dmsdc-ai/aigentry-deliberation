@@ -8,6 +8,7 @@ import {
   buildCliAutoTurnFailureText,
   buildClipboardTurnPrompt,
 } from '../index.js';
+import { CLI_INVOCATION_HINTS } from '../lib/speaker-discovery.js';
 
 describe('cli auto-turn helpers', () => {
   it('truncates prompt text with an explicit marker', () => {
@@ -118,5 +119,31 @@ describe('cli auto-turn helpers', () => {
     expect(prompt).toContain('[active_reporting_rule]');
     expect(prompt).toContain('aigentry-orchestrator-001');
     expect(prompt).toContain('telepty inject --from "$TELEPTY_SESSION_ID"');
+  });
+
+  it('strips self-submit guidance and requires stdout-only output for the cli_auto channel', () => {
+    const state = {
+      id: 's1',
+      project: 'proj',
+      topic: 'Discuss architecture tradeoffs.',
+      current_round: 1,
+      max_rounds: 2,
+      current_speaker: 'grok',
+      speaker_roles: {},
+      orchestrator_session_id: 'aigentry-orchestrator-001',
+      log: [],
+    };
+    const prompt = buildClipboardTurnPrompt(state, 'grok', null, 3, { cliAuto: true });
+    // Agentic CLIs (grok/agy) execute these instructions as tool calls instead of answering.
+    expect(prompt).not.toContain('deliberation_respond');
+    expect(prompt).not.toContain('[active_reporting_rule]');
+    expect(prompt).not.toContain('telepty inject');
+    // Must steer the spawned CLI to emit prose to stdout, no tools.
+    expect(prompt).toContain('Output ONLY your analysis as plain text to stdout');
+    expect(prompt).toContain('Do NOT call any tools, functions, or MCP servers');
+  });
+
+  it('marks agy as not cli_auto-capable so the router degrades it instead of hanging', () => {
+    expect(CLI_INVOCATION_HINTS.agy.cliAutoCapable).toBe(false);
   });
 });
