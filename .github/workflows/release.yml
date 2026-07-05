@@ -30,9 +30,28 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
+      # Regenerate README from template + ecosystem.json so the published tarball
+      # carries a fresh README. Fail-open: a cosmetic regen must NEVER abort a publish.
+      - name: Regenerate README (pre-publish)
+        run: node scripts/gen-readme.mjs
+        continue-on-error: true
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Sync the regenerated README back to main via github-actions[bot] (GITHUB_TOKEN
+      # pushes don't retrigger workflows; [skip ci] + no-op guard are belt-and-suspenders).
+      - name: Sync regenerated README to main
+        continue-on-error: true
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          node scripts/gen-readme.mjs
+          if git diff --quiet -- README.md; then echo "README already current"; exit 0; fi
+          git add README.md
+          git commit -m "docs: regen README [skip ci]"
+          git push origin HEAD:main
 
   github-release:
     needs: publish

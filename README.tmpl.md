@@ -265,16 +265,7 @@ This preserves explicit provenance rather than inferring semantics from raw bus 
 
 `@dmsdc-ai/aigentry-deliberation` is one module of the aigentry ecosystem — each is independently published and independently useful.
 
-| Module | Package | Version | Role | Maturity |
-| --- | --- | --- | --- | --- |
-| **telepty** | `@dmsdc-ai/aigentry-telepty` | 0.6.9 | Cross-terminal / cross-machine prompt transport (PTY daemon) | Shipping |
-| **brain** | `@dmsdc-ai/aigentry-brain` | 0.2.8 | Persistent cross-session memory (MCP server) | Early |
-| **deliberation** | `@dmsdc-ai/aigentry-deliberation` | 0.0.47 | Multi-AI structured debate + synthesis (MCP server) | Early |
-| **devkit** | `@dmsdc-ai/aigentry-devkit` | 0.0.22 | Installer/scaffold for the AI dev environment | Early |
-| **aterm** | `@dmsdc-ai/aterm` | 0.2.14 | Terminal launcher with native session IPC | Early |
-| **orchestrator** | *(unpublished)* | — | Control tower that drives sessions via telepty | Internal |
-
-> Licenses: all MIT except `@dmsdc-ai/aterm` (UNLICENSED).
+{{ecosystem_table}}
 
 ## License
 
