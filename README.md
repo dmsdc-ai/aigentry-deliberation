@@ -207,7 +207,7 @@ cp skills/deliberation-gate/SKILL.md ~/.claude/skills/deliberation-gate/SKILL.md
 
 ## Telepty Transport (Advanced)
 
-For teams using [telepty](https://github.com/dmsdc-ai/telepty) to manage AI sessions, deliberation supports routing turns through the telepty bus — enabling cross-machine and cross-session deliberation flows.
+For teams using [telepty](https://github.com/dmsdc-ai/aigentry-telepty) to manage AI sessions, deliberation supports routing turns through the telepty bus — enabling cross-machine and cross-session deliberation flows.
 
 - `deliberation_route_turn` publishes typed `turn_request` envelopes on `ws://localhost:3848/api/bus`
 - `deliberation_run_until_blocked` continues across `cli_respond`, `browser_auto`, and `telepty_bus` speakers until a manual block
