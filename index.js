@@ -33,7 +33,7 @@ After installation, restart Claude Code to start using it.
 }
 
 /**
- * MCP Deliberation Server (Global) — Multi-Session + Transport Routing + Cross-Platform + BrowserControlPort
+ * MCP Deliberation Server (Global) — Multi-Session + Transport Routing + Cross-Platform + Browser Control
  *
  * A global AI deliberation server usable across all projects.
  * Multiple deliberations can run in parallel simultaneously.
@@ -57,12 +57,6 @@ After installation, restart Claude Code to start using it.
  *   deliberation_browser_auto_turn      Auto-send turn to browser LLM and collect response (CDP-based)
  *   deliberation_cli_auto_turn          Auto-send turn to CLI speaker and collect response
  *   deliberation_request_review         Request code review (auto-invoke CLI reviewers, sync/async mode)
- *   decision_start             Start a new decision session (template support)
- *   decision_status            Query decision session status
- *   decision_respond           Submit user responses to user_probe conflict questions
- *   decision_resume            Resume a paused session
- *   decision_history           Query past decision history
- *   decision_templates         Micro-Decision template list
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -74,7 +68,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import os from "os";
-import { OrchestratedBrowserPort } from "./browser-control-port.js";
 import { getModelSelectionForTurn } from "./model-router.js";
 import {
   initSpeakerDeps,
@@ -227,15 +220,7 @@ import {
   synthesizeReviews,
 } from "./lib/transport.js";
 import { readClipboardText, writeClipboardText, hasClipboardImage, captureClipboardImage } from "./clipboard.js";
-import {
-  DECISION_STAGES, STAGE_TRANSITIONS,
-  createDecisionSession, advanceStage, buildConflictMap,
-  parseOpinionFromResponse, buildOpinionPrompt,
-  generateConflictQuestions, buildSynthesis, buildActionPlan,
-  loadTemplates, matchTemplate,
-} from "./decision-engine.js";
 import { detectLang, t } from "./i18n.js";
-import { checkToolEntitlement } from "./lib/entitlement.js";
 // δ2 (#440) — telemetry emit wrapper. emit-skip-with-warning when role
 // is unset; failures swallowed; never blocks the synthesis path.
 import { emitSynthesisEvent, emitHandoffEvent } from "./logger-emit.js";
@@ -305,8 +290,6 @@ const INSTALL_DIR = IS_WIN
   : path.join(HOME, ".local", "lib", "mcp-deliberation");
 const GLOBAL_STATE_DIR = path.join(INSTALL_DIR, "state");
 const GLOBAL_RUNTIME_LOG = path.join(INSTALL_DIR, "runtime.log");
-const OBSIDIAN_VAULT = path.join(HOME, "Documents", "Obsidian Vault");
-const OBSIDIAN_PROJECTS = path.join(OBSIDIAN_VAULT, "10-Projects");
 function loadDeliberationConfig() {
   const configPath = path.join(INSTALL_DIR, "config.json");
   try {
@@ -747,21 +730,12 @@ function appendRuntimeLog(level, message) {
 
 function safeToolHandler(toolName, handler) {
   return async (args) => {
-    const entitlement = checkToolEntitlement(toolName);
-    if (!entitlement.allowed) {
-      return {
-        content: [{
-          type: "text",
-          text: `⛔ ${entitlement.reason}. Current tier: ${entitlement.tier}.\nUpgrade: ${entitlement.upgrade_url || 'https://aigentry.dev/upgrade'}`,
-        }],
-      };
-    }
     try {
       return await handler(args);
     } catch (error) {
       const message = formatRuntimeError(error);
       appendRuntimeLog("ERROR", `${toolName}: ${message}`);
-      return { content: [{ type: "text", text: t(`❌ ${toolName} failed: ${message}`, `❌ ${toolName} 실패: ${message}`, "en") }] };
+      return { content: [{ type: "text", text: `❌ ${toolName} failed: ${message}` }] };
     }
   };
 }
@@ -870,7 +844,7 @@ function withSessionLock(sessionRef, fn, options) {
 
 // Speaker/Candidate Discovery functions moved to lib/speaker-discovery.js
 
-// BrowserControlPort singleton — moved to lib/transport.js
+// Browser control singleton — moved to lib/transport.js
 // Session ID generation, context detection, state helpers, markdown sync,
 // archival — all moved to lib/session.js
 // Terminal management — moved to lib/transport.js
@@ -976,7 +950,6 @@ initSessionDeps({
   listStateProjects,
   getLocksDir,
   GLOBAL_STATE_DIR,
-  OBSIDIAN_PROJECTS,
 });
 
 // ── Initialize transport module dependencies ──
@@ -1430,7 +1403,7 @@ server.tool(
   async () => {
     const active = listActiveSessions();
     if (active.length === 0) {
-      return { content: [{ type: "text", text: t("No active deliberations.", "진행 중인 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberations." }] };
     }
 
     let list = `## Active Deliberations (${getProjectSlug()}) — ${active.length}\n\n`;
@@ -1450,7 +1423,7 @@ server.tool(
   async ({ session_id }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation. Start one with deliberation_start.", "활성 deliberation이 없습니다. deliberation_start로 시작하세요.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation. Start one with deliberation_start." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -1458,7 +1431,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state) {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" not found.` }] };
     }
 
     if (isSessionExpired(state)) {
@@ -1489,7 +1462,7 @@ server.tool(
 
 server.tool(
   "deliberation_context",
-  "Load project context (markdown files). Auto-detects CWD + Obsidian.",
+  "Load project context (markdown files) from the current working directory.",
   {},
   async () => {
     const dirs = detectContextDirs();
@@ -1511,7 +1484,7 @@ server.tool(
     const { tabs, note } = await collectBrowserLlmTabs();
     if (tabs.length === 0) {
       const suffix = note ? `\n\n${note}` : "";
-      return { content: [{ type: "text", text: t(`No LLM tabs detected.${suffix}`, `감지된 LLM 탭이 없습니다.${suffix}`, "en") }] };
+      return { content: [{ type: "text", text: `No LLM tabs detected.${suffix}` }] };
     }
 
     const lines = tabs.map((t, i) => `${i + 1}. [${t.browser}] ${t.title}\n   ${t.url}`).join("\n");
@@ -1532,7 +1505,7 @@ server.tool(
   safeToolHandler("deliberation_route_turn", async ({ session_id, auto_prepare_clipboard, prompt, include_history_entries }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -1540,7 +1513,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" is not active.` }] };
     }
 
     const speaker = state.current_speaker;
@@ -1722,7 +1695,7 @@ server.tool(
   safeToolHandler("deliberation_browser_auto_turn", async ({ session_id, provider, timeout_sec }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -1730,7 +1703,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" is not active.` }] };
     }
 
     const speaker = state.current_speaker;
@@ -1850,7 +1823,7 @@ server.tool(
   safeToolHandler("deliberation_cli_auto_turn", async ({ session_id, timeout_sec, spawn_cwd }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -1858,7 +1831,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state || state.status !== "active") {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" is not active.` }] };
     }
 
     const speaker = state.current_speaker;
@@ -2119,7 +2092,7 @@ server.tool(
   safeToolHandler("deliberation_run_until_blocked", async ({ session_id, max_turns, cli_timeout_sec, browser_timeout_sec, include_history_entries }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2127,7 +2100,7 @@ server.tool(
 
     const initialState = loadSession(resolved);
     if (!initialState || initialState.status !== "active") {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" is not active.` }] };
     }
 
     const result = await runUntilBlockedCore(resolved, {
@@ -2255,7 +2228,7 @@ server.tool(
       }
     }
     if (!finalContent && !include_clipboard_image) {
-      return { content: [{ type: "text", text: t("❌ Either content, content_file, or include_clipboard_image must be provided.", "❌ content, content_file 또는 include_clipboard_image 중 하나를 제공해야 합니다.", "en") }] };
+      return { content: [{ type: "text", text: "❌ Either content, content_file, or include_clipboard_image must be provided." }] };
     }
 
     const attachments = [];
@@ -2330,41 +2303,6 @@ server.tool(
 );
 
 server.tool(
-  "deliberation_list_remote_sessions",
-  "List all active deliberation sessions on a remote machine (via Tailscale/IP) to find the correct session_id for context injection.",
-  {
-    remote_url: z.string().describe("The Tailscale IP or Host and port (e.g., '100.100.100.5:3847') of the remote machine."),
-  },
-  safeToolHandler("deliberation_list_remote_sessions", async ({ remote_url }) => {
-    try {
-      const baseUrl = remote_url.startsWith("http") ? remote_url : `http://${remote_url}`;
-      const cleanBaseUrl = baseUrl.replace(/\/$/, "");
-      const response = await fetch(`${cleanBaseUrl}/api/sessions`);
-      
-      if (!response.ok) {
-        return { content: [{ type: "text", text: `❌ Failed to fetch remote sessions (${response.status})` }] };
-      }
-      
-      const sessions = await response.json();
-      if (!Array.isArray(sessions) || sessions.length === 0) {
-        return { content: [{ type: "text", text: `No active deliberation sessions found on ${remote_url}.` }] };
-      }
-
-      let result = `### Active Sessions on ${remote_url}\n\n`;
-      for (const s of sessions) {
-        result += `- **ID:** \`${s.id}\`\n`;
-        result += `  **Topic:** ${s.topic}\n`;
-        result += `  **Status:** ${s.status} (Round ${s.current_round}/${s.max_rounds})\n\n`;
-      }
-
-      return { content: [{ type: "text", text: result }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `❌ Error connecting to remote machine at ${remote_url}: ${e.message}` }] };
-    }
-  })
-);
-
-server.tool(
   "deliberation_inject_context",
   "Inject additional context or instructions into a specific active session. (Useful for local or remote context injection via Tailscale)",
   {
@@ -2398,7 +2336,7 @@ server.tool(
 
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2407,7 +2345,7 @@ server.tool(
     return withSessionLock(resolved, () => {
       const state = loadSession(resolved);
       if (!state || state.status !== "active") {
-        return { content: [{ type: "text", text: t(`Session "${resolved}" is not active.`, `세션 "${resolved}"이 활성 상태가 아닙니다.`, "en") }] };
+        return { content: [{ type: "text", text: `Session "${resolved}" is not active.` }] };
       }
 
       state.log.push({
@@ -2432,36 +2370,6 @@ server.tool(
 );
 
 server.tool(
-  "deliberation_copy_last_turn",
-  "Copy the last turn's response to the system clipboard.",
-  {
-    session_id: z.string().optional().describe("Session ID (required if multiple sessions are active)"),
-  },
-  async ({ session_id }) => {
-    const resolved = resolveSessionId(session_id);
-    if (!resolved || resolved === "MULTIPLE") {
-      return { content: [{ type: "text", text: t("No unique active deliberation found.", "고유한 활성 deliberation을 찾을 수 없습니다.", "en") }] };
-    }
-    const state = loadSession(resolved);
-    if (!state || state.log.length === 0) {
-      return { content: [{ type: "text", text: t("No responses yet.", "아직 응답이 없습니다.", "en") }] };
-    }
-    const last = state.log[state.log.length - 1];
-    try {
-      writeClipboardText(last.content);
-      let imgMsg = "";
-      if (last.attachments && last.attachments.length > 0) {
-        const hasImg = last.attachments.some(a => a.type === "image");
-        if (hasImg) imgMsg = "\n\n⚠️ Note: This response included images, but only text was copied to the clipboard.";
-      }
-      return { content: [{ type: "text", text: `📋 **[${last.speaker}]'s response copied to clipboard.** (Round ${last.round})${imgMsg}\n\nYou can now paste it into other tools using Cmd+V (ㅍ).` }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `❌ Failed to copy to clipboard: ${e.message}` }] };
-    }
-  }
-);
-
-server.tool(
   "deliberation_history",
   "Return the deliberation history.",
   {
@@ -2470,7 +2378,7 @@ server.tool(
   async ({ session_id }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2478,7 +2386,7 @@ server.tool(
 
     const state = loadSession(resolved);
     if (!state) {
-      return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
+      return { content: [{ type: "text", text: `Session "${resolved}" not found.` }] };
     }
 
     if (state.log.length === 0) {
@@ -2518,7 +2426,7 @@ server.tool(
   safeToolHandler("deliberation_synthesize", async ({ session_id, synthesis, structured }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
-      return { content: [{ type: "text", text: t("No active deliberation.", "활성 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No active deliberation." }] };
     }
     if (resolved === "MULTIPLE") {
       return { content: [{ type: "text", text: multipleSessionsError() }] };
@@ -2529,7 +2437,7 @@ server.tool(
     const lockedResult = withSessionLock(resolved, () => {
       const loaded = loadSession(resolved);
       if (!loaded) {
-        return { content: [{ type: "text", text: t(`Session "${resolved}" not found.`, `세션 "${resolved}"을 찾을 수 없습니다.`, "en") }] };
+        return { content: [{ type: "text", text: `Session "${resolved}" not found.` }] };
       }
 
       loaded.synthesis = synthesis;
@@ -2624,51 +2532,6 @@ server.tool(
 );
 
 server.tool(
-  "deliberation_set_execution_status",
-  "Update the execution status of a completed deliberation's handoff. Used by executor agents to report implementation progress.",
-  {
-    session_id: z.string().min(1).describe("Session ID of the completed deliberation"),
-    status: z.enum(["pending", "executing", "implemented", "failed"]).describe("New execution status"),
-    tasks_done: z.number().int().min(0).optional().describe("Number of tasks completed so far"),
-    tasks_total: z.number().int().min(0).optional().describe("Total number of tasks (if known)"),
-    note: z.string().max(200).optional().describe("Short progress note (max 200 chars)"),
-    project: z.string().optional().describe("Project slug (auto-detected if omitted)"),
-  },
-  safeToolHandler("deliberation_set_execution_status", async ({ session_id, status, tasks_done, tasks_total, note, project }) => {
-    const patch = { execution_status: status };
-    if (tasks_done !== undefined) patch.tasks_done = tasks_done;
-    if (tasks_total !== undefined) patch.tasks_total = tasks_total;
-    if (note !== undefined) patch.note = note;
-
-    const saved = saveExecutionStatus(session_id, project, patch);
-
-    // Notify telepty bus so other MCP processes can react
-    const statusEvent = {
-      kind: "execution_status_update",
-      session_id,
-      project: project || getProjectSlug(),
-      execution_status: status,
-      tasks_done: saved.tasks_done ?? 0,
-      tasks_total: saved.tasks_total ?? 0,
-      note: note || null,
-      timestamp: new Date().toISOString(),
-    };
-    notifyTeleptyBus(statusEvent).catch(() => {});
-    appendRuntimeLog("INFO", `EXECUTION_STATUS: ${session_id} | status: ${status} | tasks: ${saved.tasks_done ?? 0}/${saved.tasks_total ?? 0}`);
-
-    const taskLine = (saved.tasks_total ?? 0) > 0
-      ? ` (${saved.tasks_done ?? 0}/${saved.tasks_total} tasks)`
-      : "";
-    return {
-      content: [{
-        type: "text",
-        text: `✅ Execution status updated\n\n**Session:** ${session_id}\n**Status:** ${status}${taskLine}${note ? `\n**Note:** ${note}` : ""}`,
-      }],
-    };
-  })
-);
-
-server.tool(
   "deliberation_list",
   "Return the list of past deliberation archives.",
   {},
@@ -2676,7 +2539,7 @@ server.tool(
     ensureDirs();
     const archiveDir = getArchiveDir();
     if (!fs.existsSync(archiveDir)) {
-      return { content: [{ type: "text", text: t("No past deliberations.", "과거 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No past deliberations." }] };
     }
 
     const files = fs.readdirSync(archiveDir)
@@ -2684,7 +2547,7 @@ server.tool(
       .sort().reverse();
 
     if (files.length === 0) {
-      return { content: [{ type: "text", text: t("No past deliberations.", "과거 deliberation이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No past deliberations." }] };
     }
 
     const list = files.map((f, i) => `${i + 1}. ${f.replace(".md", "")}`).join("\n");
@@ -2708,7 +2571,7 @@ server.tool(
       const result = withSessionLock(session_id, () => {
         const state = loadSession(session_id);
         if (!state) {
-          return { content: [{ type: "text", text: t(`Session "${session_id}" not found.`, `세션 "${session_id}"을 찾을 수 없습니다.`, "en") }] };
+          return { content: [{ type: "text", text: `Session "${session_id}" not found.` }] };
         }
         const file = getSessionFile(state);
         if (state && state.log.length > 0) {
@@ -2717,7 +2580,7 @@ server.tool(
         if (state) cleanupSyncMarkdown(state);
         toCloseIds = getSessionWindowIds(state);
         fs.unlinkSync(file);
-        return { content: [{ type: "text", text: t(`✅ Session "${session_id}" reset complete. 🖥️ Monitor terminal closed.`, `✅ 세션 "${session_id}" 초기화 완료. 🖥️ 모니터 터미널 닫힘.`, "en") }] };
+        return { content: [{ type: "text", text: `✅ Session "${session_id}" reset complete. 🖥️ Monitor terminal closed.` }] };
       });
       if (toCloseIds.length > 0) {
         closeMonitorTerminal(session_id, toCloseIds);
@@ -2761,7 +2624,7 @@ server.tool(
     });
 
     if (resetResult.noSessions) {
-      return { content: [{ type: "text", text: t("No sessions to reset.", "초기화할 세션이 없습니다.", "en") }] };
+      return { content: [{ type: "text", text: "No sessions to reset." }] };
     }
 
     for (const windowId of resetResult.terminalWindowIds) {
@@ -3091,460 +2954,6 @@ server.tool(
   })
 );
 
-// ── Decision Engine Tools ─────────────────────────────────────
-
-server.tool(
-  "decision_start",
-  "Start a new decision session. Multiple LLMs provide independent opinions and conflicts are visualized.",
-  {
-    problem: z.string().describe("Decision problem (e.g., 'JWT vs Session authentication method')"),
-    options: z.preprocess(
-      (v) => (typeof v === "string" ? JSON.parse(v) : v),
-      z.array(z.string()).optional()
-    ).describe("Options list (e.g., ['JWT', 'Session', 'OAuth2'])"),
-    criteria: z.preprocess(
-      (v) => (typeof v === "string" ? JSON.parse(v) : v),
-      z.array(z.string()).optional()
-    ).describe("Evaluation criteria (auto-loaded from template if omitted)"),
-    template: z.string().optional().describe("Micro-decision template ID (lib-compare, arch-decision, pr-priority, naming-convention, tradeoff, risk-approval)"),
-    speakers: z.preprocess(
-      (v) => (typeof v === "string" ? JSON.parse(v) : v),
-      z.array(z.string().trim().min(1).max(64)).min(2).optional()
-    ).describe("Participating LLM list (minimum 2, e.g., ['claude', 'codex', 'gemini'])"),
-  },
-  safeToolHandler("decision_start", async ({ problem, options, criteria, template, speakers }) => {
-    // Auto-discover speakers if not provided
-    if (!speakers || speakers.length === 0) {
-      const candidateSnapshot = await collectSpeakerCandidates({ include_cli: true, include_browser: false });
-      speakers = candidateSnapshot.candidates
-        .filter(c => c.type === "cli" && checkCliLiveness(c.speaker))
-        .map(c => c.speaker)
-        .slice(0, 4);
-      if (speakers.length < 2) {
-        return { content: [{ type: "text", text: t("❌ Decision requires at least 2 speakers. Please specify speakers directly.", "❌ 의사결정에 최소 2명의 speaker가 필요합니다. speakers를 직접 지정하세요.", "en") }] };
-      }
-    }
-
-    // Template matching
-    const templates = loadTemplates();
-    let matchedTemplate = null;
-    if (template) {
-      matchedTemplate = templates.find(t => t.id === template) || null;
-    } else {
-      matchedTemplate = matchTemplate(problem, templates);
-    }
-
-    // Use template criteria if not provided
-    if ((!criteria || criteria.length === 0) && matchedTemplate) {
-      criteria = matchedTemplate.criteria.map(c => c.name || c);
-    }
-
-    // Create session
-    const session = createDecisionSession({
-      problem,
-      options: options || [],
-      criteria: criteria || [],
-      speakers,
-      template: matchedTemplate?.id || null,
-      participant_profiles: mapParticipantProfiles(speakers, [], {}),
-    });
-
-    // Advance to parallel_opinions immediately (intake is just creation)
-    advanceStage(session);
-
-    // Save session
-    withSessionLock(session.id, () => {
-      saveSession(session);
-    });
-
-    appendRuntimeLog("INFO", `DECISION_START: ${session.id} | problem: ${problem.slice(0, 60)} | speakers: ${speakers.join(",")} | criteria: ${(criteria || []).length}`);
-
-    // Build opinion prompt for parallel execution
-    const opinionPrompt = buildOpinionPrompt(problem, options || [], criteria || [], matchedTemplate?.id);
-
-    // Run parallel independent opinions using CLI auto-turn pattern
-    const opinionResults = {};
-    const opinionPromises = speakers.map(async (speaker) => {
-      try {
-        const hint = CLI_INVOCATION_HINTS[speaker] || CLI_INVOCATION_HINTS["_generic"];
-        const cmd = hint?.cmd || speaker;
-
-        // Check liveness
-        if (!checkCliLiveness(cmd)) {
-          opinionResults[speaker] = { error: `CLI not available: ${cmd}` };
-          return;
-        }
-
-        // Spawn CLI with opinion prompt
-        const result = await new Promise((resolve, reject) => {
-          let stdout = "";
-          let stderr = "";
-
-          let proc;
-          const env = { ...process.env, NO_COLOR: "1" };
-          
-          if (speaker === "claude") {
-            const args = getCliExecArgs("claude");
-            proc = spawn("claude", args.includes("--no-input") ? args : [...args, "--no-input"], { env, windowsHide: true });
-            proc.stdin.write(opinionPrompt);
-            proc.stdin.end();
-          } else if (speaker === "codex") {
-            proc = spawn("codex", getCliExecArgs("codex"), { env, windowsHide: true });
-            proc.stdin.write(opinionPrompt);
-            proc.stdin.end();
-          } else if (speaker === "gemini") {
-            proc = spawn("gemini", ["-p", opinionPrompt], { env, windowsHide: true });
-          } else {
-            const flags = hint?.flags ? (Array.isArray(hint.flags) ? hint.flags : hint.flags.split(/\s+/)) : [];
-            proc = spawn(cmd, [...flags, opinionPrompt], { env, windowsHide: true });
-          }
-
-          proc.stdout?.on("data", (d) => { stdout += d.toString(); });
-          proc.stderr?.on("data", (d) => { stderr += d.toString(); });
-
-          const timer = setTimeout(() => {
-            proc.kill("SIGTERM");
-            reject(new Error("timeout"));
-          }, 180000);
-
-          proc.on("close", (code) => {
-            clearTimeout(timer);
-            let cleaned = stdout.trim() || stderr.trim();
-            if (speaker === "codex") {
-              const lines = cleaned.split("\n");
-              const codexLineIdx = lines.findIndex(l => l.trim() === "codex");
-              if (codexLineIdx !== -1) {
-                cleaned = lines.slice(codexLineIdx + 1)
-                  .filter(line => !/^(tokens used$|^[0-9,]*$|^mcp:.*)/.test(line))
-                  .join("\n").trim();
-              }
-            } else if (speaker === "gemini") {
-              cleaned = cleaned.split("\n")
-                .filter(line => !/^(Loaded cached|Error during discovery|\[MCP error\]| {4}at| {2}errno:| {2}code:| {2}syscall:| {2}path:| {2}spawnargs:|MCP issues detected|Server .* supports tool updates)/.test(line))
-                .join("\n").trim();
-            }
-            resolve(cleaned);
-          });
-
-          proc.on("error", (err) => {
-            clearTimeout(timer);
-            reject(err);
-          });
-        });
-
-        opinionResults[speaker] = result;
-      } catch (err) {
-        opinionResults[speaker] = { error: err.message };
-      }
-    });
-
-    // Wait for all opinions in parallel
-    await Promise.all(opinionPromises);
-
-    // Parse opinions and update session
-    withSessionLock(session.id, () => {
-      const latest = loadSession(session.id);
-      if (!latest) return;
-
-      for (const [speaker, result] of Object.entries(opinionResults)) {
-        if (typeof result === "string") {
-          latest.opinions[speaker] = parseOpinionFromResponse(speaker, result, latest.criteria);
-          latest.log.push({
-            round: 1,
-            speaker,
-            content: result,
-            timestamp: new Date().toISOString(),
-            channel_used: "cli_auto",
-            event: "opinion",
-          });
-        } else {
-          appendRuntimeLog("WARN", `DECISION_OPINION_FAIL: ${session.id} | ${speaker}: ${result?.error}`);
-        }
-      }
-
-      // Advance to conflict_map
-      latest.stage = "conflict_map";
-      latest.metadata.updated = new Date().toISOString();
-
-      // Build conflict map
-      latest.conflicts = buildConflictMap(latest.opinions, latest.criteria);
-
-      // Advance to user_probe
-      latest.stage = "user_probe";
-      latest.metadata.updated = new Date().toISOString();
-
-      saveSession(latest);
-    });
-
-    // Load updated session for response
-    const updatedSession = loadSession(session.id);
-    const conflictText = generateConflictQuestions(updatedSession?.conflicts || []);
-    const successCount = Object.keys(updatedSession?.opinions || {}).length;
-    const templateInfo = matchedTemplate ? `\n**Template:** ${matchedTemplate.name}` : "";
-
-    appendRuntimeLog("INFO", `DECISION_OPINIONS_COMPLETE: ${session.id} | opinions: ${successCount}/${speakers.length} | conflicts: ${(updatedSession?.conflicts || []).length}`);
-
-    return {
-      content: [{
-        type: "text",
-        text: `✅ **Decision Session Started**\n\n**Session:** ${session.id}\n**Problem:** ${problem}\n**Speakers:** ${speakers.join(", ")}\n**Opinions collected:** ${successCount}/${speakers.length}${templateInfo}\n**Stage:** user_probe (awaiting user input)\n**Conflicts:** ${(updatedSession?.conflicts || []).length}\n\n---\n\n${conflictText}\n\n---\n\nSubmit user responses via \`decision_respond\`.`,
-      }],
-    };
-  })
-);
-
-server.tool(
-  "decision_status",
-  "Query the current status of a decision session.",
-  {
-    session_id: z.string().optional().describe("Session ID (auto-selects active decision session if omitted)"),
-  },
-  safeToolHandler("decision_status", async ({ session_id }) => {
-    // Find decision sessions
-    const active = listActiveSessions().filter(s => {
-      const full = loadSession(s.id);
-      return full?.type === "decision";
-    });
-
-    let resolved = session_id;
-    if (!resolved) {
-      if (active.length === 0) return { content: [{ type: "text", text: t("No active decision sessions.", "활성 decision 세션이 없습니다.", "en") }] };
-      if (active.length === 1) resolved = active[0].id;
-      else return { content: [{ type: "text", text: t(`Multiple decision sessions are active. Please specify session_id:\n${active.map(s => `- ${s.id}`).join("\n")}`, `여러 decision 세션이 진행 중입니다. session_id를 지정하세요:\n${active.map(s => `- ${s.id}`).join("\n")}`, "en") }] };
-    }
-
-    const state = loadSession(resolved);
-    if (!state) return { content: [{ type: "text", text: t(`Session not found: ${resolved}`, `세션을 찾을 수 없습니다: ${resolved}`, "en") }] };
-
-    const opinionCount = Object.keys(state.opinions || {}).length;
-    const conflictCount = (state.conflicts || []).length;
-    const stageIdx = DECISION_STAGES.indexOf(state.stage);
-    const progress = stageIdx >= 0 ? `${stageIdx + 1}/${DECISION_STAGES.length}` : state.stage;
-
-    return {
-      content: [{
-        type: "text",
-        text: `📊 **Decision Session Status**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** ${state.stage} (${progress})\n**Status:** ${state.status}\n**Speakers:** ${(state.speakers || []).join(", ")}\n**Opinions:** ${opinionCount}/${(state.speakers || []).length}\n**Conflicts:** ${conflictCount}\n**Template:** ${state.template || "(none)"}\n**Created:** ${state.metadata?.created || ""}`,
-      }],
-    };
-  })
-);
-
-server.tool(
-  "decision_respond",
-  "Submit user responses to conflict questions in the user_probe stage.",
-  {
-    session_id: z.string().optional().describe("Session ID"),
-    responses: z.preprocess(
-      (v) => (typeof v === "string" ? JSON.parse(v) : v),
-      z.array(z.string()).min(1)
-    ).describe("Response array for each conflict question (in conflict order)"),
-  },
-  safeToolHandler("decision_respond", async ({ session_id, responses }) => {
-    // Find decision session
-    const active = listActiveSessions().filter(s => {
-      const full = loadSession(s.id);
-      return full?.type === "decision";
-    });
-
-    let resolved = session_id;
-    if (!resolved) {
-      if (active.length === 1) resolved = active[0].id;
-      else if (active.length === 0) return { content: [{ type: "text", text: t("No active decision sessions.", "활성 decision 세션이 없습니다.", "en") }] };
-      else return { content: [{ type: "text", text: t(`Multiple decision sessions are active. Please specify session_id.`, `여러 decision 세션이 진행 중입니다. session_id를 지정하세요.`, "en") }] };
-    }
-
-    let synthesisText = "";
-    let actionPlan = null;
-
-    withSessionLock(resolved, () => {
-      const state = loadSession(resolved);
-      if (!state) return;
-      if (state.stage !== "user_probe") {
-        synthesisText = t(`❌ Cannot accept responses at current stage (${state.stage}). Only possible during user_probe stage.`, `❌ 현재 단계(${state.stage})에서는 응답을 받을 수 없습니다. user_probe 단계에서만 가능합니다.`, state?.lang);
-        return;
-      }
-
-      // Store user responses
-      state.userProbeResponses = responses;
-      state.log.push({
-        event: "user_probe_response",
-        responses,
-        timestamp: new Date().toISOString(),
-      });
-
-      // Advance to synthesis
-      state.stage = "synthesis";
-      state.metadata.updated = new Date().toISOString();
-
-      // Build synthesis
-      state.synthesis = buildSynthesis(state);
-
-      // Advance to action_export
-      state.stage = "action_export";
-      state.metadata.updated = new Date().toISOString();
-
-      // Build action plan
-      state.actionPlan = buildActionPlan(state);
-
-      // Advance to done
-      state.stage = "done";
-      state.status = "completed";
-      state.metadata.updated = new Date().toISOString();
-
-      saveSession(state);
-
-      // Archive
-      const archivePath = archiveState(state);
-      cleanupSyncMarkdown(state);
-
-      synthesisText = state.synthesis;
-      actionPlan = state.actionPlan;
-
-      appendRuntimeLog("INFO", `DECISION_COMPLETE: ${resolved} | conflicts_resolved: ${responses.length} | decision: ${(actionPlan?.decision || "").slice(0, 60)}`);
-
-      // Emit lesson_learned for decision outcomes
-      if (actionPlan?.decision) {
-        const lessonEvent = {
-          type: "lesson_learned",
-          session_id: resolved,
-          timestamp: new Date().toISOString(),
-          project: state.project || getProjectSlug(),
-          category: "decision",
-          lesson: actionPlan.decision,
-          decisions: actionPlan.decision ? [actionPlan.decision] : [],
-        };
-        notifyTeleptyBus(lessonEvent).catch(() => {}); // fire-and-forget
-        appendRuntimeLog("INFO", `LESSON_LEARNED: ${resolved} | decision: ${actionPlan.decision.slice(0, 60)}`);
-      }
-    });
-
-    if (synthesisText.startsWith("❌")) {
-      return { content: [{ type: "text", text: synthesisText }] };
-    }
-
-    const checklistText = actionPlan?.exportFormats?.checklist || "";
-    return {
-      content: [{
-        type: "text",
-        text: `✅ **Decision Complete**\n\n${synthesisText}\n\n---\n\n## Action Plan\n\n${checklistText}`,
-      }],
-    };
-  })
-);
-
-server.tool(
-  "decision_resume",
-  "Resume a paused decision session (re-displays conflict questions from the user_probe stage).",
-  {
-    session_id: z.string().optional().describe("Session ID"),
-  },
-  safeToolHandler("decision_resume", async ({ session_id }) => {
-    const active = listActiveSessions().filter(s => {
-      const full = loadSession(s.id);
-      return full?.type === "decision";
-    });
-
-    let resolved = session_id;
-    if (!resolved) {
-      if (active.length === 1) resolved = active[0].id;
-      else if (active.length === 0) return { content: [{ type: "text", text: t("No decision sessions to resume.", "재개할 decision 세션이 없습니다.", "en") }] };
-      else return { content: [{ type: "text", text: t(`Select from multiple sessions:\n${active.map(s => `- ${s.id}`).join("\n")}`, `여러 세션 중 선택하세요:\n${active.map(s => `- ${s.id}`).join("\n")}`, "en") }] };
-    }
-
-    const state = loadSession(resolved);
-    if (!state) return { content: [{ type: "text", text: t(`Session not found: ${resolved}`, `세션을 찾을 수 없습니다: ${resolved}`, "en") }] };
-    if (state.stage !== "user_probe") {
-      return { content: [{ type: "text", text: t(`Session is not at user_probe stage (current: ${state.stage}). Cannot resume.`, `세션이 user_probe 단계가 아닙니다 (현재: ${state.stage}). 재개할 수 없습니다.`, state?.lang) }] };
-    }
-
-    const conflictText = generateConflictQuestions(state.conflicts || []);
-    return {
-      content: [{
-        type: "text",
-        text: `📋 **Decision Session Resumed**\n\n**Session:** ${state.id}\n**Problem:** ${state.problem}\n**Stage:** user_probe\n\n---\n\n${conflictText}\n\n---\n\nSubmit user responses via \`decision_respond\`.`,
-      }],
-    };
-  })
-);
-
-server.tool(
-  "decision_history",
-  "Query past decision history.",
-  {
-    session_id: z.string().optional().describe("Specific session ID (shows full list if omitted)"),
-  },
-  safeToolHandler("decision_history", async ({ session_id }) => {
-    if (session_id) {
-      const state = loadSession(session_id);
-      if (!state) return { content: [{ type: "text", text: t(`Session not found: ${session_id}`, `세션을 찾을 수 없습니다: ${session_id}`, "en") }] };
-
-      const opinionSummary = Object.entries(state.opinions || {})
-        .map(([speaker, op]) => `- **${speaker}**: ${op.summary || "(none)"} (confidence: ${Math.round((op.confidence || 0.5) * 100)}%)`)
-        .join("\n");
-
-      return {
-        content: [{
-          type: "text",
-          text: `📜 **Decision History: ${state.id}**\n\n**Problem:** ${state.problem}\n**Status:** ${state.status}\n**Stage:** ${state.stage}\n**Template:** ${state.template || "(none)"}\n\n## Opinions\n${opinionSummary || "(none)"}\n\n## Synthesis\n${state.synthesis || "(not yet synthesized)"}\n\n## Action Plan\n${state.actionPlan?.exportFormats?.checklist || "(not yet generated)"}`,
-        }],
-      };
-    }
-
-    // List all decision sessions from archives
-    const projectSlug = getProjectSlug();
-    const archiveDir = path.join(GLOBAL_STATE_DIR, projectSlug, "archive");
-    let decisionArchives = [];
-    try {
-      const files = fs.readdirSync(archiveDir).filter(f => f.startsWith("decision-"));
-      decisionArchives = files.map(f => {
-        const match = f.match(/^decision-(.+)\.md$/);
-        return match ? match[1] : f;
-      });
-    } catch { /* no archives */ }
-
-    // Also list active decision sessions
-    const activeSessions = listActiveSessions().filter(s => {
-      const full = loadSession(s.id);
-      return full?.type === "decision";
-    });
-
-    const activeList = activeSessions.map(s => `- 🟢 ${s.id} (${s.status})`).join("\n");
-    const archiveList = decisionArchives.map(a => `- 📁 ${a}`).join("\n");
-
-    return {
-      content: [{
-        type: "text",
-        text: `📜 **Decision History**\n\n## Active Sessions\n${activeList || "(none)"}\n\n## Archives\n${archiveList || "(none)"}`,
-      }],
-    };
-  })
-);
-
-server.tool(
-  "decision_templates",
-  "Display available Micro-Decision templates.",
-  {},
-  safeToolHandler("decision_templates", async () => {
-    const templates = loadTemplates();
-    if (templates.length === 0) {
-      return { content: [{ type: "text", text: t("No available templates.", "사용 가능한 템플릿이 없습니다.", "en") }] };
-    }
-
-    const list = templates.map(t => {
-      const criteriaList = (t.criteria || []).map(c => c.name || c.label || c).join(", ");
-      return `### ${t.name} (\`${t.id}\`)\n${t.description}\n- **Criteria:** ${criteriaList}\n- **Example:** ${t.example_problem || "(none)"}`;
-    }).join("\n\n");
-
-    return {
-      content: [{
-        type: "text",
-        text: `📋 **Decision Templates**\n\n${list}\n\n---\n\nUse with \`decision_start(problem: "...", template: "lib-compare")\`.`,
-      }],
-    };
-  })
-);
-
 // ── Start ──────────────────────────────────────────────────────
 
 // Only start server when run directly (not imported for testing)
@@ -3573,4 +2982,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, checkToolEntitlement, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, DECISION_STAGES, STAGE_TRANSITIONS, createDecisionSession, advanceStage, buildConflictMap, parseOpinionFromResponse, buildOpinionPrompt, generateConflictQuestions, buildSynthesis, buildActionPlan, loadTemplates, matchTemplate, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, markSelectionTokenConsumed, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
+export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, markSelectionTokenConsumed, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };

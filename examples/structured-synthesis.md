@@ -67,13 +67,7 @@ The contract is automatically written to:
 ~/.aigentry/inbox/handoff-{deliberation_id}.json
 ```
 
-An executor agent (or `inbox-watcher.mjs`) picks it up and starts implementation:
-
-```bash
-node inbox-watcher.mjs
-# => Detected handoff: delib-a1b2c3
-# => Dispatching 3 tasks to executor...
-```
+An executor agent picks it up and starts implementation.
 
 ---
 

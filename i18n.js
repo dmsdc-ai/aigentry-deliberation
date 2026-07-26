@@ -27,14 +27,3 @@ export function detectLang(text) {
 export function t(en, ko, lang) {
   return lang === "ko" ? ko : en;
 }
-
-/**
- * Template translation with variable substitution.
- * Variables in the template use ${varName} syntax (pre-substituted by JS template literals).
- * This is a convenience alias when you need to pick between pre-built en/ko strings.
- * @param {string} en - English template (already interpolated)
- * @param {string} ko - Korean template (already interpolated)
- * @param {string} [lang="en"]
- * @returns {string}
- */
-export const tt = t;

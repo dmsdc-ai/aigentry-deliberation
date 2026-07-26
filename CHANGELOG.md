@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Removed (BREAKING — public MCP surface + bin)
+
+Over-engineering cleanup (ponytail audit 2026-07-26). The following MCP
+tools are **no longer exposed** by the server:
+
+- `decision_start`, `decision_status`, `decision_respond`,
+  `decision_resume`, `decision_history`, `decision_templates` — the
+  Micro-Decision engine (`decision-engine.js`, `selectors/decision-templates.json`).
+  A deliberation with a "decide" topic covers the same ground.
+- `deliberation_list_remote_sessions` — client of the observer dashboard's
+  `/api/sessions`, removed together with it.
+- `deliberation_copy_last_turn`, `deliberation_set_execution_status` —
+  zero references across README, skills, examples, tests, or the
+  orchestrator/devkit repos. The execution-status sidecar itself is
+  unchanged; only the standalone setter tool is gone.
+
+Also removed:
+
+- **`deliberation-observer` bin** (`observer.js` + `public/index.html`) —
+  undocumented dashboard, its `--dashboard` flag was never wired into CLI
+  routing. `deliberation_status` / `deliberation_list_active` and the tmux
+  monitor cover local monitoring.
+- `inbox-watcher.mjs` — watched `~/.local/lib/mcp-deliberation/inbox` while
+  the only producer writes to `~/.aigentry/inbox`, so it could never fire.
+- `lib/entitlement.js` and its tool gate — every feature was granted to
+  every tier, so it could not deny anything.
+- Hardcoded `~/Documents/Obsidian Vault` context/archive branches.
+
+`deliberation_inject_context` keeps its `remote_url` parameter, but the
+server that served that endpoint (`observer.js`) is gone — remote injection
+now requires an externally hosted compatible endpoint.
+
 ### Added
 
 - **`@aigentry/logger` emit wiring at turn + synthesis sites (#440).**
