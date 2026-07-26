@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Removed (BREAKING — public MCP surface + bin)
+
+Over-engineering cleanup (ponytail audit 2026-07-26). The following MCP
+tools are **no longer exposed** by the server:
+
+- `decision_start`, `decision_status`, `decision_respond`,
+  `decision_resume`, `decision_history`, `decision_templates` — the
+  Micro-Decision engine (`decision-engine.js`, `selectors/decision-templates.json`).
+  A deliberation with a "decide" topic covers the same ground.
+- `deliberation_list_remote_sessions` — client of the observer dashboard's
+  `/api/sessions`, removed together with it.
+- `deliberation_copy_last_turn`, `deliberation_set_execution_status` —
+  zero references across README, skills, examples, tests, or the
+  orchestrator/devkit repos. The execution-status sidecar itself is
+  unchanged; only the standalone setter tool is gone.
+
+Changed tool signature:
+
+- **`deliberation_inject_context` no longer accepts `remote_url`.** That
+  branch POSTed to the observer dashboard's
+  `/api/sessions/:id/context`, and the observer is gone (below), so it
+  could no longer reach anything. Local injection — the only path anything
+  in the ecosystem uses — is unchanged. Callers passing `remote_url` will
+  now fail schema validation instead of silently attempting a dead
+  endpoint. `deliberation_ingest_remote_reply` is unaffected.
+
+Also removed:
+
+- **`deliberation-observer` bin** (`observer.js` + `public/index.html`) —
+  undocumented dashboard, its `--dashboard` flag was never wired into CLI
+  routing. `deliberation_status` / `deliberation_list_active` and the tmux
+  monitor cover local monitoring.
+- `inbox-watcher.mjs` — watched `~/.local/lib/mcp-deliberation/inbox` while
+  the only producer writes to `~/.aigentry/inbox`, so it could never fire.
+- `lib/entitlement.js` and its tool gate — every feature was granted to
+  every tier, so it could not deny anything.
+- Hardcoded `~/Documents/Obsidian Vault` context/archive branches.
+
 ### Added
 
 - **`@aigentry/logger` emit wiring at turn + synthesis sites (#440).**

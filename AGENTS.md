@@ -16,11 +16,8 @@ aigentry 에코시스템에서 **합의 도출 담당** — 요구사항 분석 
 | `lib/speaker-discovery.js` | 스피커 탐색, 선택 토큰, transport 라우팅 |
 | `lib/telepty.js` | telepty bus 통신, brain inbox 핸드오프 |
 | `lib/transport.js` | CLI/브라우저/클립보드 transport 관리 |
-| `lib/entitlement.js` | Free/Pro/Team 티어 게이팅 |
 | `browser-control-port.js` | CDP 브라우저 자동화 |
-| `decision-engine.js` | 마이크로 의사결정 (opinion→conflict→synthesis) |
 | `model-router.js` | 모델 선택 로직 |
-| `observer.js` | 세션 모니터링 |
 | `doctor.js` | 설치/진단 |
 | `install.js` | MCP 서버 등록 (Claude + Gemini + Codex) |
 
@@ -45,25 +42,20 @@ npm run test:watch          # 감시 모드
 npm start                   # MCP 서버 실행
 node install.js             # MCP 서버 등록
 node doctor.js              # 설치/진단
-node observer.js            # 세션 모니터링
 ```
 
-## MCP Tools (28)
+## MCP Tools (20)
 
-### Deliberation Session (22)
+### Deliberation Session (20)
 
 **세션:** `deliberation_start`, `deliberation_list_active`, `deliberation_status`, `deliberation_list`
 **스피커:** `deliberation_speaker_candidates`, `deliberation_confirm_speakers`, `deliberation_browser_llm_tabs`
 **턴:** `deliberation_route_turn`, `deliberation_browser_auto_turn`, `deliberation_cli_auto_turn`, `deliberation_run_until_blocked`, `deliberation_respond`
-**컨텍스트:** `deliberation_context`, `deliberation_inject_context`, `deliberation_copy_last_turn`
-**원격:** `deliberation_list_remote_sessions`, `deliberation_ingest_remote_reply`
+**컨텍스트:** `deliberation_context`, `deliberation_inject_context`
+**원격:** `deliberation_ingest_remote_reply`
 **결과:** `deliberation_history`, `deliberation_synthesize`, `deliberation_reset`
 **설정:** `deliberation_cli_config`
 **리뷰:** `deliberation_request_review`
-
-### Decision Engine (6)
-
-`decision_start`, `decision_status`, `decision_respond`, `decision_resume`, `decision_history`, `decision_templates`
 
 ## Key Schemas
 
@@ -77,7 +69,7 @@ node observer.js            # 세션 모니터링
   "decisions": ["decision 1"],
   "actionable_tasks": [{"id": 1, "task": "string", "priority": "high|medium|low", "files": ["file.js"]}],
   "experiment_outcome": {"verdict": "keep|discard|modify", "confidence": 0.0-1.0},
-  "generated_from": "deliberation_synthesize|decision_start"
+  "generated_from": "deliberation_synthesize"
 }
 ```
 

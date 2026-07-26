@@ -20,7 +20,6 @@
   "bin": {
     "aigentry-deliberation": "index.js",
     "mcp-deliberation": "index.js",
-    "deliberation-observer": "observer.js",
     "deliberation-install": "install.js",
     "deliberation-doctor": "doctor.js"
   },
@@ -30,12 +29,10 @@
   "files": [
     "index.js",
     "i18n.js",
-    "decision-engine.js",
     "model-router.js",
     "clipboard.js",
     "install.js",
     "doctor.js",
-    "observer.js",
     "browser-control-port.js",
     "degradation-state-machine.js",
     "logger-emit.js",
@@ -43,7 +40,6 @@
     "session-monitor-win.js",
     "selectors/**",
     "skills/**",
-    "public/**",
     "lib/**",
     "examples/**",
     "LICENSE",

@@ -42,9 +42,7 @@ function toForwardSlash(p) {
 const FILES_TO_COPY = [
   "index.js",
   "logger-emit.js",
-  "observer.js",
   "clipboard.js",
-  "decision-engine.js",
   "i18n.js",
   "browser-control-port.js",
   "degradation-state-machine.js",
@@ -56,7 +54,7 @@ const FILES_TO_COPY = [
   "package-lock.json",
 ];
 
-const DIRS_TO_COPY = ["selectors", "public", "skills", "lib"];
+const DIRS_TO_COPY = ["selectors", "skills", "lib"];
 
 function log(msg) {
   console.log(`  ${msg}`);

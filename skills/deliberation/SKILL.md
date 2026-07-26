@@ -244,7 +244,7 @@ bash deliberation-monitor.sh --tmux
 ## 주의사항
 1. 여러 deliberation을 동시에 병렬 진행 가능
 2. session_id는 `deliberation_start` 응답에서 확인
-3. 토론 결과는 Obsidian vault에 자동 아카이브 (프로젝트 폴더 존재 시)
+3. 토론 결과는 state 디렉토리의 archive 폴더에 자동 아카이브
 4. 실시간 sync 파일은 state 디렉토리에 저장되며 완료 시 자동 삭제됨 (프로젝트 루트 오염 없음)
 5. `Transport closed` 발생 시 현재 CLI 세션 재시작 후 재시도 (stdio 연결은 세션 바인딩)
 6. 멀티 세션 운영 중 `pkill -f mcp-deliberation` 사용 금지 (다른 세션 연결까지 끊길 수 있음)
@@ -261,7 +261,7 @@ Deliberation produces two complementary data artifacts after synthesis:
 | Artifact | Role | Consumers |
 |----------|------|-----------|
 | `structured_synthesis` | **Human + reasoning canonical** | Human reviewers, LLM context, decision history |
-| `execution_contract` | **Automation canonical** | inbox-watcher, devkit, registry, orchestrator agents |
+| `execution_contract` | **Automation canonical** | devkit, registry, orchestrator agents |
 
 ### structured_synthesis (Human Canonical)
 Rich context for human review. Contains:

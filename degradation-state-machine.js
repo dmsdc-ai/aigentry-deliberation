@@ -1,5 +1,5 @@
 /**
- * DegradationStateMachine — 4-stage graceful degradation for BrowserControlPort
+ * DegradationStateMachine — 4-stage graceful degradation for browser turn sending
  *
  * States: HEALTHY → RETRYING → REBINDING → RELOADING → FALLBACK → FAILED
  * Time budget (60s SLO): S1(12s) + S2(8s) + S3(18s) + S4(22s spare)

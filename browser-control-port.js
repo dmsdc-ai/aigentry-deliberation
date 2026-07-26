@@ -1,5 +1,5 @@
 /**
- * BrowserControlPort — Abstract interface + Chrome DevTools MCP adapter
+ * DevToolsMcpAdapter — Chrome DevTools MCP browser control
  *
  * Deliberation 합의 스펙:
  * - 6 메서드: attach, sendTurn, waitTurnResult, health, recover, detach
@@ -28,75 +28,10 @@ function loadSelectorConfig(provider) {
   }
 }
 
-// ─── BrowserControlPort Interface ───
-
-class BrowserControlPort {
-  /**
-   * Bind to a browser tab for a deliberation session.
-   * @param {string} sessionId
-   * @param {{ url?: string, provider?: string }} targetHint
-   * @returns {Promise<Result>}
-   */
-  async attach(sessionId, targetHint) {
-    throw new Error("attach() not implemented");
-  }
-
-  /**
-   * Send a turn message to the LLM chat input.
-   * @param {string} sessionId
-   * @param {string} turnId
-   * @param {string} text
-   * @returns {Promise<Result>}
-   */
-  async sendTurn(sessionId, turnId, text) {
-    throw new Error("sendTurn() not implemented");
-  }
-
-  /**
-   * Wait for the LLM to produce a response.
-   * @param {string} sessionId
-   * @param {string} turnId
-   * @param {number} timeoutSec
-   * @returns {Promise<Result>}
-   */
-  async waitTurnResult(sessionId, turnId, timeoutSec) {
-    throw new Error("waitTurnResult() not implemented");
-  }
-
-  /**
-   * Check if the browser binding is healthy.
-   * @param {string} sessionId
-   * @returns {Promise<Result>}
-   */
-  async health(sessionId) {
-    throw new Error("health() not implemented");
-  }
-
-  /**
-   * Recover from failure.
-   * @param {string} sessionId
-   * @param {"rebind"|"reload"|"reopen"} mode
-   * @returns {Promise<Result>}
-   */
-  async recover(sessionId, mode) {
-    throw new Error("recover() not implemented");
-  }
-
-  /**
-   * Detach from the browser tab.
-   * @param {string} sessionId
-   * @returns {Promise<Result>}
-   */
-  async detach(sessionId) {
-    throw new Error("detach() not implemented");
-  }
-}
-
 // ─── Chrome DevTools MCP Adapter ───
 
-class DevToolsMcpAdapter extends BrowserControlPort {
+class DevToolsMcpAdapter {
   constructor({ cdpEndpoints = [], autoResend = true } = {}) {
-    super();
     /** @type {Map<string, { tabId: string, wsUrl: string, provider: string, selectors: object }>} */
     this.bindings = new Map();
     this.cdpEndpoints = cdpEndpoints;
@@ -106,6 +41,8 @@ class DevToolsMcpAdapter extends BrowserControlPort {
     this.sentTurns = new Map();
     /** @type {Map<string, any>} wsUrl -> WebSocket connection promise */
     this._connections = new Map();
+    /** @type {Map<string, DegradationStateMachine>} sessionId → degradation machine */
+    this.machines = new Map();
   }
 
   async _getConnection(wsUrl) {
@@ -1014,7 +951,38 @@ class DevToolsMcpAdapter extends BrowserControlPort {
   async detach(sessionId) {
     this.bindings.delete(sessionId);
     this.sentTurns.delete(sessionId);
+    this.machines.delete(sessionId);
     return makeResult(true, { sessionId, detached: true });
+  }
+
+  // ─── Degradation pipeline ───
+
+  _getOrCreateMachine(sessionId) {
+    if (!this.machines.has(sessionId)) {
+      this.machines.set(sessionId, new DegradationStateMachine({
+        onRetry: () => makeResult(false, null, { code: "SEND_FAILED", message: "retry pass-through" }),
+        onRebind: () => this.recover(sessionId, "rebind"),
+        onReload: () => this.recover(sessionId, "reload"),
+        onFallback: () => makeResult(false, null, {
+          code: "TIMEOUT",
+          message: "All degradation stages exhausted. Falling back to clipboard mode.",
+        }),
+      }));
+    }
+    return this.machines.get(sessionId);
+  }
+
+  /**
+   * Send a turn with the full degradation pipeline.
+   */
+  async sendTurnWithDegradation(sessionId, turnId, text) {
+    const machine = this._getOrCreateMachine(sessionId);
+    return machine.execute(() => this.sendTurn(sessionId, turnId, text));
+  }
+
+  getDegradationState(sessionId) {
+    const machine = this.machines.get(sessionId);
+    return machine ? machine.toJSON() : null;
   }
 
   // ─── CDP Helpers ───
@@ -1122,77 +1090,7 @@ class DevToolsMcpAdapter extends BrowserControlPort {
   }
 }
 
-// ─── Orchestrated Port (with DegradationStateMachine) ───
-
-class OrchestratedBrowserPort {
-  constructor({ cdpEndpoints = [], autoResend = true, skipEnabled = false } = {}) {
-    this.adapter = new DevToolsMcpAdapter({ cdpEndpoints, autoResend });
-    this.machines = new Map(); // sessionId → DegradationStateMachine
-  }
-
-  _getOrCreateMachine(sessionId) {
-    if (!this.machines.has(sessionId)) {
-      this.machines.set(sessionId, new DegradationStateMachine({
-        onRetry: () => makeResult(false, null, { code: "SEND_FAILED", message: "retry pass-through" }),
-        onRebind: () => this.adapter.recover(sessionId, "rebind"),
-        onReload: () => this.adapter.recover(sessionId, "reload"),
-        onFallback: (lastResult) => {
-          return makeResult(false, null, {
-            code: "TIMEOUT",
-            message: "All degradation stages exhausted. Falling back to clipboard mode.",
-          });
-        },
-      }));
-    }
-    return this.machines.get(sessionId);
-  }
-
-  async attach(sessionId, targetHint) {
-    return this.adapter.attach(sessionId, targetHint);
-  }
-
-  /**
-   * Send a turn with full degradation pipeline.
-   */
-  async sendTurnWithDegradation(sessionId, turnId, text) {
-    const machine = this._getOrCreateMachine(sessionId);
-    return machine.execute(() => this.adapter.sendTurn(sessionId, turnId, text));
-  }
-
-  async waitTurnResult(sessionId, turnId, timeoutSec) {
-    return this.adapter.waitTurnResult(sessionId, turnId, timeoutSec);
-  }
-
-  async switchModel(sessionId, modelName) {
-    return this.adapter.switchModel(sessionId, modelName);
-  }
-
-  async checkLogin(sessionId) {
-    return this.adapter.checkLogin(sessionId);
-  }
-
-  async health(sessionId) {
-    return this.adapter.health(sessionId);
-  }
-
-  async recover(sessionId, mode) {
-    return this.adapter.recover(sessionId, mode);
-  }
-
-  async detach(sessionId) {
-    this.machines.delete(sessionId);
-    return this.adapter.detach(sessionId);
-  }
-
-  getDegradationState(sessionId) {
-    const machine = this.machines.get(sessionId);
-    return machine ? machine.toJSON() : null;
-  }
-}
-
 export {
-  BrowserControlPort,
   DevToolsMcpAdapter,
-  OrchestratedBrowserPort,
   loadSelectorConfig,
 };
