@@ -267,7 +267,7 @@ This preserves explicit provenance rather than inferring semantics from raw bus 
 
 | Module | Package | Version | Role | Maturity |
 | --- | --- | --- | --- | --- |
-| **telepty** | `@dmsdc-ai/aigentry-telepty` | 0.7.0 | Cross-terminal / cross-machine prompt transport (PTY daemon) | Shipping |
+| **telepty** | `@dmsdc-ai/aigentry-telepty` | 0.7.1 | Cross-terminal / cross-machine prompt transport (PTY daemon) | Shipping |
 | **brain** | `@dmsdc-ai/aigentry-brain` | 0.3.1 | Persistent cross-session memory (MCP server) | Early |
 | **deliberation** | `@dmsdc-ai/aigentry-deliberation` | 0.0.47 | Multi-AI structured debate + synthesis (MCP server) | Early |
 | **devkit** | `@dmsdc-ai/aigentry-devkit` | 0.1.14 | Installer/scaffold for the AI dev environment | Early |
