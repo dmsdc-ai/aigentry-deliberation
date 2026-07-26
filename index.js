@@ -2304,36 +2304,13 @@ server.tool(
 
 server.tool(
   "deliberation_inject_context",
-  "Inject additional context or instructions into a specific active session. (Useful for local or remote context injection via Tailscale)",
+  "Inject additional context or instructions into a specific active session.",
   {
     session_id: z.string().describe("Session ID to inject context into"),
     context: z.string().describe("The context text to inject"),
     speaker: z.string().default("system").describe("Optional label for who injected the context (default: 'system')"),
-    remote_url: z.string().optional().describe("Optional Tailscale IP/Host and port (e.g., '100.100.100.5:3847') of the remote machine running the session. If provided, context is injected remotely."),
   },
-  safeToolHandler("deliberation_inject_context", async ({ session_id, context, speaker, remote_url }) => {
-    if (remote_url) {
-      try {
-        const baseUrl = remote_url.startsWith("http") ? remote_url : `http://${remote_url}`;
-        // Ensure trailing slash is removed
-        const cleanBaseUrl = baseUrl.replace(/\/$/, "");
-        const response = await fetch(`${cleanBaseUrl}/api/sessions/${encodeURIComponent(session_id)}/context`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ context, speaker: speaker || "system" })
-        });
-        
-        if (!response.ok) {
-          let errText = await response.text();
-          try { errText = JSON.parse(errText).error || errText; } catch { /* ignore */ }
-          return { content: [{ type: "text", text: `❌ Remote context injection failed (${response.status}): ${errText}` }] };
-        }
-        return { content: [{ type: "text", text: `✅ Context successfully injected remotely into session "${session_id}" at ${remote_url}.` }] };
-      } catch (e) {
-        return { content: [{ type: "text", text: `❌ Error connecting to remote observer at ${remote_url}: ${e.message}` }] };
-      }
-    }
-
+  safeToolHandler("deliberation_inject_context", async ({ session_id, context, speaker }) => {
     const resolved = resolveSessionId(session_id);
     if (!resolved) {
       return { content: [{ type: "text", text: "No active deliberation." }] };

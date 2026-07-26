@@ -18,6 +18,16 @@ tools are **no longer exposed** by the server:
   orchestrator/devkit repos. The execution-status sidecar itself is
   unchanged; only the standalone setter tool is gone.
 
+Changed tool signature:
+
+- **`deliberation_inject_context` no longer accepts `remote_url`.** That
+  branch POSTed to the observer dashboard's
+  `/api/sessions/:id/context`, and the observer is gone (below), so it
+  could no longer reach anything. Local injection — the only path anything
+  in the ecosystem uses — is unchanged. Callers passing `remote_url` will
+  now fail schema validation instead of silently attempting a dead
+  endpoint. `deliberation_ingest_remote_reply` is unaffected.
+
 Also removed:
 
 - **`deliberation-observer` bin** (`observer.js` + `public/index.html`) —
@@ -29,10 +39,6 @@ Also removed:
 - `lib/entitlement.js` and its tool gate — every feature was granted to
   every tier, so it could not deny anything.
 - Hardcoded `~/Documents/Obsidian Vault` context/archive branches.
-
-`deliberation_inject_context` keeps its `remote_url` parameter, but the
-server that served that endpoint (`observer.js`) is gone — remote injection
-now requires an externally hosted compatible endpoint.
 
 ### Added
 
