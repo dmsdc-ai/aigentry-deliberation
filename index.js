@@ -53,6 +53,8 @@ After installation, restart Claude Code to start using it.
  *   deliberation_list         List past archives
  *   deliberation_reset        Reset session (session_id optional, resets all if omitted)
  *   deliberation_speaker_candidates      Query available speaker candidates (local CLI + browser LLM tabs)
+ *   deliberation_confirm_speakers        Bind a candidate token to the set a user picked in the TUI
+ *   deliberation_select_speakers         Bind a candidate token to a controller-composed set under a delegation
  *   deliberation_browser_llm_tabs      Query browser LLM tab list
  *   deliberation_browser_auto_turn      Auto-send turn to browser LLM and collect response (CDP-based)
  *   deliberation_cli_auto_turn          Auto-send turn to CLI speaker and collect response
@@ -106,8 +108,15 @@ import {
   clearSpeakerSelectionToken,
   validateSpeakerSelectionSnapshot,
   confirmSpeakerSelectionToken,
+  selectSpeakersByDelegation,
+  resolveSelectionOrigin,
+  normalizeDelegationMetadata,
   markSelectionTokenConsumed,
   validateSpeakerSelectionRequest,
+  SELECTION_ORIGIN_USER,
+  SELECTION_ORIGIN_CONTROLLER_DELEGATED,
+  SELECTION_ORIGIN_LEGACY_UNLABELED,
+  DELEGATION_FIELD_MAX_LENGTH,
   // Browser participant helpers
   hasExplicitBrowserParticipantSelection,
   resolveIncludeBrowserSpeakers,
@@ -1091,10 +1100,29 @@ server.tool(
           speakers,
           includeBrowserSpeakers,
         });
-        if (result.ok) {
-          markSelectionTokenConsumed({ selectionState: persistedState });
+        if (!result.ok) {
+          return result;
         }
-        return result;
+        // Task #1172 — resolve provenance before consuming. An unknown origin is
+        // refused by validateSpeakerSelectionRequest above; here we additionally
+        // refuse `auto_execute` on the delegated path. Selection provenance is a
+        // composition record, never execution authority — actuation needs its own.
+        // The refusal happens BEFORE markSelectionTokenConsumed so a mistaken
+        // auto_execute does not burn an otherwise valid single-use token.
+        const originResolution = resolveSelectionOrigin(persistedState);
+        if (!originResolution.ok) {
+          return originResolution;
+        }
+        if (originResolution.origin === SELECTION_ORIGIN_CONTROLLER_DELEGATED && auto_execute === true) {
+          return { ok: false, code: "delegated_auto_execute_forbidden" };
+        }
+        markSelectionTokenConsumed({ selectionState: persistedState });
+        return {
+          ok: true,
+          selection_origin: originResolution.origin,
+          selection_origin_legacy: !!originResolution.legacy,
+          delegation: originResolution.delegation,
+        };
       });
     }
     const hasManualSpeakers = manualSpeakersProvided && (!effectiveRequireManual || selectionValidation.ok);
@@ -1109,10 +1137,31 @@ server.tool(
       const confirmationNote = selectionValidation.code === "selection_not_confirmed"
         ? "\n\nThe token you passed is only a candidate snapshot token. You must confirm the exact user-picked speakers before start."
         : "";
+
+      // Task #1172 — the delegated path has its own refusals; neither is a
+      // selection-freshness problem, so answer them directly instead of sending
+      // the caller back through the TUI loop.
+      if (selectionValidation.code === "delegated_auto_execute_forbidden") {
+        return {
+          content: [{
+            type: "text",
+            text: `❌ \`auto_execute: true\` is refused for a controller-delegated selection.\n\nDelegated selection records WHO composed the speaker set. It is not execution authority, approval, or permission to spawn work. Automatic handoff requires independent execution authority that a selection token cannot carry.\n\nThe selection token was NOT consumed — retry coordination-only:\n\`\`\`\ndeliberation_start(\n  topic: "${topic.replace(/"/g, '\\"')}",\n  selection_token: "${String(selection_token || "<delegated-token>").replace(/"/g, '\\"')}",\n  speakers: ${JSON.stringify(speakers || [])},\n  auto_execute: false\n)\n\`\`\``,
+          }],
+        };
+      }
+      if (selectionValidation.code === "unknown_selection_origin") {
+        return {
+          content: [{
+            type: "text",
+            text: `❌ This selection token carries an unrecognised \`selection_origin\`${selectionValidation.origin ? ` (\`${String(selectionValidation.origin).slice(0, 64)}\`)` : ""}.\n\nAn origin this server cannot identify is refused. It is never assumed to be a human selection.\n\nMint a fresh token through one of the supported paths:\n- \`deliberation_confirm_speakers\` — user picked the set in the TUI\n- \`deliberation_select_speakers\` — controller composed the set under a delegation`,
+          }],
+        };
+      }
+
       return {
         content: [{
           type: "text",
-          text: `Fresh participant selection is required before each deliberation start.${confirmationNote}${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates(include_cli: true, include_browser: ${includeBrowserSpeakers ? "true" : "false"})\`\n2. Show the speaker list in the TUI and let the user choose participants\n3. Call \`deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: [...])\`\n4. Pass the returned confirmed \`selection_token\` into \`deliberation_start(..., selection_token: "...", speakers: [...])\`\n\n${candidateText}`,
+          text: `Fresh participant selection is required before each deliberation start.${confirmationNote}${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates(include_cli: true, include_browser: ${includeBrowserSpeakers ? "true" : "false"})\`\n2. Show the speaker list in the TUI and let the user choose participants\n3. Call \`deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: [...])\`\n4. Pass the returned confirmed \`selection_token\` into \`deliberation_start(..., selection_token: "...", speakers: [...])\`\n\nIf a controller is composing the set under an existing delegation rather than a user picking it in the TUI, use \`deliberation_select_speakers(selection_token: "<candidate-token>", speakers: [...], delegation: { task_id: "...", reference: "..." })\` at step 3 instead. Do not report a delegated composition as a user selection.\n\n${candidateText}`,
         }],
       };
     }
@@ -1122,7 +1171,7 @@ server.tool(
       const llmSuggested = Array.isArray(speakers) && speakers.length > 0
         ? `\n\n💡 **LLM suggested speakers:** ${speakers.join(", ")}\nShow the candidate list in the TUI, let the user confirm, then call \`deliberation_confirm_speakers\` with the final speaker list.`
         : "";
-      const configNote = "\n\n⚙️ Manual speaker selection is enabled and requires a fresh confirmed `selection_token`.";
+      const configNote = "\n\n⚙️ Speaker selection is enforced and requires a fresh `selection_token` minted by `deliberation_confirm_speakers` (user picked in the TUI) or `deliberation_select_speakers` (controller composed under a delegation).";
       return {
         content: [{
           type: "text",
@@ -1203,8 +1252,22 @@ server.tool(
       detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
     }
 
+    // Task #1172 — report the selection provenance truthfully. A delegated or
+    // legacy token must never be rendered as "user-selected"; that would assert a
+    // human TUI click that never happened.
+    const selectionOrigin = hasManualSpeakers
+      ? (selectionValidation.selection_origin || SELECTION_ORIGIN_LEGACY_UNLABELED)
+      : null;
+    const selectionDelegation = selectionOrigin === SELECTION_ORIGIN_CONTROLLER_DELEGATED
+      ? (selectionValidation.delegation || null)
+      : null;
+    const SELECTION_ORIGIN_LABELS = {
+      [SELECTION_ORIGIN_USER]: "user-selected (TUI)",
+      [SELECTION_ORIGIN_CONTROLLER_DELEGATED]: "controller-delegated (no human selection click)",
+      [SELECTION_ORIGIN_LEGACY_UNLABELED]: "legacy-unlabeled (pre-origin token; provenance unknown, not a human-selection claim)",
+    };
     const participantMode = hasManualSpeakers
-      ? "user-selected"
+      ? (SELECTION_ORIGIN_LABELS[selectionOrigin] || selectionOrigin)
       : (autoDiscoveredSpeakers.length > 0 ? "auto-discovered (PATH)" : "default");
 
     const degradationLevels = await detectDegradationLevels();
@@ -1219,6 +1282,18 @@ server.tool(
       current_round: 1,
       current_speaker: normalizedFirstSpeaker,
       speakers: speakerOrder,
+      // Task #1172 — provenance travels with the session so status, history and
+      // archive readers see how this speaker set was composed. `delegation` is the
+      // caller's audit claim, echoed verbatim and never dereferenced.
+      speaker_selection: selectionOrigin
+        ? {
+            origin: selectionOrigin,
+            legacy_unlabeled: selectionOrigin === SELECTION_ORIGIN_LEGACY_UNLABELED,
+            human_selection_confirmed: selectionOrigin === SELECTION_ORIGIN_USER,
+            delegation: selectionDelegation,
+            recorded_at: new Date().toISOString(),
+          }
+        : null,
       participant_profiles: mapParticipantProfiles(speakerOrder, candidateSnapshot.candidates, participant_types),
       log: [],
       synthesis: null,
@@ -1313,7 +1388,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `✅ Deliberation started! Forum created.\n\n**Session:** ${sessionId}\n**Project:** ${state.project}\n**Topic:** ${topic}\n**Rounds:** ${rounds}\n**Ordering:** ${state.ordering_strategy || "cyclic"}\n**Participant mode:** ${participantMode}\n**Participants:** ${speakerOrder.join(", ")}\n**First speaker:** ${state.current_speaker}\n**Concurrent sessions:** ${active.length}${terminalMsg}${detectWarning}${detectWarningLiveness}\n\n**Role assignments:**${role_preset ? ` (preset: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}\n\n**Transport routing:**\n${transportSummary}\n\n💡 Use session_id: "${sessionId}" for subsequent tool calls.\n📋 Check forum status: \`deliberation_status(session_id: "${sessionId}")\``,
+        text: `✅ Deliberation started! Forum created.\n\n**Session:** ${sessionId}\n**Project:** ${state.project}\n**Topic:** ${topic}\n**Rounds:** ${rounds}\n**Ordering:** ${state.ordering_strategy || "cyclic"}\n**Participant mode:** ${participantMode}${selectionDelegation ? `\n**Delegation claim (unverified audit metadata):** task_id: ${selectionDelegation.task_id} | reference: ${selectionDelegation.reference}` : ""}\n**Participants:** ${speakerOrder.join(", ")}\n**First speaker:** ${state.current_speaker}\n**Concurrent sessions:** ${active.length}${terminalMsg}${detectWarning}${detectWarningLiveness}\n\n**Role assignments:**${role_preset ? ` (preset: ${role_preset})` : ""}\n${speakerOrder.map(s => `  - \`${s}\`: ${(state.speaker_roles || {})[s] || "free"}`).join("\n")}\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}\n\n**Transport routing:**\n${transportSummary}\n\n💡 Use session_id: "${sessionId}" for subsequent tool calls.\n📋 Check forum status: \`deliberation_status(session_id: "${sessionId}")\``,
       }],
     };
   })
@@ -1348,7 +1423,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `${text}\n\n**Candidate token:** \`${selection.token}\`\nAfter the user picks participants in the TUI, call \`deliberation_confirm_speakers(selection_token: "${selection.token}", speakers: [...])\` to mint a confirmed start token. Raw candidate tokens cannot start a deliberation.\n\n${PRODUCT_DISCLAIMER}`,
+        text: `${text}\n\n**Candidate token:** \`${selection.token}\`\nAfter the user picks participants in the TUI, call \`deliberation_confirm_speakers(selection_token: "${selection.token}", speakers: [...])\` to mint a confirmed start token.\nIf a controller composes the set under an existing delegation instead, call \`deliberation_select_speakers(selection_token: "${selection.token}", speakers: [...], delegation: { task_id: "...", reference: "..." })\` — that records controller-delegated provenance and does not claim a human selection.\nRaw candidate tokens cannot start a deliberation.\n\n${PRODUCT_DISCLAIMER}`,
       }],
     };
   }
@@ -1391,6 +1466,71 @@ server.tool(
       content: [{
         type: "text",
         text: `✅ Speaker selection confirmed.\n\n**Selected speakers:** ${confirmation.selectionState.selected_speakers.join(", ")}\n**Confirmed selection token:** \`${confirmation.selectionState.token}\`\n\nUse this exact token with the same speaker list in \`deliberation_start(..., selection_token: "...", speakers: [...])\`.\nIf the user changes the selection, call \`deliberation_speaker_candidates\` again for a fresh snapshot.`,
+      }],
+    };
+  }
+);
+
+// Task #1172 — delegated composition path. Separate tool, separate label: a
+// controller that already holds a composition delegation can mint a start token
+// without pretending a human clicked in the TUI. `deliberation_confirm_speakers`
+// stays the user-TUI path and there is no silent fallback between the two.
+server.tool(
+  "deliberation_select_speakers",
+  "Bind a fresh candidate token to a controller-composed speaker set under an existing delegation. Records provenance as controller-delegated — this is NOT human approval and grants no execution authority.",
+  {
+    selection_token: z.string().trim().min(1).max(128).describe("Candidate token returned by deliberation_speaker_candidates."),
+    speakers: z.array(z.string().trim().min(1)).min(1).describe("Exact speakers the controller composed. Must all be present in that candidate snapshot."),
+    delegation: z.preprocess(
+      (v) => (typeof v === "string" ? JSON.parse(v) : v),
+      z.object({
+        task_id: z.string().trim().min(1).max(DELEGATION_FIELD_MAX_LENGTH)
+          .describe("Task identifier the controller is composing under."),
+        reference: z.string().trim().min(1).max(DELEGATION_FIELD_MAX_LENGTH)
+          .describe("Pointer to the delegation record. Recorded verbatim as an audit claim; the server never reads or fetches it."),
+      })
+    ).describe("Audit metadata for the delegation. This is a CLAIM recorded for traceability — it is not validated as task authority and confers no approval, permission or execution rights."),
+  },
+  async ({ selection_token, speakers, delegation }) => {
+    const selectionState = loadSpeakerSelectionToken();
+    const includeBrowserSpeakers = !!selectionState?.include_browser;
+    const selection = selectSpeakersByDelegation({
+      selectionState,
+      selection_token,
+      speakers,
+      includeBrowserSpeakers,
+      delegation,
+    });
+
+    if (!selection.ok) {
+      if (String(selection.code || "").startsWith("missing_delegation") || String(selection.code || "").startsWith("delegation_")) {
+        return {
+          content: [{
+            type: "text",
+            text: `Delegated speaker selection failed: \`${selection.code}\`.\n\n\`delegation\` must carry a non-empty \`task_id\` and \`reference\`, each at most ${DELEGATION_FIELD_MAX_LENGTH} characters. Both are recorded as an audit claim only — the reference is never opened by this server.`,
+          }],
+        };
+      }
+      const candidateText = formatSpeakerCandidatesReport(await collectSpeakerCandidates({
+        include_cli: true,
+        include_browser: includeBrowserSpeakers,
+      }));
+      const mismatchNote = selection.code === "speaker_mismatch"
+        ? `\n\nRequested speakers not in the latest candidate snapshot: ${(selection.missing_speakers || []).join(", ")}`
+        : "";
+      return {
+        content: [{
+          type: "text",
+          text: `Delegated speaker selection failed: \`${selection.code}\`.${mismatchNote}\n\n1. Call \`deliberation_speaker_candidates\` for a fresh snapshot\n2. Call \`deliberation_select_speakers\` with that snapshot's token and the composed speaker set\n\n${candidateText}`,
+        }],
+      };
+    }
+
+    const minted = selection.selectionState;
+    return {
+      content: [{
+        type: "text",
+        text: `✅ Delegated speaker selection recorded.\n\n**Selected speakers:** ${minted.selected_speakers.join(", ")}\n**Start token:** \`${minted.token}\`\n**Selection origin:** controller-delegated (no human TUI selection occurred)\n**Delegation claim (unverified):** task_id: ${minted.delegation.task_id} | reference: ${minted.delegation.reference}\n\nUse this exact token with the same speaker list in \`deliberation_start(..., selection_token: "...", speakers: [...])\`.\n\n⚠️ This token records WHO composed the participant list. It is not approval, permission, or execution authority: \`deliberation_start(auto_execute: true)\` is refused for delegated selections and must come from an independent execution decision.`,
       }],
     };
   }
@@ -1447,6 +1587,11 @@ server.tool(
       };
     }
 
+    // Task #1172 — show how the participant set was composed, without upgrading
+    // an unlabeled legacy token into a human-selection claim.
+    const selectionLine = state.speaker_selection
+      ? `\n**Selection origin:** ${state.speaker_selection.origin}${state.speaker_selection.delegation ? ` (task_id: ${state.speaker_selection.delegation.task_id} | reference: ${state.speaker_selection.delegation.reference} — unverified audit claim)` : ""}`
+      : "";
     const execStatus = loadExecutionStatus(state.id, state.project);
     const execLine = execStatus
       ? `\n**Execution status:** ${execStatus.execution_status}${execStatus.tasks_total > 0 ? ` (${execStatus.tasks_done}/${execStatus.tasks_total} tasks)` : ""}${execStatus.note ? ` — ${execStatus.note}` : ""}`
@@ -1454,7 +1599,7 @@ server.tool(
     return {
       content: [{
         type: "text",
-        text: `📋 **Forum Status** — ${state.id}\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Status:** ${state.status === "active" ? "active" : state.status === "awaiting_synthesis" ? "awaiting synthesis" : state.status === "completed" ? "completed" : state.status} (Round ${state.current_round}/${state.max_rounds})${execLine}\n**Participants:** ${state.speakers.join(", ")}\n**Current turn:** ${state.current_speaker}\n**Accumulated responses:** ${state.log.length}${state.degradation ? `\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}` : ""}`,
+        text: `📋 **Forum Status** — ${state.id}\n\n**Project:** ${state.project}\n**Topic:** ${state.topic}\n**Status:** ${state.status === "active" ? "active" : state.status === "awaiting_synthesis" ? "awaiting synthesis" : state.status === "completed" ? "completed" : state.status} (Round ${state.current_round}/${state.max_rounds})${execLine}\n**Participants:** ${state.speakers.join(", ")}${selectionLine}\n**Current turn:** ${state.current_speaker}\n**Accumulated responses:** ${state.log.length}${state.degradation ? `\n\n**Environment status:**\n${formatDegradationReport(state.degradation)}` : ""}`,
       }],
     };
   }
@@ -2375,7 +2520,11 @@ server.tool(
       };
     }
 
-    let history = `**Session:** ${state.id}\n**Topic:** ${state.topic} | **Status:** ${state.status}\n\n`;
+    // Task #1172 — history carries the same provenance label as status/archive.
+    const historySelectionLine = state.speaker_selection
+      ? `**Selection origin:** ${state.speaker_selection.origin}${state.speaker_selection.delegation ? ` (task_id: ${state.speaker_selection.delegation.task_id} | reference: ${state.speaker_selection.delegation.reference} — unverified audit claim)` : ""}\n`
+      : "";
+    let history = `**Session:** ${state.id}\n**Topic:** ${state.topic} | **Status:** ${state.status}\n${historySelectionLine}\n`;
     for (const e of state.log) {
       history += `### ${e.speaker} — Round ${e.round}\n\n${e.content}\n\n---\n\n`;
     }
@@ -2420,6 +2569,12 @@ server.tool(
       loaded.synthesis = synthesis;
       loaded.structured_synthesis = structured || null;
       loaded.execution_contract = buildExecutionContract({ state: loaded, structured: structured || null });
+      // Task #1172 — carry selection provenance into the archived contract so the
+      // archive and its machine-readable sidecar record how the participant set was
+      // composed. Provenance is descriptive only; it authorises nothing downstream.
+      if (loaded.execution_contract && loaded.speaker_selection) {
+        loaded.execution_contract.speaker_selection = loaded.speaker_selection;
+      }
       loaded.status = "completed";
       loaded.current_speaker = "none";
       saveSession(loaded);
@@ -2934,7 +3089,7 @@ server.tool(
 // ── Start ──────────────────────────────────────────────────────
 
 // Only start server when run directly (not imported for testing)
-const __currentFile = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
+const __currentFile = fileURLToPath(import.meta.url);
 const __entryFile = process.argv[1] ? path.resolve(process.argv[1]) : null;
 if (__entryFile && path.resolve(__currentFile) === __entryFile) {
   const transport = new StdioServerTransport();
@@ -2959,4 +3114,4 @@ if (__entryFile && path.resolve(__currentFile) === __entryFile) {
 }
 
 // ── Test exports (used by vitest) ──
-export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, validateSpeakerSelectionRequest, markSelectionTokenConsumed, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };
+export { appendRuntimeLog, _flushDedupToFile, _isBrokenStdioError, selectNextSpeaker, loadRolePrompt, inferSuggestedRole, parseVotes, ROLE_KEYWORDS, ROLE_HEADING_MARKERS, loadRolePresets, applyRolePreset, detectDegradationLevels, formatDegradationReport, DEGRADATION_TIERS, hasExplicitBrowserParticipantSelection, resolveIncludeBrowserSpeakers, confirmSpeakerSelectionToken, selectSpeakersByDelegation, resolveSelectionOrigin, normalizeDelegationMetadata, SELECTION_ORIGIN_USER, SELECTION_ORIGIN_CONTROLLER_DELEGATED, SELECTION_ORIGIN_LEGACY_UNLABELED, DELEGATION_FIELD_MAX_LENGTH, validateSpeakerSelectionRequest, markSelectionTokenConsumed, truncatePromptText, getPromptBudgetForSpeaker, formatRecentLogForPrompt, getCliAutoTurnTimeoutSec, getCliExecArgs, buildCliAutoTurnFailureText, buildClipboardTurnPrompt, getProjectStateDir, loadSession, saveSession, listActiveSessions, multipleSessionsError, findSessionRecord, mapParticipantProfiles, formatSpeakerCandidatesReport, buildTeleptyTurnRequestEnvelope, buildTeleptyTurnCompletedEnvelope, buildTeleptySynthesisEnvelope, validateTeleptyEnvelope, registerPendingTeleptyTurnRequest, handleTeleptyBusMessage, completePendingTeleptySemantic, cleanupPendingTeleptyTurn, getTeleptySessionHealth, TELEPTY_TRANSPORT_TIMEOUT_MS, TELEPTY_SEMANTIC_TIMEOUT_MS };

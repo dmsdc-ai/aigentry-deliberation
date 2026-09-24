@@ -73,7 +73,8 @@ open demo/forum/index.html
 | `deliberation_list` | List archived sessions |
 | `deliberation_reset` | Reset session(s) |
 | `deliberation_speaker_candidates` | List available speakers |
-| `deliberation_confirm_speakers` | Confirm the exact user-selected speaker set |
+| `deliberation_confirm_speakers` | Confirm the exact user-selected speaker set (TUI path) |
+| `deliberation_select_speakers` | Record a controller-composed speaker set under an existing delegation |
 | `deliberation_browser_llm_tabs` | List open browser LLM tabs |
 | `deliberation_browser_auto_turn` | Auto-send turn to a browser LLM via CDP |
 | `deliberation_route_turn` | Route turn to appropriate transport |
@@ -87,12 +88,53 @@ open demo/forum/index.html
 
 Speaker selection is enforced before a session can start. Raw candidate tokens cannot initiate a deliberation.
 
+**User-selected path** — a human picks the participants in the TUI:
+
 ```text
 1. deliberation_speaker_candidates(...)
 2. User picks speakers in the TUI
 3. deliberation_confirm_speakers(selection_token: "<candidate-token>", speakers: [...])
 4. deliberation_start(selection_token: "<confirmed-token>", speakers: [...])
 ```
+
+**Controller-delegated path** — a controller composes the participants under a delegation it already holds, with no human TUI click:
+
+```text
+1. deliberation_speaker_candidates(...)
+2. Controller composes the speaker set
+3. deliberation_select_speakers(
+     selection_token: "<candidate-token>",
+     speakers: [...],
+     delegation: { task_id: "...", reference: "..." }
+   )
+4. deliberation_start(selection_token: "<delegated-token>", speakers: [...])
+```
+
+Both paths apply the same rules: the speaker set must come from a fresh candidate snapshot, the start token is single-use, and `deliberation_start` must be called with the exact same speaker set. They differ only in what they claim about provenance. There is no silent fallback between them — a delegated composition is never reported as a user selection.
+
+### Selection provenance
+
+Every start token records a `selection_origin`, preserved in the session state, `deliberation_status`, `deliberation_history` and the archived execution contract:
+
+| Origin | Meaning |
+|--------|---------|
+| `user-selected` | A human picked this set in the TUI via `deliberation_confirm_speakers` |
+| `controller-delegated` | A controller composed this set via `deliberation_select_speakers`; no human selection click occurred |
+| `legacy-unlabeled` | A confirmed token minted before origins existed. Accepted for compatibility, and explicitly **not** a claim that a human authenticated the selection |
+
+An origin the server does not recognise is refused. It is never assumed to be human.
+
+The `delegation` object (`task_id`, `reference`, each a non-empty string of at most 200 characters) is an **audit claim supplied by the caller**. The server records it verbatim and never reads, resolves or fetches the reference. It is not validated task authority.
+
+### Selection provenance is not execution authority
+
+`selection_origin` records *who composed the participant list* — nothing more. It is not approval, permission, or authority to execute or spawn anything:
+
+- `deliberation_start(auto_execute: true)` is **refused** for a controller-delegated selection; automatic handoff requires an independent execution decision. The selection token is not consumed by that refusal, so a coordination-only retry still works.
+- The default coordination-only start (`auto_execute: false`) works on every path.
+- No selection path weakens any other actuation guard.
+
+There is no fixed participant-count cap on a standard start: a speaker count alone never rejects a selection drawn from a fresh candidate snapshot. The `lite` mode caps participants to 3 and rounds to 2 — that is an opt-in limit on discussion size, not a cap on how many workers may be spawned.
 
 ## Speaker Ordering Strategies
 
