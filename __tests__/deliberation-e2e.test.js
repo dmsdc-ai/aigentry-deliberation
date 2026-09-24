@@ -5,8 +5,26 @@ import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTeleptySynthesisEnvelope } from '../index.js';
 
-const REPO_ROOT = process.cwd();
-const SERVER_ENTRY = path.join(REPO_ROOT, 'index.js');
+// dh1172ao — deterministic CLI discovery. Every harness below is handed its
+// own inert stub bin directory and an explicitly constructed environment; the
+// host PATH is never inherited, so no real agent CLI, browser or telepty
+// endpoint is reachable from these tests. See
+// __tests__/helpers/cli-discovery-fixture.js for the declared seam and its
+// limits (11-name fixture ceiling is NOT the product worker-count cap).
+import {
+  FIXTURE_REPO_ROOT,
+  FIXTURE_SERVER_ENTRY,
+  FIXTURE_NODE_BIN,
+  buildFixtureEnv,
+  createCliDiscoveryStubs,
+  joinOwnedChild,
+  writeStub,
+} from './helpers/cli-discovery-fixture.js';
+
+// Resolved from this file's own location rather than process.cwd(), so the
+// harness does not depend on where the runner was invoked.
+const REPO_ROOT = FIXTURE_REPO_ROOT;
+const SERVER_ENTRY = FIXTURE_SERVER_ENTRY;
 
 function makeSession(project, id, overrides = {}) {
   return {
@@ -77,13 +95,15 @@ async function createHarness() {
     include_browser_speakers: false,
   }, null, 2));
 
-  const child = spawn(process.execPath, [SERVER_ENTRY], {
+  // Declared discovery seam: the full 11-name DEFAULT_CLI_CANDIDATES set as
+  // inert `exit 0` stubs, inside this harness's own root. The delegated cases
+  // below mint tokens for ['claude','codex']; without this the suite silently
+  // required those binaries to be installed on the host.
+  const { dir: stubDir } = createCliDiscoveryStubs({ root: homeDir });
+
+  const child = spawn(FIXTURE_NODE_BIN, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      AIGENTRY_TIER: 'pro',
-    },
+    env: buildFixtureEnv({ homeDir, stubDir }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -152,8 +172,10 @@ async function createHarness() {
       }
       return response.result;
     },
-    cleanup() {
-      child.kill('SIGTERM');
+    // Join the child before removing the owned tree: rmSync racing a
+    // still-writing server leaks both a process handle and a temp root.
+    async cleanup() {
+      await joinOwnedChild(child);
       fs.rmSync(homeDir, { recursive: true, force: true });
     },
   };
@@ -168,10 +190,10 @@ function getText(result) {
 
 const harnesses = [];
 
-afterEach(() => {
+afterEach(async () => {
   while (harnesses.length > 0) {
     const harness = harnesses.pop();
-    harness.cleanup();
+    await harness.cleanup();
   }
 });
 
@@ -546,12 +568,17 @@ describe('deliberation e2e flows', () => {
 // check halts auto-handoff cleanly without fabricating synthesis.
 
 function writeStubCli(dir, name) {
+  // Behaviour-bearing stub: unlike the inert discovery stubs it emits a
+  // response line, because these cases assert on turn content.
+  //
   // Stub must exit immediately without reading stdin. The gemini invocation path
   // (spawn('gemini', ['-p', prompt])) never closes the child's stdin, so a stub
   // that blocks on `cat` would hang indefinitely. Claude/codex invocations close
   // stdin after writing, but we keep the stub uniform and stdin-agnostic.
-  const body = `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
-  fs.writeFileSync(path.join(dir, name), body, { mode: 0o755 });
+  const body = process.platform === 'win32'
+    ? `@echo off\r\necho [STUB] ${name} response [AGREE]\r\nexit /b 0\r\n`
+    : `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
+  writeStub(dir, name, body);
 }
 
 function extractToken(text, label) {
@@ -570,19 +597,22 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     include_browser_speakers: false,
   }, null, 2));
 
-  const stubDir = path.join(homeDir, 'stubs');
-  fs.mkdirSync(stubDir, { recursive: true });
+  // One owned bin directory, written in two layers so there is no
+  // PATH-shadowing ambiguity between them:
+  //   1. the inert 11-name discovery baseline, so speaker discovery is
+  //      deterministic and never consults the host;
+  //   2. the behaviour-bearing stubs for the speakers these cases actually
+  //      dispatch, overwriting the inert file of the same name.
+  const { dir: stubDir } = createCliDiscoveryStubs({ root: homeDir });
   for (const name of stubs) writeStubCli(stubDir, name);
 
-  const child = spawn(process.execPath, [SERVER_ENTRY], {
+  const child = spawn(FIXTURE_NODE_BIN, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      AIGENTRY_TIER: 'pro',
-      DELIBERATION_CALLER_SPEAKER: callerSpeaker,
-      PATH: `${stubDir}:${process.env.PATH || ''}`,
-    },
+    env: buildFixtureEnv({
+      homeDir,
+      stubDir,
+      extra: { DELIBERATION_CALLER_SPEAKER: callerSpeaker },
+    }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -640,8 +670,8 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
       if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
       return response.result;
     },
-    cleanup() {
-      child.kill('SIGTERM');
+    async cleanup() {
+      await joinOwnedChild(child);
       fs.rmSync(homeDir, { recursive: true, force: true });
     },
   };
@@ -870,4 +900,219 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     // No turns should have been executed or fabricated
     expect(state.log.filter(e => e.event !== 'context_injection')).toHaveLength(0);
   }, 20000);
+});
+
+// ── Task #1172 — controller-delegated selection, end to end ─────
+//
+// Complements __tests__/delegated-selection.test.js: that suite proves the
+// API -> validation -> token -> start chain; this one follows the origin
+// outward into status output, history and archive, and pins the actuation
+// refusal. Uses the same local harness above (isolated HOME, inert env).
+describe('controller-delegated selection — origin propagation', () => {
+  const DELEGATION = { task_id: '1172', reference: 'dv1172ad/release1171' };
+  const DELEGATED_ORIGIN = 'controller-delegated';
+
+  function selectionFilePath(homeDir, project) {
+    return path.join(getProjectStateDir(homeDir, project), 'speaker-selection.json');
+  }
+
+  function findSelectionState(homeDir) {
+    const base = path.join(getInstallDir(homeDir), 'state');
+    if (!fs.existsSync(base)) return null;
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const file = selectionFilePath(homeDir, entry.name);
+      if (fs.existsSync(file)) return { state: readJson(file), project: entry.name };
+    }
+    return null;
+  }
+
+  function findSession(homeDir) {
+    const base = path.join(getInstallDir(homeDir), 'state');
+    if (!fs.existsSync(base)) return null;
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(getProjectStateDir(homeDir, entry.name), 'sessions');
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (name.endsWith('.json')) {
+          return { session: readJson(path.join(dir, name)), project: entry.name };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Mints a delegated token through the real tools. Returns null when the
+  // delegated route is absent, so the caller can report a precise failure.
+  async function mintDelegated(harness, speakers) {
+    const snapshot = getText(await harness.callTool('deliberation_speaker_candidates', {
+      include_cli: true,
+      include_browser: false,
+    }));
+    const candidateToken = (snapshot.match(/\*\*Candidate token:\*\*\s*`([^`]+)`/) || [])[1];
+    expect(candidateToken, `no candidate token:\n${snapshot}`).toBeTruthy();
+
+    await harness.callTool('deliberation_select_speakers', {
+      selection_token: candidateToken,
+      speakers,
+      delegation: DELEGATION,
+    });
+    const found = findSelectionState(harness.homeDir);
+    return found?.state?.selection_origin === DELEGATED_ORIGIN ? found.state.token : null;
+  }
+
+  it('carries selection_origin from start into status, history and archive', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const delegatedToken = await mintDelegated(harness, speakers);
+    expect(delegatedToken, 'deliberation_select_speakers did not mint a delegated token').toBeTruthy();
+
+    const startText = getText(await harness.callTool('deliberation_start', {
+      topic: 'delegated origin propagation',
+      selection_token: delegatedToken,
+      speakers,
+      rounds: 1,
+    }));
+    expect(startText).toMatch(/Deliberation started/);
+    expect(startText).toMatch(/controller-delegated/);
+    expect(startText).not.toMatch(/user-selected/);
+
+    const found = findSession(harness.homeDir);
+    expect(found, 'no session persisted').toBeTruthy();
+    const { session, project } = found;
+    // dv1172ae — representation adapter only: the candidate persists provenance
+    // as a structured `speaker_selection` block rather than a top-level field.
+    expect(session.speaker_selection?.origin).toBe(DELEGATED_ORIGIN);
+    expect(session.speaker_selection.human_selection_confirmed).toBe(false);
+    expect(session.speaker_selection.delegation).toMatchObject(DELEGATION);
+
+    // status output
+    const statusText = getText(await harness.callTool('deliberation_status', {
+      session_id: session.id,
+    }));
+    expect(statusText).toMatch(/controller-delegated/);
+    expect(statusText).not.toMatch(/user-selected/);
+
+    // history listing
+    const historyText = getText(await harness.callTool('deliberation_history', {}));
+    expect(historyText).not.toMatch(/user-selected/);
+
+    // archive: reset only archives a session that has log entries
+    // (index.js:2709 — an empty session is discarded, not archived; that is
+    // pre-existing baseline behaviour, not part of this contract). Give the
+    // session one inert log entry so the archive path is actually exercised.
+    // No turn is executed and no provider is called.
+    await harness.callTool('deliberation_inject_context', {
+      session_id: session.id,
+      context: 'dv1172ae archive probe',
+    });
+    await harness.callTool('deliberation_reset', { session_id: session.id });
+
+    // dv1172ae: archive files are named by topic slug, not session id
+    // (`deliberation-<date>-<topic-slug>.md`), so dv1172ad's
+    // `f.includes(session.id)` filter never matched and the archive assertions
+    // below were never actually reached. Select by content instead.
+    const allArchived = getArchiveFiles(harness.homeDir, project);
+    expect(allArchived.length, 'reset produced no archive file at all').toBeGreaterThan(0);
+    const archived = allArchived.filter(
+      f => fs.readFileSync(f, 'utf-8').includes(session.id) || f.includes(session.id)
+    );
+    expect(archived.length, `no archive file references ${session.id}`).toBeGreaterThan(0);
+
+    const archivedText = archived.map(f => fs.readFileSync(f, 'utf-8')).join('\n');
+    // dv1172ae — split from a single assertion so the two failure modes are
+    // distinguishable in evidence: an archive that MISATTRIBUTES provenance is
+    // a different defect from one that merely OMITS it.
+    expect(archivedText, 'archive misattributes a delegated set as user-selected')
+      .not.toMatch(/user-selected/);
+    expect(archivedText, 'archive records no selection provenance at all')
+      .toMatch(/controller-delegated/);
+
+    // dv1172ah — RATIFIED archive clauses. The provenance above must stand on
+    // its own: reached after nothing but an inert context entry, with no turn
+    // executed and no provider contacted, and therefore with NO
+    // execution_contract present. Provenance that only rides in on an
+    // execution_contract would not satisfy the contract.
+    expect(archivedText, 'archive provenance required an execution_contract to appear')
+      .not.toMatch(/execution_contract/i);
+    expect(archivedText, 'an execution contract block was archived despite no turn being taken')
+      .not.toMatch(/##\s*Execution Contract/i);
+    expect(
+      getArchiveFiles(harness.homeDir, project).filter(f => f.endsWith('.contract.json')),
+      'a contract sidecar was written despite no turn being taken'
+    ).toHaveLength(0);
+
+    // The session took no provider turn, so no transcript/response content.
+    expect(session.log.every(e => e.type !== 'turn'), 'a turn was executed').toBe(true);
+
+    // The delegated claim is audit metadata, never authenticated authority.
+    expect(archivedText, 'archive states the delegation as a confirmed human selection')
+      .not.toMatch(/human[_ ]selection[_ ]confirmed:?\s*true/i);
+
+    // No credential leakage: the single-use selection token must never be
+    // written into an archive that outlives the session.
+    expect(archivedText, 'the selection token leaked into the archive')
+      .not.toContain(delegatedToken);
+
+    // The inert entry we injected is unrelated content and must survive the
+    // additive provenance section rather than being displaced by it.
+    expect(archivedText, 'pre-existing archive content was dropped by the new section')
+      .toMatch(/dv1172ae archive probe/);
+  }, 30000);
+
+  it('refuses auto_execute under delegated selection without taking any turn', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const delegatedToken = await mintDelegated(harness, speakers);
+    expect(delegatedToken, 'deliberation_select_speakers did not mint a delegated token').toBeTruthy();
+
+    const text = getText(await harness.callTool('deliberation_start', {
+      topic: 'delegated selection grants no actuation',
+      selection_token: delegatedToken,
+      speakers,
+      rounds: 1,
+      auto_execute: true,
+    }));
+
+    // The refusal must be explicit about auto_execute rather than a silent
+    // downgrade that leaves the caller believing execution was scheduled.
+    expect(text).toMatch(/auto_execute/i);
+
+    const found = findSession(harness.homeDir);
+    if (found) {
+      expect(found.session.auto_execute).toBeFalsy();
+      expect(found.session.auto_synthesize).toBeFalsy();
+      // No turn may have been executed or fabricated.
+      expect(found.session.log.filter(e => e.event !== 'context_injection')).toHaveLength(0);
+      expect(found.session.synthesis).toBeFalsy();
+    }
+  }, 30000);
+
+  it('keeps deliberation_confirm_speakers as an independent human route', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const snapshot = getText(await harness.callTool('deliberation_speaker_candidates', {
+      include_cli: true,
+      include_browser: false,
+    }));
+    const candidateToken = (snapshot.match(/\*\*Candidate token:\*\*\s*`([^`]+)`/) || [])[1];
+
+    await harness.callTool('deliberation_confirm_speakers', {
+      selection_token: candidateToken,
+      speakers,
+    });
+
+    const found = findSelectionState(harness.homeDir);
+    expect(found, 'confirm_speakers persisted no state').toBeTruthy();
+    // The human route must not be silently re-labelled as delegated.
+    expect(found.state.selection_origin).not.toBe(DELEGATED_ORIGIN);
+    expect(found.state.delegation).toBeUndefined();
+  }, 30000);
 });
