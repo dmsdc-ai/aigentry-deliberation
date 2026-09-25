@@ -3089,9 +3089,18 @@ server.tool(
 // ── Start ──────────────────────────────────────────────────────
 
 // Only start server when run directly (not imported for testing)
+// Compare canonical paths on both sides: the ESM loader resolves symlinks in
+// import.meta.url while path.resolve(argv[1]) stays lexical, so a symlinked
+// invocation never matched (and --preserve-symlinks-main reverses which side
+// is lexical). realpathSync throws on a path that does not exist; return null
+// so an unresolvable entry can never compare equal -- import must not crash,
+// and the guard requires both sides to canonicalize successfully.
+const __canonicalPath = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
 const __currentFile = fileURLToPath(import.meta.url);
 const __entryFile = process.argv[1] ? path.resolve(process.argv[1]) : null;
-if (__entryFile && path.resolve(__currentFile) === __entryFile) {
+const __currentReal = __canonicalPath(path.resolve(__currentFile));
+const __entryReal = __entryFile ? __canonicalPath(__entryFile) : null;
+if (__currentReal !== null && __entryReal !== null && __currentReal === __entryReal) {
   const transport = new StdioServerTransport();
 
   // ── Gemini CLI compatibility: strip $schema from tool inputSchemas ──

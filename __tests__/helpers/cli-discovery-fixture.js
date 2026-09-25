@@ -60,12 +60,47 @@ export const PRODUCT_AUTO_DISCOVERY_CEILING = 12; // MAX_AUTO_DISCOVERED_SPEAKER
 // Trusted OS primitives only. Deliberately excludes every location a real
 // agent CLI could live (nvm, homebrew, ~/.local, cmux shims). Verified free
 // of FIXTURE_CLI_CANDIDATES collisions by the fixture controls.
-const TRUSTED_OS_PATH_DIRS = IS_WINDOWS
+// Exported so a suite asserting "no host PATH fallback" compares against the
+// dirs this fixture actually built on this platform, instead of restating the
+// POSIX pair as a literal (which is simply wrong on win32).
+export const TRUSTED_OS_PATH_DIRS = IS_WINDOWS
   ? [
       path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
       process.env.SystemRoot || 'C:\\Windows',
     ]
   : ['/usr/bin', '/bin'];
+
+/**
+ * The `LOCALAPPDATA` an owned fixture HOME implies. Pinned INSIDE the owned
+ * home on purpose: the ambient host `LOCALAPPDATA` on a Windows runner points
+ * at the real user profile, so a harness that spreads `process.env` (or a
+ * product that reads `LOCALAPPDATA` first) would resolve its install dir
+ * OUTSIDE the owned tree. Every fixture path below derives from the owned home
+ * only, so nothing escapes it.
+ *
+ * The value equals the product's own documented fallback
+ * (`index.js:296-299`: `LOCALAPPDATA || path.join(HOME, "AppData", "Local")`),
+ * so pinning it changes no resolution — it only removes the ambient one.
+ */
+export function fixtureLocalAppData(homeDir) {
+  return path.join(homeDir, 'AppData', 'Local');
+}
+
+/**
+ * The install directory the PRODUCT resolves for an owned fixture HOME.
+ *
+ * Mirrors `index.js:296-299` on `process.platform`. Four fixtures previously
+ * hardcoded the POSIX branch, so on win32 the tests read
+ * `<home>/.local/lib/...` while the server wrote
+ * `<home>/AppData/Local/...` — two disjoint trees. Kept here so the next
+ * platform branch has exactly one home.
+ */
+export function getFixtureInstallDir(homeDir) {
+  if (!homeDir) throw new Error('getFixtureInstallDir requires an owned homeDir');
+  return IS_WINDOWS
+    ? path.join(fixtureLocalAppData(homeDir), 'mcp-deliberation')
+    : path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+}
 
 /**
  * Body of an inert stub: succeeds for any argv, prints nothing, exits 0.
@@ -118,6 +153,66 @@ export function createCliDiscoveryStubs({ root, count = FIXTURE_SEAM_CEILING } =
   return { dir, speakers, files };
 }
 
+// The boundary switch PATH sanitisation cannot enforce. Merged AFTER `extra`,
+// never before, so a caller cannot re-enable a real CDP fetch, a real browser
+// auto-launch or an absolute-path browser spawn by passing the key itself.
+//
+// DECLARED LIMIT — this does not say "the browser is off". It says the knob the
+// product reads is SET to off here and cannot be re-opened by a caller.
+// Whether `off` closes every browser path is a PRODUCT fact, verified product
+// side, not here. Nothing about `include_browser` metadata is changed.
+const FORCED_BOUNDARY_SWITCHES = Object.freeze({
+  DELIBERATION_BROWSER_SCAN_MODE: 'off',
+});
+
+/**
+ * Is `entry` a PATH element this fixture may hand a child?
+ *
+ * Same rule as `isTrustedPathEntry` in `stub-cli-bin.mjs`, restated here rather
+ * than imported: that module already imports THIS one, so importing it back
+ * would close a cycle. Both read the same `TRUSTED_OS_PATH_DIRS` shape, and
+ * this one is checked against the caller's own owned stub dir.
+ */
+function isOwnedOrTrustedPathEntry(entry, stubDir) {
+  return entry === stubDir || TRUSTED_OS_PATH_DIRS.includes(entry);
+}
+
+/**
+ * Refuse to RETURN a PATH that is not the owned containment boundary.
+ *
+ * `assertInertPath` (mcp-harness.mjs) covers only the one caller that goes
+ * through `inertEnv`; the direct `buildFixtureEnv` callers reached no PATH
+ * guard at all, so an `extra.PATH` could reintroduce a host PATH fallback —
+ * and with it a real provider CLI — into a child. Validating the RESULT here
+ * covers every caller, before any child exists.
+ *
+ * Empty segments are NOT filtered away. An empty PATH element means the
+ * CURRENT DIRECTORY, which is precisely the host-relative lookup this fixture
+ * exists to remove, so it is untrusted like any other foreign entry. It is
+ * named as `<empty segment>` because it has no printable form of its own.
+ *
+ * The override is REJECTED, never silently dropped: a caller that passed a
+ * PATH must not be left believing it took effect. The wording keeps the
+ * `host PATH fallback` phrasing and names every refused entry, so the existing
+ * harness-cleanup negative still reads the same diagnostic.
+ */
+function assertOwnedFixturePath(pathValue, stubDir) {
+  const entries = String(pathValue === undefined || pathValue === null ? '' : pathValue)
+    .split(path.delimiter);
+  const foreign = entries.filter(entry => !isOwnedOrTrustedPathEntry(entry, stubDir));
+  if (foreign.length > 0) {
+    throw new Error(
+      'buildFixtureEnv: refusing to return a host PATH fallback. Untrusted PATH '
+      + `entries: ${foreign.map(e => (e === '' ? '<empty segment>' : e)).join(', ')}`
+    );
+  }
+  if (entries[0] !== stubDir) {
+    throw new Error(
+      `buildFixtureEnv: owned stub dir must lead PATH, got ${entries[0]}`
+    );
+  }
+}
+
 /**
  * Build the COMPLETE environment for a harness child.
  *
@@ -132,11 +227,23 @@ export function createCliDiscoveryStubs({ root, count = FIXTURE_SEAM_CEILING } =
  * *blocked* transport therefore observe a genuine unavailability, not a
  * simulated one.
  *
+ * PATH sanitisation alone did NOT cover the browser boundary, and the claim
+ * above was false for it. `lib/speaker-discovery.js` reads
+ * `DELIBERATION_BROWSER_SCAN_MODE`, defaults it to `"auto"` when unset, and
+ * then runs `ensureCdpAvailable()`: an outbound `fetchJson` against each CDP
+ * endpoint, followed by an auto-launch of a real browser located by ABSOLUTE
+ * PATH (`/Applications/Google Chrome.app/...`, `C:\Program Files\...`). A
+ * sanitised PATH cannot stop either one. The knob is therefore forced to
+ * `off` below, matching `helpers/mcp-harness.mjs`, which already did so — the
+ * two harnesses used to disagree and the `buildFixtureEnv` callers took the
+ * unguarded path.
+ *
  * @param {object} opts
  * @param {string} opts.homeDir   owned HOME (and USERPROFILE on win32)
  * @param {string} opts.stubDir   owned stub bin dir, placed first on PATH
  * @param {object} [opts.extra]   harness-specific additions (e.g.
- *   DELIBERATION_CALLER_SPEAKER). Applied last.
+ *   DELIBERATION_CALLER_SPEAKER). Applied over the named defaults, but NOT
+ *   over the forced boundary switches, which are merged after it.
  */
 export function buildFixtureEnv({ homeDir, stubDir, extra = {} } = {}) {
   if (!homeDir) throw new Error('buildFixtureEnv requires an owned homeDir');
@@ -160,7 +267,22 @@ export function buildFixtureEnv({ homeDir, stubDir, extra = {} } = {}) {
     env.ComSpec = process.env.ComSpec || path.join(env.SystemRoot, 'System32', 'cmd.exe');
   }
 
-  return { ...env, ...extra };
+  // Forced LAST, after `extra`. The owned LOCALAPPDATA is a containment
+  // boundary in exactly the way the browser switch is: it is never the ambient
+  // host value (see fixtureLocalAppData), and a caller must not be able to
+  // relocate the install dir outside the owned HOME by passing the key itself.
+  // Its value equals the product's own documented fallback, so nothing about
+  // path resolution changes — only the escape does.
+  //
+  // PATH is deliberately NOT forced here — forcing it would silently DISCARD a
+  // caller's override, which is the one outcome worse than honouring it. The
+  // resulting PATH is validated instead, and an unsafe one is refused below.
+  const forced = { ...FORCED_BOUNDARY_SWITCHES };
+  if (IS_WINDOWS) forced.LOCALAPPDATA = fixtureLocalAppData(homeDir);
+
+  const merged = { ...env, ...extra, ...forced };
+  assertOwnedFixturePath(merged.PATH, stubDir);
+  return merged;
 }
 
 /**

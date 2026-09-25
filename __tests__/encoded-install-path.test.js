@@ -35,7 +35,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createCliDiscoveryStubs, buildFixtureEnv, FIXTURE_SEAM_CEILING } from "./helpers/cli-discovery-fixture.js";
+import {
+  createCliDiscoveryStubs,
+  buildFixtureEnv,
+  FIXTURE_SEAM_CEILING,
+  TRUSTED_OS_PATH_DIRS,
+} from "./helpers/cli-discovery-fixture.js";
 import {
   ENCODED_PATH_CASES,
   ENCODED_CASES,
@@ -43,6 +48,7 @@ import {
   HANDSHAKE_TIMEOUT_MS,
   encodedPathnameOf,
   needsNoEncoding,
+  nativeUrlPathnameOf,
   materializeInstall,
   initializeOverStdio,
   resolveBundledAssets,
@@ -110,11 +116,20 @@ describe("encoded install path — fixture preconditions", () => {
       expect(install.stubs.speakers.length).toBe(11);
       const dirs = install.env.PATH.split(path.delimiter);
       expect(dirs[0]).toBe(install.stubs.dir);
-      expect(dirs).toEqual([install.stubs.dir, "/usr/bin", "/bin"]);
+      // Compared against the dirs the fixture actually built on this platform.
+      // The POSIX pair this replaced was a literal, so on win32 — where the
+      // fixture correctly supplies System32/Windows — the ASSERTION was the
+      // thing that was wrong, not the PATH. The claim is unchanged: the owned
+      // stub dir leads, and nothing but trusted OS primitives follows it.
+      expect(dirs).toEqual([install.stubs.dir, ...TRUSTED_OS_PATH_DIRS]);
       expect(install.env.HOME).toBe(install.homeDir);
     }
   });
 
+  // Runs on EVERY platform, win32 included. `needsNoEncoding` compares the
+  // file-URL pathname re-spelled in native syntax, so the control is a real
+  // statement about percent-encoding on win32 too rather than an accidental
+  // assertion about drive letters and slash direction. No gate, no skip.
   it("the control case needs no percent-encoding at all", () => {
     const install = installFor(ORDINARY_CASE.key);
     expect(needsNoEncoding(install.root), encodedPathnameOf(install.root)).toBe(true);
@@ -125,7 +140,13 @@ describe("encoded install path — fixture preconditions", () => {
     (key, testCase) => {
       const install = installFor(key);
       const encoded = encodedPathnameOf(install.root);
-      expect(encoded, "case " + key + " encoded as " + encoded).not.toBe(install.root);
+      // Native-form comparison for the same reason as the control: on win32 a
+      // raw pathname differs from the install root for EVERY path, which would
+      // make this inequality pass without saying anything about encoding.
+      expect(
+        nativeUrlPathnameOf(install.root),
+        "case " + key + " encoded as " + encoded,
+      ).not.toBe(install.root);
       expect(encoded).toContain(testCase.needle);
     },
   );

@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { fixtureLocalAppData, getFixtureInstallDir } from './helpers/cli-discovery-fixture.js';
 
 // These tests exercise the v0.0.45 runtime.log hardening:
 // - explicit .old cleanup on rotation (Bug 1)
@@ -17,8 +19,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = process.cwd();
 
+// The child scripts below are injected as ESM source text, so the entry has to
+// be a file URL, not a path: on win32 `import('D:\\a\\...\\index.js')` makes
+// Node read `d:` as a URL scheme and fail with ERR_UNSUPPORTED_ESM_URL_SCHEME.
+// The `.replace(/\\/g,'\\\\')` escaping this replaced produced exactly that.
+// `JSON.stringify` does the quoting, so no hand-rolled escaping remains — the
+// same idiom helpers/encoded-install-fixture.js already uses.
+const INDEX_ENTRY_URL_LITERAL = JSON.stringify(
+  pathToFileURL(path.join(REPO_ROOT, 'index.js')).href
+);
+
+// Platform-correct, mirroring index.js:296-299. The POSIX-only literal this
+// replaced put the log where the server never wrote it on win32.
 function getInstallDir(homeDir) {
-  return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+  return getFixtureInstallDir(homeDir);
 }
 
 function getLogPath(homeDir) {
@@ -50,6 +64,14 @@ async function runNodeScript(homeDir, script, env = {}) {
         HOME: homeDir,
         AIGENTRY_TIER: 'free',
         ...env,
+        // Forced LAST, after the caller env merge. The spread above carries
+        // the host LOCALAPPDATA on a Windows runner, which index.js resolves
+        // before its HOME fallback, so an override here would put the log in a
+        // tree outside the owned home. Value equals the product own fallback,
+        // so POSIX is unaffected.
+        ...(process.platform === 'win32'
+          ? { LOCALAPPDATA: fixtureLocalAppData(homeDir) }
+          : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -73,7 +95,7 @@ describe('appendRuntimeLog rotation + dedup (Bug 1, Dedup)', () => {
     // footprint must stay at or below 4 MB (runtime.log + runtime.log.old,
     // each <= 2 MB hard cap).
     const script = `
-      const { appendRuntimeLog } = await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      const { appendRuntimeLog } = await import(${INDEX_ENTRY_URL_LITERAL});
       const filler = 'A'.repeat(40 * 1024);
       for (let i = 0; i < 1500; i++) {
         appendRuntimeLog('INFO', \`write-\${i}-\${filler}\`);
@@ -102,7 +124,7 @@ describe('appendRuntimeLog rotation + dedup (Bug 1, Dedup)', () => {
     cleanups.push(() => fs.rmSync(homeDir, { recursive: true, force: true }));
 
     const script = `
-      const { appendRuntimeLog } = await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      const { appendRuntimeLog } = await import(${INDEX_ENTRY_URL_LITERAL});
       for (let i = 0; i < 1000; i++) appendRuntimeLog('WARN', 'repeated_error: EPIPE stacktrace here');
       // Different message to flush the dedup buffer
       appendRuntimeLog('INFO', 'different message — flushes pending dedup');
@@ -128,7 +150,7 @@ describe('appendRuntimeLog rotation + dedup (Bug 1, Dedup)', () => {
     cleanups.push(() => fs.rmSync(homeDir, { recursive: true, force: true }));
 
     const script = `
-      const { appendRuntimeLog } = await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      const { appendRuntimeLog } = await import(${INDEX_ENTRY_URL_LITERAL});
       for (let i = 0; i < 50; i++) appendRuntimeLog('INFO', 'unique-message-' + i);
     `;
     const res = await runNodeScript(homeDir, script);
@@ -150,7 +172,7 @@ describe('EPIPE reentrance guard (Bug 2)', () => {
     // The handler must catch, log once, and exit(0). If the guard missed, Node's default
     // behavior would exit(1) with the stack printed to stderr.
     const script = `
-      await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      await import(${INDEX_ENTRY_URL_LITERAL});
       // Give the MCP server a tick to finish setup before emitting the error
       setImmediate(() => {
         const err = new Error('write EPIPE');
@@ -177,7 +199,7 @@ describe('EPIPE reentrance guard (Bug 2)', () => {
     // reentrance guard and queues process.exit(0); the second call returns
     // immediately, writing NOTHING extra to the log. After the tick, exit runs.
     const script = `
-      await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      await import(${INDEX_ENTRY_URL_LITERAL});
       setImmediate(() => {
         const err1 = new Error('write EPIPE'); err1.code = 'EPIPE';
         const err2 = new Error('write EPIPE again'); err2.code = 'EPIPE';
@@ -201,7 +223,7 @@ describe('EPIPE reentrance guard (Bug 2)', () => {
     // Some async stream errors arrive wrapped and lose the .code property.
     // The v0.0.45 handler falls back to regex match on the message.
     const script = `
-      await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      await import(${INDEX_ENTRY_URL_LITERAL});
       setImmediate(() => {
         const err = new Error('Uncaught write EPIPE during downstream send');
         // Deliberately no err.code — forces message-based detection.
@@ -226,7 +248,7 @@ describe('upgrade safety migration', () => {
     fs.writeFileSync(logPath, 'X'.repeat(2 * 1024 * 1024)); // 2 MB
 
     const script = `
-      const { appendRuntimeLog } = await import('${path.join(REPO_ROOT, 'index.js').replace(/\\/g, '\\\\')}');
+      const { appendRuntimeLog } = await import(${INDEX_ENTRY_URL_LITERAL});
       appendRuntimeLog('INFO', 'post-upgrade first write');
     `;
     const res = await runNodeScript(homeDir, script);

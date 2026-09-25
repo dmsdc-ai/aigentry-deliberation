@@ -21,7 +21,10 @@
 // DECLARED LIMITS
 // ---------------
 //   * POSIX only. The win32 behaviour of file URL to path conversion (drive
-//     letters, UNC) is NOT measured here and must not be claimed.
+//     letters, UNC) is NOT measured here and must not be claimed. The
+//     encoding comparison below is now win32-CORRECT (see
+//     `nativeUrlPathnameOf`) so the control case is meaningful there too, but
+//     that is a comparison fix, not a measurement of win32 URL conversion.
 //   * This module derives its own paths with fileURLToPath, never with
 //     `new URL(...).pathname` — otherwise the fixture would carry the very
 //     defect the suite is measuring and could not tell the two apart.
@@ -56,14 +59,74 @@ export const ENCODED_PATH_CASES = Object.freeze([
 export const ENCODED_CASES = ENCODED_PATH_CASES.filter((c) => !c.control);
 export const ORDINARY_CASE = ENCODED_PATH_CASES.find((c) => c.control);
 
+// ── Bounded diagnostics (DIAGNOSTIC ONLY) ─────────────────────
+//
+// Every diagnostic this module emits is a CLOSED SET: the literal tokens
+// written out below, plus integer counts. A diagnostic string is printed to
+// stdout on assertion failure, so it is an egress path, and arbitrary child
+// stderr / handle-error / fs-error text can carry a provider key, a token or an
+// absolute profile path. Those fields are therefore reduced to a count or to an
+// allowlist member, with every unrecognised value collapsing to `other` — by
+// CONSTRUCTION, not by redaction of free-form text, which no secret-shaped or
+// path-shaped rule can do reliably. Mirrors the `diagEnum`/`diagInt` shape in
+// `deliberation-e2e.test.js`.
+const DIAG_CASE_KEY_ENUM = Object.freeze(ENCODED_PATH_CASES.map((c) => c.key));
+const DIAG_SETTLED_BY_ENUM = Object.freeze([
+  "response", "result", "child-closed", "timeout",
+]);
+const DIAG_SIGNAL_ENUM = Object.freeze([
+  "SIGTERM", "SIGKILL", "SIGINT", "SIGHUP", "SIGPIPE", "SIGABRT", "SIGSEGV",
+]);
+const DIAG_FS_ERROR_ENUM = Object.freeze([
+  "ENOENT", "EACCES", "EPERM", "EEXIST", "EISDIR", "ENOTDIR", "EBUSY",
+  "ENOSPC", "ENAMETOOLONG", "EINVAL", "ELOOP",
+]);
+
+/** A member of `allowed`, else `none` / `other`. Never the raw value. */
+function diagEnum(value, allowed) {
+  if (value === null || value === undefined || value === "") return "none";
+  return allowed.includes(value) ? value : "other";
+}
+
+/** An integer, else `none` (absent) / `other`. Never a free-form field. */
+function diagInt(value) {
+  if (value === null || value === undefined) return "none";
+  return Number.isInteger(value) ? String(value) : "other";
+}
+
+/** A boolean, else `other`. */
+function diagBool(value) {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  return "other";
+}
+
 /** The percent-encoded form a file URL hands back for `p` via `.pathname`. */
 export function encodedPathnameOf(p) {
   return new URL(pathToFileURL(p).href).pathname;
 }
 
+/**
+ * `encodedPathnameOf(p)` re-spelled in this platform's native path syntax, so
+ * a comparison against `p` measures PERCENT-ENCODING ONLY.
+ *
+ * On POSIX the two forms already coincide and this is the identity. On win32 a
+ * file URL pathname is `/C:/dir/file` — leading slash, forward slashes, drive
+ * letter — so the raw pathname can never equal `C:\dir\file` and the control
+ * case below reported "needs encoding" for a plain-ASCII path. Undoing the
+ * URL's own separator and root conventions (and NOTHING else) leaves the
+ * encoding question intact: percent escapes are not touched here, so every
+ * encoded case still compares unequal on win32.
+ */
+export function nativeUrlPathnameOf(p) {
+  const pathname = encodedPathnameOf(p);
+  if (process.platform !== "win32") return pathname;
+  return pathname.replace(/^\//, "").replace(/\//g, path.sep);
+}
+
 /** True when `p` survives a file URL round trip through `.pathname` unchanged. */
 export function needsNoEncoding(p) {
-  return encodedPathnameOf(p) === p;
+  return nativeUrlPathnameOf(p) === p;
 }
 
 /**
@@ -103,8 +166,35 @@ export function materializeInstall({ root, repoRoot = REPO_ROOT } = {}) {
     throw new Error("encoded-install fixture needs a resolvable node_modules under " + repoRoot);
   }
   fs.mkdirSync(root, { recursive: true });
-  for (const name of readInstallPayload(repoRoot)) {
-    fs.cpSync(path.join(repoRoot, name), path.join(root, name), { recursive: true });
+  const payload = readInstallPayload(repoRoot);
+  for (const [index, name] of payload.entries()) {
+    // DIAGNOSTIC ONLY. On Windows 22 the copy did not fully land for non-ASCII
+    // segment names (`lib/speaker-discovery.js` was missing from the install)
+    // and the precondition assertion surfaced it one step late, with no cause.
+    // This locates the failing copy — which payload entry, and the errno — at
+    // the moment it happens.
+    //
+    // It deliberately does NOT normalise, re-encode or retry the path: whether
+    // that is a Node 22 win32 fs.cpSync behaviour change, a runner codepage
+    // effect or a swallowed error is UNRESOLVED, and a speculative
+    // normalisation here would weaken the very adversarial case under test.
+    //
+    // Bounded like every other diagnostic here: `name` is reported only as a
+    // member of the payload list computed just above, the position is a count,
+    // and the errno is an allowlist member. The segment basename is NOT
+    // reported (it is part of the owned absolute root, i.e. host data), and
+    // neither `err.message` nor `{ cause: err }` is attached, because a copy
+    // error embeds the absolute source and destination paths verbatim.
+    try {
+      fs.cpSync(path.join(repoRoot, name), path.join(root, name), { recursive: true });
+    } catch (err) {
+      throw new Error(
+        "encoded-install fixture failed to materialise an install payload entry "
+        + `(entry=${diagEnum(name, payload)} `
+        + `index=${diagInt(index)}/${diagInt(payload.length)} `
+        + `code=${diagEnum(err && err.code, DIAG_FS_ERROR_ENUM)})`
+      );
+    }
   }
   fs.symlinkSync(graph, path.join(root, "node_modules"));
   return { root, entry: path.join(root, "index.js"), graph };
@@ -306,16 +396,33 @@ export async function resolveBundledAssets({
   }
 }
 
-/** Compact, greppable one-liner for TAP-style evidence and failure messages. */
+/**
+ * Compact, greppable one-liner for TAP-style evidence and failure messages.
+ *
+ * Closed enums and counts ONLY (see the bounded-diagnostics block above). The
+ * two free-form fields this used to interpolate are the reason:
+ *   * `stderr` was emitted as a 400-char slice of arbitrary child output,
+ *   * `handleError` was emitted as an arbitrary Error message.
+ * Both are reduced here — stderr to its byte/line counts, the handle error to
+ * its presence — so no child text can travel out through an assertion message.
+ * `key` is a caller-supplied string and is likewise resolved against the case
+ * list rather than echoed. The useful fields are unchanged in name and meaning:
+ * `case`, `answered`, `settledBy`, `elapsedMs`, `exit` and `signal` still read
+ * exactly as before for every recognised value.
+ */
 export function describeOutcome(key, outcome) {
+  const o = outcome || {};
+  const stderrText = String(o.stderr === null || o.stderr === undefined ? "" : o.stderr);
   return [
-    "case=" + key,
-    "answered=" + outcome.answered,
-    "settledBy=" + outcome.settledBy,
-    "elapsedMs=" + outcome.elapsedMs,
-    "exit=" + outcome.exitCode,
-    "signal=" + outcome.signalCode,
-    "handleError=" + outcome.handleError,
-    "stderr=" + JSON.stringify(String(outcome.stderr).slice(0, 400)),
+    "case=" + diagEnum(key, DIAG_CASE_KEY_ENUM),
+    "answered=" + diagBool(o.answered),
+    "settledBy=" + diagEnum(o.settledBy, DIAG_SETTLED_BY_ENUM),
+    "elapsedMs=" + diagInt(o.elapsedMs),
+    "timeoutMs=" + diagInt(o.timeoutMs),
+    "exit=" + diagInt(o.exitCode),
+    "signal=" + diagEnum(o.signalCode, DIAG_SIGNAL_ENUM),
+    "handleError=" + (o.handleError ? "present" : "none"),
+    "stderrBytes=" + stderrText.length,
+    "stderrLines=" + (stderrText ? stderrText.split("\n").length : 0),
   ].join(" ");
 }

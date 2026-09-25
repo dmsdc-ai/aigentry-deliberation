@@ -20,11 +20,20 @@ import { spawn } from 'node:child_process';
 //     revision of this harness resolved as soon as SIGKILL had been SENT,
 //     which authorised `rmSync(homeDir)` while the server might still be
 //     alive and writing into it. Sending a signal is not observing an exit.
-import { buildFixtureEnv, joinOwnedChild } from './cli-discovery-fixture.js';
+//   * getFixtureInstallDir — the platform-correct install dir for an owned
+//     HOME. This helper used to hardcode the POSIX branch, so on win32 it
+//     wrote config.json and read state under `<home>/.local/lib/...` while
+//     the server used `<home>/AppData/Local/...`. Re-exported below under the
+//     name its importers already use.
+import {
+  buildFixtureEnv,
+  getFixtureInstallDir,
+  joinOwnedChild,
+} from './cli-discovery-fixture.js';
 import { isTrustedPathEntry } from './stub-cli-bin.mjs';
 
 export function getInstallDir(homeDir) {
-  return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+  return getFixtureInstallDir(homeDir);
 }
 
 export function getProjectStateDir(homeDir, project) {

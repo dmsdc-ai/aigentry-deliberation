@@ -17,6 +17,7 @@ import {
   FIXTURE_NODE_BIN,
   buildFixtureEnv,
   createCliDiscoveryStubs,
+  getFixtureInstallDir,
   joinOwnedChild,
   writeStub,
 } from './helpers/cli-discovery-fixture.js';
@@ -58,8 +59,11 @@ function makeSession(project, id, overrides = {}) {
   };
 }
 
+// Platform-correct, mirroring index.js:296-299. The POSIX-only literal this
+// replaced made the harness write config.json and read session/archive state
+// under a tree the server never used on win32.
 function getInstallDir(homeDir) {
-  return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+  return getFixtureInstallDir(homeDir);
 }
 
 function getProjectStateDir(homeDir, project) {
@@ -696,7 +700,147 @@ async function confirmSpeakers(harness, speakers) {
   return confirmedToken;
 }
 
-async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
+// ── Bounded stall diagnostic (DIAGNOSTIC ONLY) ─────────────────
+//
+// The two `self_turn` cases below time out deterministically on Linux at the
+// 25000ms archive budget while completing in <1.1s on macOS. The trigger is
+// UNRESOLVED, and the bare `timeout waiting for archive` carried none of the
+// state needed to resolve it.
+//
+// These helpers add evidence at that exact existing failure point. They change
+// no budget, add no retry, no fallback and no product behaviour, and they never
+// make a failing case pass.
+//
+// What is emitted is a CLOSED SET: literal tokens written out below, plus
+// integer counts. Nothing is copied out of the session file, the runtime log
+// or the child stderr. Each is reduced to a count, or to a member of an
+// allowlist here with every unrecognised value collapsing to `other`. So no
+// prompt text, no response text, no selection token, no environment, no
+// browser profile and no path can travel out — by CONSTRUCTION, not by
+// redaction of free-form text, which is what the previous revision attempted.
+// Nothing is uploaded anywhere.
+const DIAG_STATUS_ENUM = Object.freeze([
+  'active', 'completed', 'archived', 'error', 'paused',
+]);
+const DIAG_CHANNEL_ENUM = Object.freeze([
+  'self_turn_skip', 'cli', 'manual', 'browser', 'telepty',
+]);
+const DIAG_FALLBACK_ENUM = Object.freeze([
+  'caller_identity_match', 'cli_unavailable', 'timeout', 'blocked',
+]);
+const DIAG_BLOCK_REASON_ENUM = Object.freeze([
+  'self_turn', 'cli_unavailable', 'liveness_failed', 'spawn_failed',
+  'timeout', 'blocked',
+]);
+const DIAG_HANDOFF_EVENT_ENUM = Object.freeze([
+  'AUTO_HANDOFF_TURN', 'AUTO_HANDOFF_RETRY', 'AUTO_HANDOFF_SKIP',
+]);
+const DIAG_FS_ERROR_ENUM = Object.freeze([
+  'ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'EBUSY',
+]);
+// Fixed substrings counted in the child stderr. Only the COUNT is reported,
+// never the surrounding line.
+const DIAG_STDERR_MARKERS = Object.freeze([
+  'AUTO_HANDOFF', 'AUTO_SKIP', 'SELF_TURN_SKIP', 'EACCES', 'ENOENT', 'EPIPE',
+  'ECONNREFUSED', 'ETIMEDOUT', 'SIGKILL', 'SIGTERM',
+  'ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_ESM_URL_SCHEME',
+]);
+// The captured group is never emitted raw: it is passed through diagEnum.
+const DIAG_BLOCK_REASON_RE = /block_reason["' :=]+([A-Za-z0-9_.-]{1,40})/;
+
+/** A member of `allowed`, else `none` / `other`. Never the raw value. */
+function diagEnum(value, allowed) {
+  if (value === null || value === undefined || value === '') return 'none';
+  return allowed.includes(value) ? value : 'other';
+}
+
+/** An integer, else `other`. Never a free-form field. */
+function diagInt(value) {
+  return Number.isInteger(value) ? String(value) : 'other';
+}
+
+/** Sorted `enum=count` pairs over `values`. Deterministic and order-free. */
+function diagCounts(values, allowed) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = diagEnum(value, allowed);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([key, n]) => `${key}=${n}`)
+    .join(',') || 'none';
+}
+
+function diagSessionState(homeDir, project, sessionId) {
+  const sessionFile = getSessionFile(homeDir, project, sessionId);
+  if (!fs.existsSync(sessionFile)) return 'session=absent';
+  let session;
+  try {
+    session = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+  } catch (err) {
+    return `session=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  // current_speaker and every other free-form field are deliberately NOT read.
+  const log = Array.isArray(session.log) ? session.log : [];
+  return [
+    'session=present',
+    `status=${diagEnum(session.status, DIAG_STATUS_ENUM)}`,
+    `round=${diagInt(session.current_round)}/${diagInt(session.max_rounds)}`,
+    `log_entries=${log.length}`,
+    `channels=${diagCounts(log.map(entry => entry.channel_used), DIAG_CHANNEL_ENUM)}`,
+    `fallbacks=${diagCounts(log.map(entry => entry.fallback_reason), DIAG_FALLBACK_ENUM)}`,
+  ].join(' ');
+}
+
+function diagHandoffEvents(homeDir) {
+  const logPath = path.join(getInstallDir(homeDir), 'runtime.log');
+  if (!fs.existsSync(logPath)) return 'runtime_log=absent';
+  let lines;
+  try {
+    lines = fs.readFileSync(logPath, 'utf-8').split('\n');
+  } catch (err) {
+    return `runtime_log=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  const events = [];
+  const reasons = [];
+  for (const line of lines) {
+    const event = DIAG_HANDOFF_EVENT_ENUM.find(name => line.includes(name));
+    if (!event) continue;
+    events.push(event);
+    const reason = line.match(DIAG_BLOCK_REASON_RE);
+    reasons.push(reason ? reason[1] : null);
+  }
+  return [
+    'runtime_log=present',
+    `log_lines=${lines.length}`,
+    `handoff_events=${events.length}`,
+    `events=${diagCounts(events, DIAG_HANDOFF_EVENT_ENUM)}`,
+    `block_reasons=${diagCounts(reasons, DIAG_BLOCK_REASON_ENUM)}`,
+  ].join(' ');
+}
+
+// No stderr TEXT is emitted, in any form. Only its size and the number of
+// times each fixed marker above occurs in it. A tail plus path redaction was
+// not sufficient: arbitrary child stderr can carry prompt, response or token
+// text, which no path-shaped rule excludes.
+function diagStderrShape(stderr) {
+  const text = String(stderr === null || stderr === undefined ? '' : stderr);
+  if (!text) return 'stderr=empty';
+  const markers = [];
+  for (const marker of DIAG_STDERR_MARKERS) {
+    const hits = text.split(marker).length - 1;
+    if (hits > 0) markers.push(`${marker}=${hits}`);
+  }
+  return [
+    'stderr=present',
+    `stderr_bytes=${text.length}`,
+    `stderr_lines=${text.split('\n').length}`,
+    `markers=${markers.join(',') || 'none'}`,
+  ].join(' ');
+}
+
+async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, stderr = null) {
   const archiveDir = path.join(getProjectStateDir(homeDir, project), 'archive');
   const sessionFile = getSessionFile(homeDir, project, sessionId);
   const start = Date.now();
@@ -707,7 +851,15 @@ async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
     }
     await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error('timeout waiting for archive');
+  throw new Error([
+    'timeout waiting for archive',
+    `timeoutMs=${timeoutMs}`,
+    `elapsedMs=${Date.now() - start}`,
+    `archive_dir=${fs.existsSync(archiveDir) ? 'present' : 'absent'}`,
+    diagSessionState(homeDir, project, sessionId),
+    diagHandoffEvents(homeDir),
+    diagStderrShape(typeof stderr === 'function' ? stderr() : stderr),
+  ].join(' | '));
 }
 
 function parseArchiveLog(markdown) {
@@ -768,7 +920,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
     // Round bookkeeping: 3 speakers × 2 rounds = 6 log entries total
@@ -816,7 +968,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
 

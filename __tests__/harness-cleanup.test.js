@@ -46,7 +46,10 @@ const OUTPUT = path.resolve(WORK, "..");
 const INIT_TIMEOUT_CASE_MS = 45000;
 
 let TMP_ROOT = null;
-let PREV_TMPDIR;
+// All three, because os.tmpdir() reads TMPDIR on POSIX but TEMP/TMP on win32.
+// Each is captured as-was (including "was not set") and restored exactly.
+const PREV_TMP_VARS = new Map();
+const TMP_ENV_VARS = ['TMPDIR', 'TEMP', 'TMP'];
 let ECHO_FIXTURE;
 let SILENT_FIXTURE;
 let IDLE_FIXTURE;
@@ -120,10 +123,18 @@ function harnessRoots() {
 beforeAll(() => {
   fs.mkdirSync(path.join(OUTPUT, ".tmp"), { recursive: true });
   TMP_ROOT = fs.mkdtempSync(path.join(OUTPUT, ".tmp", "dt1172ay-"));
-  PREV_TMPDIR = process.env.TMPDIR;
-  process.env.TMPDIR = TMP_ROOT;
-  // os.tmpdir() reads TMPDIR on every call, so the redirection has to hold
-  // before any harness root is minted. Assert it rather than assume it.
+  // On win32 os.tmpdir() reads TEMP then TMP and NEVER TMPDIR, so setting
+  // TMPDIR alone left the redirection inert there and this beforeAll threw,
+  // aborting the suite with 10 tests skipped. The same pattern already exists
+  // in helpers/cli-discovery-fixture.js:153-157; it just was not applied here.
+  for (const name of TMP_ENV_VARS) {
+    PREV_TMP_VARS.set(name, process.env[name]);
+    process.env[name] = TMP_ROOT;
+  }
+  // os.tmpdir() reads those vars on every call, so the redirection has to hold
+  // before any harness root is minted. Assert it rather than assume it. This
+  // assertion is what turned a silent mis-redirect into a visible failure and
+  // is deliberately KEPT.
   expect(os.tmpdir()).toBe(TMP_ROOT);
 
   ECHO_FIXTURE = path.join(TMP_ROOT, "fixture-echo.mjs");
@@ -137,8 +148,11 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  if (PREV_TMPDIR === undefined) delete process.env.TMPDIR;
-  else process.env.TMPDIR = PREV_TMPDIR;
+  for (const name of TMP_ENV_VARS) {
+    const previous = PREV_TMP_VARS.get(name);
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
   if (TMP_ROOT) fs.rmSync(TMP_ROOT, { recursive: true, force: true });
 });
 
