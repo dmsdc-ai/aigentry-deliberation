@@ -103,9 +103,15 @@ const IDLE_SRC = [
   ""
 ].join("\n");
 
-// Ignores SIGTERM, so the join has to escalate to SIGKILL to observe an exit.
+// Installs a no-op SIGTERM handler. On POSIX that really does ignore the
+// signal, so the join has to escalate to SIGKILL to observe an exit. On win32
+// the handler is not reached: `child.kill('SIGTERM')` is TerminateProcess.
+// win18/20/22 of CI 36076593173 reported `signalCode` 'SIGTERM' and a 96ms
+// case. The fixture source is unchanged — the assertions below stopped
+// assuming a POSIX-only disposition instead.
 const STUBBORN_SRC = [
-  "// dt1172ay inert, test-owned fixture: ignores SIGTERM.",
+  "// dt1172ay inert, test-owned fixture: ignores SIGTERM where the platform",
+  "// delivers it to a JS handler (POSIX). Not ignorable on win32.",
   "process.on(\"SIGTERM\", () => {});",
   "setInterval(() => {}, 1000);",
   "process.stdout.write(\"ready\\n\");",
@@ -233,19 +239,52 @@ describe("mcp-harness owned-root removal is authorised by a positive exit only",
     expect(elapsed).toBeLessThan(5000);
   }, 20000);
 
-  it("escalates to SIGKILL for a SIGTERM-ignoring owned child and still settles on an OBSERVED exit", async () => {
+  it("settles a SIGTERM-handling owned child on an OBSERVED exit, and escalates to SIGKILL wherever SIGTERM is ignorable", async () => {
     const child = spawn(process.execPath, [STUBBORN_FIXTURE], { stdio: ["ignore", "pipe", "ignore"] });
     // Without this the join races the fixture startup: a SIGTERM landing before
-    // the handler is installed kills it by default disposition, and the case
-    // would measure Node boot time instead of the escalation.
+    // the handler is installed kills it by default disposition, and the POSIX
+    // branch would measure Node boot time instead of the escalation.
     await new Promise((resolve) => child.stdout.once("data", resolve));
+
+    // Two DISTINCT facts are collected below and neither is derived from the
+    // other: (a) the exit this handle reports, and (b) the log of kill requests
+    // made on this same handle. `signalCode` is not read as a record of which
+    // request ended the child, and nothing here attributes the exit to a
+    // particular signal. The log is built by wrapping only this handle's own
+    // kill and still calling it: nothing global is patched, no signal
+    // suppressed.
+    const killRequests = [];
+    const ownKill = child.kill.bind(child);
+    child.kill = (signal) => {
+      killRequests.push(signal);
+      return ownKill(signal);
+    };
+
     const started = Date.now();
     await joinOwnedChild(child, { timeoutMs: 800, deadlineMs: 6000 });
     const elapsed = Date.now() - started;
-    expect(child.signalCode).toBe("SIGKILL");
-    // The escalation happened AFTER the SIGTERM, not instead of it, and the
-    // join did not resolve merely because a signal had been sent.
-    expect(elapsed).toBeGreaterThanOrEqual(800);
+
+    // Every platform, win32 included: the join returned on a positive observed
+    // exit (it rejects otherwise), the child is not live, and the first entry
+    // in the request log is the SIGTERM. Bounds unchanged: 800 / 6000 / 20000.
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+    expect(child.killed).toBe(true);
+    expect(killRequests[0]).toBe("SIGTERM");
+
+    if (process.platform === "win32") {
+      // What is asserted on win32 is exactly what was measured: one request was
+      // made on this handle, and an exit was observed. `kill('SIGTERM')` is
+      // TerminateProcess here, which no JS handler receives. No wall-clock
+      // assertion, so the case is not runner-load sensitive, and escalation is
+      // neither exercised nor claimed.
+      expect(killRequests).toEqual(["SIGTERM"]);
+      expect(child.signalCode).toBe("SIGTERM");
+    } else {
+      // Both signals requested, in order, with the grace elapsed.
+      expect(killRequests).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(child.signalCode).toBe("SIGKILL");
+      expect(elapsed).toBeGreaterThanOrEqual(800);
+    }
   }, 20000);
 
   it("removes the owned root once cleanup observes the exit", async () => {

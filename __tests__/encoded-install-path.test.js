@@ -35,6 +35,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createCliDiscoveryStubs,
   buildFixtureEnv,
@@ -47,7 +48,6 @@ import {
   ORDINARY_CASE,
   HANDSHAKE_TIMEOUT_MS,
   encodedPathnameOf,
-  needsNoEncoding,
   nativeUrlPathnameOf,
   materializeInstall,
   initializeOverStdio,
@@ -82,6 +82,39 @@ beforeAll(() => {
 afterAll(() => {
   if (baseDir) fs.rmSync(baseDir, { recursive: true, force: true });
 });
+
+// ── Owned vs ancestor segments ────────────────────────────────
+//
+// The encoding question this suite asks is about the segment the FIXTURE
+// creates, never about where the host happens to put a temp directory. On the
+// GitHub win32 runners the ancestor is `C:\Users\RUNNER~1\AppData\Local\Temp`,
+// and a file URL encodes that 8.3 short name's `~` as `%7E` — so a whole-path
+// round trip reported "needs encoding" for the plain-ASCII CONTROL
+// (CI 36076593173: `/C:/Users/RUNNER%7E1/.../plain-ascii-install/...`). The
+// same ancestor escape also made the encoded cases' inequality vacuous: it
+// would have held even for a segment that needed no encoding at all.
+//
+// So both are measured on the owned tail only: the case segment plus the
+// install directory name, i.e. exactly the two segments `beforeAll` joins onto
+// `baseDir`. Nothing is normalised, no escape is undone, no segment is
+// renamed, and the install stays exactly where it was materialised — moving it
+// to a cleaner host path would delete the adversarial condition instead of
+// measuring it.
+function ownedSegments(root) {
+  return path.relative(baseDir, root).split(path.sep).filter(Boolean);
+}
+
+/** The same owned segments as a file URL spells them, in native syntax. */
+function encodedOwnedSegments(root) {
+  const owned = ownedSegments(root);
+  const spelled = nativeUrlPathnameOf(root).split(path.sep).filter(Boolean);
+  return spelled.slice(spelled.length - owned.length);
+}
+
+/** True when the fixture's OWN segments survive the round trip unchanged. */
+function ownedTailNeedsNoEncoding(root) {
+  return encodedOwnedSegments(root).join("/") === ownedSegments(root).join("/");
+}
 
 function installFor(key) {
   const install = installs.get(key);
@@ -126,28 +159,76 @@ describe("encoded install path — fixture preconditions", () => {
     }
   });
 
-  // Runs on EVERY platform, win32 included. `needsNoEncoding` compares the
-  // file-URL pathname re-spelled in native syntax, so the control is a real
-  // statement about percent-encoding on win32 too rather than an accidental
-  // assertion about drive letters and slash direction. No gate, no skip.
-  it("the control case needs no percent-encoding at all", () => {
+  // Runs on EVERY platform, win32 included. The comparison is on the
+  // fixture-owned segments, re-spelled in native syntax by
+  // `nativeUrlPathnameOf`, so it is a real statement about percent-encoding on
+  // win32 too rather than an accidental assertion about drive letters, slash
+  // direction, or the host's temp directory. No gate, no skip.
+  it("the control case's own install segments need no percent-encoding at all", () => {
     const install = installFor(ORDINARY_CASE.key);
-    expect(needsNoEncoding(install.root), encodedPathnameOf(install.root)).toBe(true);
+    // The segments under test are the ones this file creates, and they are the
+    // literal names from the case table — asserted, so the check cannot drift
+    // onto some other part of the path.
+    expect(ownedSegments(install.root)).toEqual([
+      ORDINARY_CASE.segment,
+      "aigentry-deliberation",
+    ]);
+    expect(
+      encodedOwnedSegments(install.root).join("/"),
+      "control owned tail",
+    ).toEqual(ownedSegments(install.root).join("/"));
+    expect(ownedTailNeedsNoEncoding(install.root)).toBe(true);
+  });
+
+  // The control's substantive claim is SEMANTIC, and it holds for every case on
+  // every platform: a real file-URL round trip through the url API is lossless
+  // even when the host ancestor carries `~`, a space or a non-ASCII character.
+  // What the encoded cases expose is the naive `.pathname` read, not a path
+  // that has stopped identifying its own install.
+  it("every install root survives a real file-URL round trip unchanged", () => {
+    for (const testCase of ENCODED_PATH_CASES) {
+      const install = installFor(testCase.key);
+      expect(
+        fileURLToPath(pathToFileURL(install.root)),
+        "case " + testCase.key,
+      ).toBe(install.root);
+      expect(fs.existsSync(install.root)).toBe(true);
+    }
   });
 
   it.each(ENCODED_CASES.map((c) => [c.key, c]))(
-    "%s: the install path really does require percent-encoding",
+    "%s: the fixture's OWN install segment really does require percent-encoding",
     (key, testCase) => {
       const install = installFor(key);
-      const encoded = encodedPathnameOf(install.root);
-      // Native-form comparison for the same reason as the control: on win32 a
-      // raw pathname differs from the install root for EVERY path, which would
-      // make this inequality pass without saying anything about encoding.
+      const ownedEncoded = encodedOwnedSegments(install.root).join("/");
+      // The exact adversarial name, byte for byte: nothing here renames or
+      // normalises a segment, so a Unicode-normalising copy step could not be
+      // mistaken for a passing case.
+      expect(ownedSegments(install.root)[0]).toBe(testCase.segment);
+      // The inequality is now carried by the OWNED tail, so it cannot be
+      // satisfied by an ancestor escape the fixture does not control, and the
+      // escape it names must come from the segment under test.
       expect(
-        nativeUrlPathnameOf(install.root),
-        "case " + key + " encoded as " + encoded,
-      ).not.toBe(install.root);
-      expect(encoded).toContain(testCase.needle);
+        ownedEncoded,
+        "case " + key + " owned tail encoded as " + ownedEncoded,
+      ).not.toBe(ownedSegments(install.root).join("/"));
+      expect(ownedEncoded).toContain(testCase.needle);
+      // The absolute form still contains the escape: the owned-tail comparison
+      // narrows WHERE the claim is made, it does not weaken it.
+      expect(encodedPathnameOf(install.root)).toContain(testCase.needle);
+    },
+  );
+
+  // The guard on the repair itself. The control predicate must REJECT every
+  // hostile owned segment: if `ownedTailNeedsNoEncoding` ever started counting
+  // a space, a non-ASCII byte, a literal percent or a hash as plain ASCII, the
+  // control above would pass for the wrong reason and the whole precondition
+  // block would go quiet.
+  it.each(ENCODED_CASES.map((c) => [c.key, c]))(
+    "%s: a hostile owned segment cannot pass the control's plain-ASCII check",
+    (key) => {
+      const install = installFor(key);
+      expect(ownedTailNeedsNoEncoding(install.root), "case " + key).toBe(false);
     },
   );
 });

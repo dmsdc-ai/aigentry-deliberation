@@ -732,9 +732,39 @@ const DIAG_BLOCK_REASON_ENUM = Object.freeze([
   'self_turn', 'cli_unavailable', 'liveness_failed', 'spawn_failed',
   'timeout', 'blocked',
 ]);
+// The CLOSED set of auto-handoff event NAMES the product writes
+// (transport.js:1211-1376). Matching is by exact equality against this list
+// after the line has been parsed, never by substring: `AUTO_HANDOFF_TURN_OK`
+// (a COMPLETED turn) contains `AUTO_HANDOFF_TURN` (a STARTED turn), and the
+// previous `includes` test reported every completion as a start, which is the
+// one distinction the unresolved Linux stall needs. A name outside this list
+// is counted as unparsed, never as any member of it.
 const DIAG_HANDOFF_EVENT_ENUM = Object.freeze([
-  'AUTO_HANDOFF_TURN', 'AUTO_HANDOFF_RETRY', 'AUTO_HANDOFF_SKIP',
+  'AUTO_HANDOFF', 'AUTO_HANDOFF_START', 'AUTO_HANDOFF_ALL_SELF_TURN',
+  'AUTO_HANDOFF_TURN', 'AUTO_HANDOFF_TURN_OK', 'AUTO_HANDOFF_SELF_TURN_SKIP',
+  'AUTO_HANDOFF_RETRY', 'AUTO_HANDOFF_SKIP', 'AUTO_HANDOFF_SYNTHESIZE',
+  'AUTO_HANDOFF_SYNTH_FALLBACK', 'AUTO_HANDOFF_SYNTHESIZED',
+  'AUTO_HANDOFF_NOTIFIED', 'AUTO_HANDOFF_REPORTED', 'AUTO_HANDOFF_COMPLETE',
+  'AUTO_HANDOFF_ERROR',
 ]);
+// Prefix shared by every member above: the cheap pre-filter that decides which
+// lines are CONSIDERED. It never decides which event a line IS.
+const DIAG_HANDOFF_FAMILY = 'AUTO_HANDOFF';
+// The record grammar `appendRuntimeLog` writes (index.js:733):
+//   <ISO8601> [<LEVEL>] <EVENT>: <rest>
+// and, for repeats it collapsed inside the dedup window (index.js:613):
+//   <ISO8601> [DEDUP] [<n>x in <m>ms] [<LEVEL>] <EVENT>: <rest>
+// A dedup summary stands for an UNKNOWN number of occurrences, so it is
+// counted on its own line below and never folded into an event count.
+const DIAG_RUNTIME_EVENT_RE = /^\S+ \[(?:INFO|WARN|ERROR)\] ([A-Z][A-Z0-9_]{0,47}): /;
+const DIAG_RUNTIME_DEDUP_RE = /^\S+ \[DEDUP\] \[\d{1,9}x in \d{1,12}ms\] \[(?:INFO|WARN|ERROR)\] ([A-Z][A-Z0-9_]{0,47}): /;
+// Trailing `| <n>ms` of an AUTO_HANDOFF_TURN_OK record (transport.js:1256):
+// the per-turn cost the product already measured. Digits only, length-capped,
+// and emitted through diagInt — so it is a number or `other`, never text.
+const DIAG_TURN_ELAPSED_RE = /\| (\d{1,12})ms$/;
+// Per-turn values are listed, not averaged (an average hides one wedged turn
+// among fast ones), so the list itself is capped.
+const DIAG_TURN_ELAPSED_LIMIT = 12;
 const DIAG_FS_ERROR_ENUM = Object.freeze([
   'ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'EBUSY',
 ]);
@@ -757,6 +787,19 @@ function diagEnum(value, allowed) {
 /** An integer, else `other`. Never a free-form field. */
 function diagInt(value) {
   return Number.isInteger(value) ? String(value) : 'other';
+}
+
+/**
+ * Up to `limit` integers in observed order, then `+n` for the remainder.
+ * Every element goes through diagInt, so a malformed value is `other` and
+ * never a number. Used only for values the product itself measured as a
+ * duration in ms — no free-form field is ever passed here.
+ */
+function diagIntList(values, limit) {
+  if (values.length === 0) return 'none';
+  const shown = values.slice(0, limit).map(value => diagInt(value)).join(',');
+  const rest = values.length - limit;
+  return rest > 0 ? `${shown},+${rest}` : shown;
 }
 
 /** Sorted `enum=count` pairs over `values`. Deterministic and order-free. */
@@ -804,12 +847,33 @@ function diagHandoffEvents(homeDir) {
   }
   const events = [];
   const reasons = [];
-  for (const line of lines) {
-    const event = DIAG_HANDOFF_EVENT_ENUM.find(name => line.includes(name));
-    if (!event) continue;
+  const turnElapsed = [];
+  let dedupLines = 0;
+  let unparsedLines = 0;
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (!line.includes(DIAG_HANDOFF_FAMILY)) continue;
+    const parsed = line.match(DIAG_RUNTIME_EVENT_RE);
+    // Anything the grammar does not yield, or that yields a name outside the
+    // closed enum, stays UNKNOWN. It is never resolved to a neighbouring
+    // member and never treated as a completed turn.
+    if (!parsed) {
+      if (DIAG_RUNTIME_DEDUP_RE.test(line)) dedupLines += 1;
+      else unparsedLines += 1;
+      continue;
+    }
+    const event = parsed[1];
+    if (!DIAG_HANDOFF_EVENT_ENUM.includes(event)) {
+      unparsedLines += 1;
+      continue;
+    }
     events.push(event);
     const reason = line.match(DIAG_BLOCK_REASON_RE);
     reasons.push(reason ? reason[1] : null);
+    if (event === 'AUTO_HANDOFF_TURN_OK') {
+      const elapsed = line.match(DIAG_TURN_ELAPSED_RE);
+      turnElapsed.push(elapsed ? Number(elapsed[1]) : null);
+    }
   }
   return [
     'runtime_log=present',
@@ -817,6 +881,9 @@ function diagHandoffEvents(homeDir) {
     `handoff_events=${events.length}`,
     `events=${diagCounts(events, DIAG_HANDOFF_EVENT_ENUM)}`,
     `block_reasons=${diagCounts(reasons, DIAG_BLOCK_REASON_ENUM)}`,
+    `turn_ok_elapsed_ms=${diagIntList(turnElapsed, DIAG_TURN_ELAPSED_LIMIT)}`,
+    `dedup_lines=${dedupLines}`,
+    `unparsed_lines=${unparsedLines}`,
   ].join(' ');
 }
 

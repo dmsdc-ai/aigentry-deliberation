@@ -81,6 +81,23 @@ const DIAG_FS_ERROR_ENUM = Object.freeze([
   "ENOENT", "EACCES", "EPERM", "EEXIST", "EISDIR", "ENOTDIR", "EBUSY",
   "ENOSPC", "ENAMETOOLONG", "EINVAL", "ELOOP",
 ]);
+// The leaves an install MUST contain — the exact three the suite's own
+// precondition already asserts (encoded-install-path.test.js:104-106). They are
+// literals written out here, and each is reported by this name and no other, so
+// nothing derived from the owned (host-shaped) root can travel out with them.
+const DIAG_REQUIRED_LEAVES = Object.freeze([
+  "lib/speaker-discovery.js",
+  "selectors/roles/critic.md",
+  "selectors/role-presets.json",
+]);
+// Closed by construction: the five shapes an entry can have, plus one
+// `error(<errno>)` token per allowlisted errno. An errno outside the allowlist
+// is already collapsed to `error(other)` before it reaches this list.
+const DIAG_ENTRY_TYPE_ENUM = Object.freeze([
+  "absent", "file", "dir", "link", "other",
+  ...DIAG_FS_ERROR_ENUM.map((code) => `error(${code})`),
+  "error(other)", "error(none)",
+]);
 
 /** A member of `allowed`, else `none` / `other`. Never the raw value. */
 function diagEnum(value, allowed) {
@@ -99,6 +116,42 @@ function diagBool(value) {
   if (value === true) return "true";
   if (value === false) return "false";
   return "other";
+}
+
+/**
+ * What sits at `p`, as ONE member of `DIAG_ENTRY_TYPE_ENUM`, or
+ * `error(<errno>)`. A single `lstat`: read-only, no `readdir`, no read of any
+ * content, no path in the result. `lstat` rather than `stat` so a broken link
+ * reads as `link` instead of `absent`.
+ */
+function diagEntryType(p) {
+  let stats;
+  try {
+    stats = fs.lstatSync(p);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return "absent";
+    return `error(${diagEnum(err && err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  if (stats.isSymbolicLink()) return "link";
+  if (stats.isDirectory()) return "dir";
+  if (stats.isFile()) return "file";
+  return "other";
+}
+
+/**
+ * Types of the required leaves under payload entry `name`, on BOTH sides of the
+ * copy — so a later run can tell a leaf missing at the SOURCE from one that the
+ * copy failed to land at the TARGET. Read-only; observes only the literal leaf
+ * names above, never the directories they sit in.
+ */
+function diagLeafTypes(repoRoot, root, name) {
+  return DIAG_REQUIRED_LEAVES
+    .filter((leaf) => leaf.split("/")[0] === name)
+    .map((leaf) => ({
+      leaf,
+      src: diagEntryType(path.join(repoRoot, ...leaf.split("/"))),
+      dst: diagEntryType(path.join(root, ...leaf.split("/"))),
+    }));
 }
 
 /** The percent-encoded form a file URL hands back for `p` via `.pathname`. */
@@ -185,6 +238,16 @@ export function materializeInstall({ root, repoRoot = REPO_ROOT } = {}) {
     // reported (it is part of the owned absolute root, i.e. host data), and
     // neither `err.message` nor `{ cause: err }` is attached, because a copy
     // error embeds the absolute source and destination paths verbatim.
+    //
+    // The win22 non-ASCII case is the OTHER failure mode: `cpSync` RETURNED,
+    // so the guard below never fired, yet `lib/speaker-discovery.js` was not in
+    // the install. The observations bracketing the call record that directly —
+    // the type of each required leaf on the source and on the target, taken
+    // immediately before and immediately after this one copy. They only read
+    // (`lstat`); they do not re-copy, normalise, retry, extend a deadline or
+    // suppress anything, so the existing precondition assertion still fails on
+    // exactly the same case, at exactly the same place.
+    const leavesBefore = diagLeafTypes(repoRoot, root, name);
     try {
       fs.cpSync(path.join(repoRoot, name), path.join(root, name), { recursive: true });
     } catch (err) {
@@ -193,6 +256,26 @@ export function materializeInstall({ root, repoRoot = REPO_ROOT } = {}) {
         + `(entry=${diagEnum(name, payload)} `
         + `index=${diagInt(index)}/${diagInt(payload.length)} `
         + `code=${diagEnum(err && err.code, DIAG_FS_ERROR_ENUM)})`
+      );
+    }
+    const leavesAfter = diagLeafTypes(repoRoot, root, name);
+    // Reported only when a required leaf is NOT a file at the target after its
+    // own copy returned — i.e. only on the defect. A green run stays silent,
+    // and the line carries closed-set tokens and counts only: the payload entry
+    // resolved against the payload list, its position, the literal leaf name,
+    // and four entry types. No directory listing, no path, no file content.
+    for (const [position, after] of leavesAfter.entries()) {
+      if (after.dst === "file") continue;
+      const before = leavesBefore[position] || { src: "none", dst: "none" };
+      console.error(
+        "encoded-install fixture payload observation "
+        + `(entry=${diagEnum(name, payload)} `
+        + `index=${diagInt(index)}/${diagInt(payload.length)} `
+        + `leaf=${diagEnum(after.leaf, DIAG_REQUIRED_LEAVES)} `
+        + `src_before=${diagEnum(before.src, DIAG_ENTRY_TYPE_ENUM)} `
+        + `dst_before=${diagEnum(before.dst, DIAG_ENTRY_TYPE_ENUM)} `
+        + `src_after=${diagEnum(after.src, DIAG_ENTRY_TYPE_ENUM)} `
+        + `dst_after=${diagEnum(after.dst, DIAG_ENTRY_TYPE_ENUM)})`
       );
     }
   }
