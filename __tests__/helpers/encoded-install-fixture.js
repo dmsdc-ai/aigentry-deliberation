@@ -33,6 +33,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { joinOwnedChild } from "./cli-discovery-fixture.js";
+import {
+  copyFixtureEntry,
+  FixtureCopyError,
+  FIXTURE_COPY_REASONS,
+} from "./portable-fixture-copy.js";
 
 export const HELPER_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(HELPER_DIR, "..", "..");
@@ -232,6 +237,15 @@ export function materializeInstall({ root, repoRoot = REPO_ROOT } = {}) {
     // effect or a swallowed error is UNRESOLVED, and a speculative
     // normalisation here would weaken the very adversarial case under test.
     //
+    // The copy is `copyFixtureEntry` (`portable-fixture-copy.js`), not
+    // `fs.cpSync(..., {recursive:true})`: a per-file walk that verifies what
+    // landed, so the fixture does not depend on the recursive builtin. It
+    // normalises, re-encodes and retries nothing, and refuses rather than
+    // repairs, so the observations below and the suite's precondition assertion
+    // still report exactly what they did. Each destination path here is fresh,
+    // which is what that helper requires. Whether `fs.cpSync` itself is sound
+    // remains UNRESOLVED and is measured only by `native-unicode-copy.test.js`.
+    //
     // Bounded like every other diagnostic here: `name` is reported only as a
     // member of the payload list computed just above, the position is a count,
     // and the errno is an allowlist member. The segment basename is NOT
@@ -249,13 +263,21 @@ export function materializeInstall({ root, repoRoot = REPO_ROOT } = {}) {
     // exactly the same case, at exactly the same place.
     const leavesBefore = diagLeafTypes(repoRoot, root, name);
     try {
-      fs.cpSync(path.join(repoRoot, name), path.join(root, name), { recursive: true });
+      copyFixtureEntry(path.join(repoRoot, name), path.join(root, name));
     } catch (err) {
+      // Two failure shapes, both reported as closed tokens: an fs errno (the
+      // helper rethrows fs errors unchanged, so `code` survives) or one of the
+      // helper's own contract refusals. Neither `err.message` nor the error
+      // itself is attached, because a copy error embeds absolute paths.
       throw new Error(
         "encoded-install fixture failed to materialise an install payload entry "
         + `(entry=${diagEnum(name, payload)} `
         + `index=${diagInt(index)}/${diagInt(payload.length)} `
-        + `code=${diagEnum(err && err.code, DIAG_FS_ERROR_ENUM)})`
+        + `code=${diagEnum(err && err.code, DIAG_FS_ERROR_ENUM)} `
+        + `reason=${diagEnum(
+          err instanceof FixtureCopyError ? err.reason : null,
+          FIXTURE_COPY_REASONS
+        )})`
       );
     }
     const leavesAfter = diagLeafTypes(repoRoot, root, name);

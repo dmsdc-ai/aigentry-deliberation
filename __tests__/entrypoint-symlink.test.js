@@ -11,10 +11,12 @@
  * lexical. Comparing realpaths on both sides is the only form that holds for
  * every combination, and it must not throw when argv[1] cannot be resolved.
  *
- * This file is self-contained on purpose: it imports only vitest and node
- * builtins, never a shared test helper and never the product itself. It builds
- * its fixture from the package's own declared payload allowlist, so it keeps
- * working in an ordinary checkout on any platform.
+ * This file imports vitest, node builtins and exactly ONE shared test helper —
+ * `helpers/portable-fixture-copy.js`, for the payload copy below — and never the
+ * product itself. That helper is a leaf module: node builtins only, no product
+ * import, no child process, no network. It builds its fixture from the package's
+ * own declared payload allowlist, so it keeps working in an ordinary checkout on
+ * any platform.
  *
  * Every child runs with an environment built from scratch: nothing inherited,
  * fake HOME plus XDG and temp variables inside the fixture, PATH restricted to
@@ -31,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { copyFixtureEntry } from "./helpers/portable-fixture-copy.js";
 
 const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.dirname(TESTS_DIR);
@@ -90,6 +93,16 @@ function resolveDependencyGraph() {
  * Copy the package's own declared payload, expanding the allowlist entries in
  * package.json "files". package.json is always part of a published package and
  * is required here for the module type, so it is copied explicitly.
+ *
+ * The copy goes through `copyFixtureEntry` rather than
+ * `fs.cpSync(..., {recursive:true})`, so the payload of the fixture built under
+ * `en coded 한글 100%tested #1` does not depend on the recursive builtin. It
+ * throws on a missing source, an unsupported entry or a file that did not land,
+ * so a payload that fails to materialise surfaces HERE rather than as a puzzling
+ * child failure later; each destination path below is fresh, which is what that
+ * helper requires. Entries that do not exist are still skipped before the call,
+ * exactly as before: the allowlist legitimately names files an ordinary checkout
+ * may lack.
  */
 function copyDeclaredPayload(dest) {
   const entries = ["package.json", ...(PKG.files ?? [])];
@@ -98,7 +111,7 @@ function copyDeclaredPayload(dest) {
     const rel = entry.replace(/\/\*\*$/, "");
     const from = path.join(REPO, rel);
     if (!fs.existsSync(from)) continue;
-    fs.cpSync(from, path.join(dest, rel), { recursive: true });
+    copyFixtureEntry(from, path.join(dest, rel));
     copied.push(rel);
   }
   return copied;
