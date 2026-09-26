@@ -35,3 +35,50 @@ jobs:
 
       - name: Test
         run: npm test
+
+  # cp1172br — Windows-only diagnostic for the reduced native Unicode copy case.
+  #
+  # Separate from `test` on purpose: `test` keeps running the reduced Vitest
+  # gate and its verdict is unchanged by anything here. This job runs the same
+  # experiment in a PLAIN `node` process, so that "Node/libuv behaviour" can be
+  # separated from "Vitest-runtime contamination" (other test files temporarily
+  # replace fs.copyFileSync / fs.cpSync in the suite process).
+  #
+  # No new dependency, credential, permission or account. Same checkout and
+  # setup-node mechanism as `test`. No continue-on-error anywhere: a discrepancy
+  # observed here fails this job.
+  native-unicode-copy-diagnostic:
+    name: cp1172br diagnostic (windows, node ${{ matrix.node }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Builtin-only: deliberately runs BEFORE any install, so no dependency,
+      # loader or lifecycle script can be on its import path.
+      - name: Raw diagnostic (no runner, no dependencies)
+        timeout-minutes: 3
+        run: node scripts/diagnose-native-unicode-copy.mjs
+
+      # Comparison only. `if: always()` so a red raw diagnostic still yields the
+      # side-by-side Vitest observation; the raw step's failure is already
+      # recorded and is never masked or downgraded by these steps.
+      - name: Install dependencies (for comparison step)
+        if: always()
+        run: npm ci
+
+      - name: Comparison — same case under Vitest
+        if: always()
+        timeout-minutes: 5
+        run: npx vitest run __tests__/native-unicode-copy.test.js

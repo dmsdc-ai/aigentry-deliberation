@@ -58,6 +58,7 @@
   "dependencies": {
     "@dmsdc-ai/aigentry-logger": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "cross-spawn": "7.0.6",
     "ws": "^8.18.0"
   },
   "keywords": [

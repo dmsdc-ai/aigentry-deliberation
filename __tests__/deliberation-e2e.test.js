@@ -5,8 +5,27 @@ import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTeleptySynthesisEnvelope } from '../index.js';
 
-const REPO_ROOT = process.cwd();
-const SERVER_ENTRY = path.join(REPO_ROOT, 'index.js');
+// dh1172ao — deterministic CLI discovery. Every harness below is handed its
+// own inert stub bin directory and an explicitly constructed environment; the
+// host PATH is never inherited, so no real agent CLI, browser or telepty
+// endpoint is reachable from these tests. See
+// __tests__/helpers/cli-discovery-fixture.js for the declared seam and its
+// limits (11-name fixture ceiling is NOT the product worker-count cap).
+import {
+  FIXTURE_REPO_ROOT,
+  FIXTURE_SERVER_ENTRY,
+  FIXTURE_NODE_BIN,
+  buildFixtureEnv,
+  createCliDiscoveryStubs,
+  getFixtureInstallDir,
+  joinOwnedChild,
+  writeStub,
+} from './helpers/cli-discovery-fixture.js';
+
+// Resolved from this file's own location rather than process.cwd(), so the
+// harness does not depend on where the runner was invoked.
+const REPO_ROOT = FIXTURE_REPO_ROOT;
+const SERVER_ENTRY = FIXTURE_SERVER_ENTRY;
 
 function makeSession(project, id, overrides = {}) {
   return {
@@ -40,8 +59,11 @@ function makeSession(project, id, overrides = {}) {
   };
 }
 
+// Platform-correct, mirroring index.js:296-299. The POSIX-only literal this
+// replaced made the harness write config.json and read session/archive state
+// under a tree the server never used on win32.
 function getInstallDir(homeDir) {
-  return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+  return getFixtureInstallDir(homeDir);
 }
 
 function getProjectStateDir(homeDir, project) {
@@ -77,13 +99,15 @@ async function createHarness() {
     include_browser_speakers: false,
   }, null, 2));
 
-  const child = spawn(process.execPath, [SERVER_ENTRY], {
+  // Declared discovery seam: the full 11-name DEFAULT_CLI_CANDIDATES set as
+  // inert `exit 0` stubs, inside this harness's own root. The delegated cases
+  // below mint tokens for ['claude','codex']; without this the suite silently
+  // required those binaries to be installed on the host.
+  const { dir: stubDir } = createCliDiscoveryStubs({ root: homeDir });
+
+  const child = spawn(FIXTURE_NODE_BIN, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      AIGENTRY_TIER: 'pro',
-    },
+    env: buildFixtureEnv({ homeDir, stubDir }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -152,8 +176,10 @@ async function createHarness() {
       }
       return response.result;
     },
-    cleanup() {
-      child.kill('SIGTERM');
+    // Join the child before removing the owned tree: rmSync racing a
+    // still-writing server leaks both a process handle and a temp root.
+    async cleanup() {
+      await joinOwnedChild(child);
       fs.rmSync(homeDir, { recursive: true, force: true });
     },
   };
@@ -168,10 +194,10 @@ function getText(result) {
 
 const harnesses = [];
 
-afterEach(() => {
+afterEach(async () => {
   while (harnesses.length > 0) {
     const harness = harnesses.pop();
-    harness.cleanup();
+    await harness.cleanup();
   }
 });
 
@@ -546,12 +572,17 @@ describe('deliberation e2e flows', () => {
 // check halts auto-handoff cleanly without fabricating synthesis.
 
 function writeStubCli(dir, name) {
+  // Behaviour-bearing stub: unlike the inert discovery stubs it emits a
+  // response line, because these cases assert on turn content.
+  //
   // Stub must exit immediately without reading stdin. The gemini invocation path
   // (spawn('gemini', ['-p', prompt])) never closes the child's stdin, so a stub
   // that blocks on `cat` would hang indefinitely. Claude/codex invocations close
   // stdin after writing, but we keep the stub uniform and stdin-agnostic.
-  const body = `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
-  fs.writeFileSync(path.join(dir, name), body, { mode: 0o755 });
+  const body = process.platform === 'win32'
+    ? `@echo off\r\necho [STUB] ${name} response [AGREE]\r\nexit /b 0\r\n`
+    : `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
+  writeStub(dir, name, body);
 }
 
 function extractToken(text, label) {
@@ -570,19 +601,22 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     include_browser_speakers: false,
   }, null, 2));
 
-  const stubDir = path.join(homeDir, 'stubs');
-  fs.mkdirSync(stubDir, { recursive: true });
+  // One owned bin directory, written in two layers so there is no
+  // PATH-shadowing ambiguity between them:
+  //   1. the inert 11-name discovery baseline, so speaker discovery is
+  //      deterministic and never consults the host;
+  //   2. the behaviour-bearing stubs for the speakers these cases actually
+  //      dispatch, overwriting the inert file of the same name.
+  const { dir: stubDir } = createCliDiscoveryStubs({ root: homeDir });
   for (const name of stubs) writeStubCli(stubDir, name);
 
-  const child = spawn(process.execPath, [SERVER_ENTRY], {
+  const child = spawn(FIXTURE_NODE_BIN, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      AIGENTRY_TIER: 'pro',
-      DELIBERATION_CALLER_SPEAKER: callerSpeaker,
-      PATH: `${stubDir}:${process.env.PATH || ''}`,
-    },
+    env: buildFixtureEnv({
+      homeDir,
+      stubDir,
+      extra: { DELIBERATION_CALLER_SPEAKER: callerSpeaker },
+    }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -640,8 +674,8 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
       if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
       return response.result;
     },
-    cleanup() {
-      child.kill('SIGTERM');
+    async cleanup() {
+      await joinOwnedChild(child);
       fs.rmSync(homeDir, { recursive: true, force: true });
     },
   };
@@ -666,7 +700,348 @@ async function confirmSpeakers(harness, speakers) {
   return confirmedToken;
 }
 
-async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
+// ── Bounded stall diagnostic (DIAGNOSTIC ONLY) ─────────────────
+//
+// The two `self_turn` cases below time out deterministically on Linux at the
+// 25000ms archive budget while completing in <1.1s on macOS. The trigger is
+// UNRESOLVED, and the bare `timeout waiting for archive` carried none of the
+// state needed to resolve it.
+//
+// These helpers add evidence at that exact existing failure point. They change
+// no budget, add no retry, no fallback and no product behaviour, and they never
+// make a failing case pass.
+//
+// What is emitted is a CLOSED SET: literal tokens written out below, plus
+// integer counts. Nothing is copied out of the session file, the runtime log
+// or the child stderr. Each is reduced to a count, or to a member of an
+// allowlist here with every unrecognised value collapsing to `other`. So no
+// prompt text, no response text, no selection token, no environment, no
+// browser profile and no path can travel out — by CONSTRUCTION, not by
+// redaction of free-form text, which is what the previous revision attempted.
+// Nothing is uploaded anywhere.
+const DIAG_STATUS_ENUM = Object.freeze([
+  'active', 'completed', 'archived', 'error', 'paused',
+]);
+const DIAG_CHANNEL_ENUM = Object.freeze([
+  'self_turn_skip', 'cli', 'manual', 'browser', 'telepty',
+]);
+const DIAG_FALLBACK_ENUM = Object.freeze([
+  'caller_identity_match', 'cli_unavailable', 'timeout', 'blocked',
+]);
+const DIAG_BLOCK_REASON_ENUM = Object.freeze([
+  'self_turn', 'cli_unavailable', 'liveness_failed', 'spawn_failed',
+  'timeout', 'blocked',
+]);
+// The CLOSED set of auto-handoff event NAMES the product writes
+// (transport.js:1211-1376). Matching is by exact equality against this list
+// after the line has been parsed, never by substring: `AUTO_HANDOFF_TURN_OK`
+// (a COMPLETED turn) contains `AUTO_HANDOFF_TURN` (a STARTED turn), and the
+// previous `includes` test reported every completion as a start, which is the
+// one distinction the unresolved Linux stall needs. A name outside this list
+// is counted as unparsed, never as any member of it.
+const DIAG_HANDOFF_EVENT_ENUM = Object.freeze([
+  'AUTO_HANDOFF', 'AUTO_HANDOFF_START', 'AUTO_HANDOFF_ALL_SELF_TURN',
+  'AUTO_HANDOFF_TURN', 'AUTO_HANDOFF_TURN_OK', 'AUTO_HANDOFF_SELF_TURN_SKIP',
+  'AUTO_HANDOFF_RETRY', 'AUTO_HANDOFF_SKIP', 'AUTO_HANDOFF_SYNTHESIZE',
+  'AUTO_HANDOFF_SYNTH_FALLBACK', 'AUTO_HANDOFF_SYNTHESIZED',
+  'AUTO_HANDOFF_NOTIFIED', 'AUTO_HANDOFF_REPORTED', 'AUTO_HANDOFF_COMPLETE',
+  'AUTO_HANDOFF_ERROR',
+]);
+// Prefix shared by every member above: the cheap pre-filter that decides which
+// lines are CONSIDERED. It never decides which event a line IS.
+const DIAG_HANDOFF_FAMILY = 'AUTO_HANDOFF';
+// The record grammar `appendRuntimeLog` writes (index.js:733):
+//   <ISO8601> [<LEVEL>] <EVENT>: <rest>
+// and, for repeats it collapsed inside the dedup window (index.js:613):
+//   <ISO8601> [DEDUP] [<n>x in <m>ms] [<LEVEL>] <EVENT>: <rest>
+// A dedup summary stands for an UNKNOWN number of occurrences, so it is
+// counted on its own line below and never folded into an event count.
+const DIAG_RUNTIME_EVENT_RE = /^\S+ \[(?:INFO|WARN|ERROR)\] ([A-Z][A-Z0-9_]{0,47}): /;
+const DIAG_RUNTIME_DEDUP_RE = /^\S+ \[DEDUP\] \[\d{1,9}x in \d{1,12}ms\] \[(?:INFO|WARN|ERROR)\] ([A-Z][A-Z0-9_]{0,47}): /;
+// Trailing `| <n>ms` of an AUTO_HANDOFF_TURN_OK record (transport.js:1256):
+// the per-turn cost the product already measured. Digits only, length-capped,
+// and emitted through diagInt — so it is a number or `other`, never text.
+const DIAG_TURN_ELAPSED_RE = /\| (\d{1,12})ms$/;
+// Per-turn values are listed, not averaged (an average hides one wedged turn
+// among fast ones), so the list itself is capped.
+const DIAG_TURN_ELAPSED_LIMIT = 12;
+const DIAG_FS_ERROR_ENUM = Object.freeze([
+  'ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'EBUSY',
+]);
+// Fixed substrings counted in the child stderr. Only the COUNT is reported,
+// never the surrounding line.
+const DIAG_STDERR_MARKERS = Object.freeze([
+  'AUTO_HANDOFF', 'AUTO_SKIP', 'SELF_TURN_SKIP', 'EACCES', 'ENOENT', 'EPIPE',
+  'ECONNREFUSED', 'ETIMEDOUT', 'SIGKILL', 'SIGTERM',
+  'ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_ESM_URL_SCHEME',
+]);
+// Shutdown records `appendRuntimeLog` can write that carry NO `AUTO_HANDOFF`
+// substring, so diagHandoffEvents' family pre-filter drops them before its
+// grammar runs and they reach neither `unparsed_lines` nor `dedup_lines`.
+// `[label, level, exactMessage]`, each entry read off the actual call site;
+// a record is counted only when BOTH fields sit in their grammar positions
+// (index.js:733 `<ISO> [<level>] <message>`):
+//   index.js:896,910 — level `INFO`, message exactly the EPIPE sentence, so a
+//   message that merely quotes that sentence is not a record of one;
+//   index.js:902,914 — the marker IS the level argument, so the record is
+//   `[UNCAUGHT_EXCEPTION] <formatRuntimeError>` / `[UNHANDLED_REJECTION] …`
+//   with a free-form message (`exactMessage: null` = message not constrained).
+// Consequently the same token inside a message body — at any level — is not
+// counted, which is what the substring match this replaces got wrong.
+// Only the label and an integer are emitted, never the surrounding line.
+const DIAG_SHUTDOWN_MARKERS = Object.freeze([
+  ['client_disconnect_epipe', 'INFO', 'Client disconnected (EPIPE). Shutting down.'],
+  ['uncaught_exception', 'UNCAUGHT_EXCEPTION', null],
+  ['unhandled_rejection', 'UNHANDLED_REJECTION', null],
+]);
+// The same two grammars as DIAG_RUNTIME_EVENT_RE / DIAG_RUNTIME_DEDUP_RE, but
+// capturing the level token and the message instead of an event name — the
+// shutdown levels above are not the INFO/WARN/ERROR set and carry no `EVENT: `
+// prefix. No new parser: this is index.js:733 and index.js:613 written out.
+const DIAG_SHUTDOWN_RECORD_RE = /^\S+ \[([A-Z][A-Z0-9_]{0,47})\] (.*)$/;
+const DIAG_SHUTDOWN_DEDUP_RE = /^\S+ \[DEDUP\] \[\d{1,9}x in \d{1,12}ms\] \[([A-Z][A-Z0-9_]{0,47})\] (.*)$/;
+// Signals the harness child could be reaped with. Anything else is `other`.
+const DIAG_EXIT_SIGNAL_ENUM = Object.freeze([
+  'SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGPIPE', 'SIGSEGV', 'SIGABRT',
+]);
+// Shape of a `ChildProcess.signalCode`. Wider than the enum above — a real
+// reap can name a signal the enum does not list, and that is still a real
+// observation — but narrow enough that arbitrary text is not mistaken for one.
+const DIAG_SIGNAL_NAME_RE = /^SIG[A-Z0-9]{1,12}$/;
+// The captured group is never emitted raw: it is passed through diagEnum.
+const DIAG_BLOCK_REASON_RE = /block_reason["' :=]+([A-Za-z0-9_.-]{1,40})/;
+
+/** A member of `allowed`, else `none` / `other`. Never the raw value. */
+function diagEnum(value, allowed) {
+  if (value === null || value === undefined || value === '') return 'none';
+  return allowed.includes(value) ? value : 'other';
+}
+
+/** An integer, else `other`. Never a free-form field. */
+function diagInt(value) {
+  return Number.isInteger(value) ? String(value) : 'other';
+}
+
+/**
+ * Up to `limit` integers in observed order, then `+n` for the remainder.
+ * Every element goes through diagInt, so a malformed value is `other` and
+ * never a number. Used only for values the product itself measured as a
+ * duration in ms — no free-form field is ever passed here.
+ */
+function diagIntList(values, limit) {
+  if (values.length === 0) return 'none';
+  const shown = values.slice(0, limit).map(value => diagInt(value)).join(',');
+  const rest = values.length - limit;
+  return rest > 0 ? `${shown},+${rest}` : shown;
+}
+
+/** Sorted `enum=count` pairs over `values`. Deterministic and order-free. */
+function diagCounts(values, allowed) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = diagEnum(value, allowed);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([key, n]) => `${key}=${n}`)
+    .join(',') || 'none';
+}
+
+function diagSessionState(homeDir, project, sessionId) {
+  const sessionFile = getSessionFile(homeDir, project, sessionId);
+  if (!fs.existsSync(sessionFile)) return 'session=absent';
+  let session;
+  try {
+    session = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+  } catch (err) {
+    return `session=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  // current_speaker and every other free-form field are deliberately NOT read.
+  const log = Array.isArray(session.log) ? session.log : [];
+  return [
+    'session=present',
+    `status=${diagEnum(session.status, DIAG_STATUS_ENUM)}`,
+    `round=${diagInt(session.current_round)}/${diagInt(session.max_rounds)}`,
+    `log_entries=${log.length}`,
+    `channels=${diagCounts(log.map(entry => entry.channel_used), DIAG_CHANNEL_ENUM)}`,
+    `fallbacks=${diagCounts(log.map(entry => entry.fallback_reason), DIAG_FALLBACK_ENUM)}`,
+  ].join(' ');
+}
+
+function diagHandoffEvents(homeDir) {
+  const logPath = path.join(getInstallDir(homeDir), 'runtime.log');
+  if (!fs.existsSync(logPath)) return 'runtime_log=absent';
+  let lines;
+  try {
+    lines = fs.readFileSync(logPath, 'utf-8').split('\n');
+  } catch (err) {
+    return `runtime_log=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  const events = [];
+  const reasons = [];
+  const turnElapsed = [];
+  let dedupLines = 0;
+  let unparsedLines = 0;
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (!line.includes(DIAG_HANDOFF_FAMILY)) continue;
+    const parsed = line.match(DIAG_RUNTIME_EVENT_RE);
+    // Anything the grammar does not yield, or that yields a name outside the
+    // closed enum, stays UNKNOWN. It is never resolved to a neighbouring
+    // member and never treated as a completed turn.
+    if (!parsed) {
+      if (DIAG_RUNTIME_DEDUP_RE.test(line)) dedupLines += 1;
+      else unparsedLines += 1;
+      continue;
+    }
+    const event = parsed[1];
+    if (!DIAG_HANDOFF_EVENT_ENUM.includes(event)) {
+      unparsedLines += 1;
+      continue;
+    }
+    events.push(event);
+    const reason = line.match(DIAG_BLOCK_REASON_RE);
+    reasons.push(reason ? reason[1] : null);
+    if (event === 'AUTO_HANDOFF_TURN_OK') {
+      const elapsed = line.match(DIAG_TURN_ELAPSED_RE);
+      turnElapsed.push(elapsed ? Number(elapsed[1]) : null);
+    }
+  }
+  return [
+    'runtime_log=present',
+    `log_lines=${lines.length}`,
+    `handoff_events=${events.length}`,
+    `events=${diagCounts(events, DIAG_HANDOFF_EVENT_ENUM)}`,
+    `block_reasons=${diagCounts(reasons, DIAG_BLOCK_REASON_ENUM)}`,
+    `turn_ok_elapsed_ms=${diagIntList(turnElapsed, DIAG_TURN_ELAPSED_LIMIT)}`,
+    `dedup_lines=${dedupLines}`,
+    `unparsed_lines=${unparsedLines}`,
+  ].join(' ');
+}
+
+// No stderr TEXT is emitted, in any form. Only its size and the number of
+// times each fixed marker above occurs in it. A tail plus path redaction was
+// not sufficient: arbitrary child stderr can carry prompt, response or token
+// text, which no path-shaped rule excludes.
+function diagStderrShape(stderr) {
+  const text = String(stderr === null || stderr === undefined ? '' : stderr);
+  if (!text) return 'stderr=empty';
+  const markers = [];
+  for (const marker of DIAG_STDERR_MARKERS) {
+    const hits = text.split(marker).length - 1;
+    if (hits > 0) markers.push(`${marker}=${hits}`);
+  }
+  return [
+    'stderr=present',
+    `stderr_bytes=${text.length}`,
+    `stderr_lines=${text.split('\n').length}`,
+    `markers=${markers.join(',') || 'none'}`,
+  ].join(' ');
+}
+
+/**
+ * What the runtime has OBSERVED about the harness-owned server child.
+ *
+ * Read off the harness's own handle — no `ps`, no new process, no host
+ * inspection. An exit is OBSERVED only on a POSITIVE fact: `exitCode` is an
+ * integer (a reaped status) or `signalCode` names a signal (a reaped
+ * signal-termination). Anything else — both absent, one absent, a field of
+ * the wrong type, or a handle that is not a ChildProcess at all — is an
+ * ABSENCE OF INFORMATION, reported as `exit_not_observed`. It is not evidence
+ * that the child is running, and no label here says or implies that.
+ * (Mirrors the positive-fact test `hasObservedExit` in
+ * helpers/cli-discovery-fixture.js:319, which is not exported.)
+ *
+ * Testing the positive fact rather than `!== null` is what keeps that promise:
+ * on a handle missing the fields both reads are `undefined`, and
+ * `undefined !== null` is true, which would report the exact opposite.
+ *
+ * Bounded: `kill_signal_sent` and `pid_present` describe the handle passed in,
+ * not an exit; on an unknown shape both read falsy and report `no`.
+ *
+ * `child.killed` records only that a signal was accepted for delivery — not
+ * that the child terminated, and not that the signal was fatal — so it is
+ * reported under that name and no other.
+ */
+function diagServerChildExit(child) {
+  if (!child) return 'server_child=not_supplied';
+  const observed = Number.isInteger(child.exitCode)
+    || (typeof child.signalCode === 'string' && DIAG_SIGNAL_NAME_RE.test(child.signalCode));
+  return [
+    `server_child=${observed ? 'exit_observed' : 'exit_not_observed'}`,
+    // `none` = no status reaped (absent or never set), distinct from
+    // `other` = a status that is present but not an integer.
+    `exit_code=${child.exitCode === null || child.exitCode === undefined ? 'none' : diagInt(child.exitCode)}`,
+    `exit_signal=${diagEnum(child.signalCode, DIAG_EXIT_SIGNAL_ENUM)}`,
+    `kill_signal_sent=${child.killed ? 'yes' : 'no'}`,
+    `pid_present=${child.pid ? 'yes' : 'no'}`,
+  ].join(' ');
+}
+
+/**
+ * The marker a parsed record IS, else `null`.
+ *
+ * Both fields must sit in their grammar positions: the level token must be the
+ * one the call site passes, and — where the table pins a message — the message
+ * must be exactly it. A marker mentioned inside a message body is therefore
+ * not a record of one, at any level.
+ */
+function diagShutdownLabel(level, message) {
+  for (const [label, recordLevel, exactMessage] of DIAG_SHUTDOWN_MARKERS) {
+    if (level !== recordLevel) continue;
+    if (exactMessage === null || message === exactMessage) return label;
+  }
+  return null;
+}
+
+/**
+ * Counts of the shutdown records above in the SAME private runtime.log
+ * diagHandoffEvents reads.
+ *
+ * Counted per line rather than over the whole text, because the dedup summary
+ * (index.js:613) REPLAYS the original `[<level>] <message>` inside itself: a
+ * whole-text substring count would score the real record and its summary as
+ * two occurrences. A summary also stands for an UNKNOWN multiplicity, so — as
+ * with handoff events above — it is counted on its own line and never folded
+ * into a marker count. Labels and integers only; no line text is emitted.
+ */
+function diagShutdownMarkers(homeDir) {
+  const logPath = path.join(getInstallDir(homeDir), 'runtime.log');
+  if (!fs.existsSync(logPath)) return 'shutdown_markers=runtime_log_absent';
+  let lines;
+  try {
+    lines = fs.readFileSync(logPath, 'utf-8').split('\n');
+  } catch (err) {
+    return `shutdown_markers=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  const direct = new Map();
+  let dedupMarkerLines = 0;
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    // Dedup first: a summary also matches the plain record grammar, with
+    // `DEDUP` as its level, so testing it second would classify it as neither.
+    const summary = DIAG_SHUTDOWN_DEDUP_RE.exec(line);
+    if (summary) {
+      if (diagShutdownLabel(summary[1], summary[2]) !== null) dedupMarkerLines += 1;
+      continue;
+    }
+    const record = DIAG_SHUTDOWN_RECORD_RE.exec(line);
+    if (!record) continue;
+    const label = diagShutdownLabel(record[1], record[2]);
+    if (label !== null) direct.set(label, (direct.get(label) || 0) + 1);
+  }
+  const counts = DIAG_SHUTDOWN_MARKERS
+    .filter(([label]) => direct.has(label))
+    .map(([label]) => `${label}=${direct.get(label)}`)
+    .join(',');
+  return [
+    `shutdown_markers=${counts || 'none'}`,
+    `shutdown_dedup_lines=${dedupMarkerLines}`,
+  ].join(' ');
+}
+
+async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, stderr = null, child = null) {
   const archiveDir = path.join(getProjectStateDir(homeDir, project), 'archive');
   const sessionFile = getSessionFile(homeDir, project, sessionId);
   const start = Date.now();
@@ -677,7 +1052,17 @@ async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
     }
     await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error('timeout waiting for archive');
+  throw new Error([
+    'timeout waiting for archive',
+    `timeoutMs=${timeoutMs}`,
+    `elapsedMs=${Date.now() - start}`,
+    `archive_dir=${fs.existsSync(archiveDir) ? 'present' : 'absent'}`,
+    diagSessionState(homeDir, project, sessionId),
+    diagHandoffEvents(homeDir),
+    diagShutdownMarkers(homeDir),
+    diagServerChildExit(child),
+    diagStderrShape(typeof stderr === 'function' ? stderr() : stderr),
+  ].join(' | '));
 }
 
 function parseArchiveLog(markdown) {
@@ -738,7 +1123,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr, harness.child);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
     // Round bookkeeping: 3 speakers × 2 rounds = 6 log entries total
@@ -786,7 +1171,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr, harness.child);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
 
@@ -870,4 +1255,219 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     // No turns should have been executed or fabricated
     expect(state.log.filter(e => e.event !== 'context_injection')).toHaveLength(0);
   }, 20000);
+});
+
+// ── Task #1172 — controller-delegated selection, end to end ─────
+//
+// Complements __tests__/delegated-selection.test.js: that suite proves the
+// API -> validation -> token -> start chain; this one follows the origin
+// outward into status output, history and archive, and pins the actuation
+// refusal. Uses the same local harness above (isolated HOME, inert env).
+describe('controller-delegated selection — origin propagation', () => {
+  const DELEGATION = { task_id: '1172', reference: 'dv1172ad/release1171' };
+  const DELEGATED_ORIGIN = 'controller-delegated';
+
+  function selectionFilePath(homeDir, project) {
+    return path.join(getProjectStateDir(homeDir, project), 'speaker-selection.json');
+  }
+
+  function findSelectionState(homeDir) {
+    const base = path.join(getInstallDir(homeDir), 'state');
+    if (!fs.existsSync(base)) return null;
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const file = selectionFilePath(homeDir, entry.name);
+      if (fs.existsSync(file)) return { state: readJson(file), project: entry.name };
+    }
+    return null;
+  }
+
+  function findSession(homeDir) {
+    const base = path.join(getInstallDir(homeDir), 'state');
+    if (!fs.existsSync(base)) return null;
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(getProjectStateDir(homeDir, entry.name), 'sessions');
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        if (name.endsWith('.json')) {
+          return { session: readJson(path.join(dir, name)), project: entry.name };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Mints a delegated token through the real tools. Returns null when the
+  // delegated route is absent, so the caller can report a precise failure.
+  async function mintDelegated(harness, speakers) {
+    const snapshot = getText(await harness.callTool('deliberation_speaker_candidates', {
+      include_cli: true,
+      include_browser: false,
+    }));
+    const candidateToken = (snapshot.match(/\*\*Candidate token:\*\*\s*`([^`]+)`/) || [])[1];
+    expect(candidateToken, `no candidate token:\n${snapshot}`).toBeTruthy();
+
+    await harness.callTool('deliberation_select_speakers', {
+      selection_token: candidateToken,
+      speakers,
+      delegation: DELEGATION,
+    });
+    const found = findSelectionState(harness.homeDir);
+    return found?.state?.selection_origin === DELEGATED_ORIGIN ? found.state.token : null;
+  }
+
+  it('carries selection_origin from start into status, history and archive', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const delegatedToken = await mintDelegated(harness, speakers);
+    expect(delegatedToken, 'deliberation_select_speakers did not mint a delegated token').toBeTruthy();
+
+    const startText = getText(await harness.callTool('deliberation_start', {
+      topic: 'delegated origin propagation',
+      selection_token: delegatedToken,
+      speakers,
+      rounds: 1,
+    }));
+    expect(startText).toMatch(/Deliberation started/);
+    expect(startText).toMatch(/controller-delegated/);
+    expect(startText).not.toMatch(/user-selected/);
+
+    const found = findSession(harness.homeDir);
+    expect(found, 'no session persisted').toBeTruthy();
+    const { session, project } = found;
+    // dv1172ae — representation adapter only: the candidate persists provenance
+    // as a structured `speaker_selection` block rather than a top-level field.
+    expect(session.speaker_selection?.origin).toBe(DELEGATED_ORIGIN);
+    expect(session.speaker_selection.human_selection_confirmed).toBe(false);
+    expect(session.speaker_selection.delegation).toMatchObject(DELEGATION);
+
+    // status output
+    const statusText = getText(await harness.callTool('deliberation_status', {
+      session_id: session.id,
+    }));
+    expect(statusText).toMatch(/controller-delegated/);
+    expect(statusText).not.toMatch(/user-selected/);
+
+    // history listing
+    const historyText = getText(await harness.callTool('deliberation_history', {}));
+    expect(historyText).not.toMatch(/user-selected/);
+
+    // archive: reset only archives a session that has log entries
+    // (index.js:2709 — an empty session is discarded, not archived; that is
+    // pre-existing baseline behaviour, not part of this contract). Give the
+    // session one inert log entry so the archive path is actually exercised.
+    // No turn is executed and no provider is called.
+    await harness.callTool('deliberation_inject_context', {
+      session_id: session.id,
+      context: 'dv1172ae archive probe',
+    });
+    await harness.callTool('deliberation_reset', { session_id: session.id });
+
+    // dv1172ae: archive files are named by topic slug, not session id
+    // (`deliberation-<date>-<topic-slug>.md`), so dv1172ad's
+    // `f.includes(session.id)` filter never matched and the archive assertions
+    // below were never actually reached. Select by content instead.
+    const allArchived = getArchiveFiles(harness.homeDir, project);
+    expect(allArchived.length, 'reset produced no archive file at all').toBeGreaterThan(0);
+    const archived = allArchived.filter(
+      f => fs.readFileSync(f, 'utf-8').includes(session.id) || f.includes(session.id)
+    );
+    expect(archived.length, `no archive file references ${session.id}`).toBeGreaterThan(0);
+
+    const archivedText = archived.map(f => fs.readFileSync(f, 'utf-8')).join('\n');
+    // dv1172ae — split from a single assertion so the two failure modes are
+    // distinguishable in evidence: an archive that MISATTRIBUTES provenance is
+    // a different defect from one that merely OMITS it.
+    expect(archivedText, 'archive misattributes a delegated set as user-selected')
+      .not.toMatch(/user-selected/);
+    expect(archivedText, 'archive records no selection provenance at all')
+      .toMatch(/controller-delegated/);
+
+    // dv1172ah — RATIFIED archive clauses. The provenance above must stand on
+    // its own: reached after nothing but an inert context entry, with no turn
+    // executed and no provider contacted, and therefore with NO
+    // execution_contract present. Provenance that only rides in on an
+    // execution_contract would not satisfy the contract.
+    expect(archivedText, 'archive provenance required an execution_contract to appear')
+      .not.toMatch(/execution_contract/i);
+    expect(archivedText, 'an execution contract block was archived despite no turn being taken')
+      .not.toMatch(/##\s*Execution Contract/i);
+    expect(
+      getArchiveFiles(harness.homeDir, project).filter(f => f.endsWith('.contract.json')),
+      'a contract sidecar was written despite no turn being taken'
+    ).toHaveLength(0);
+
+    // The session took no provider turn, so no transcript/response content.
+    expect(session.log.every(e => e.type !== 'turn'), 'a turn was executed').toBe(true);
+
+    // The delegated claim is audit metadata, never authenticated authority.
+    expect(archivedText, 'archive states the delegation as a confirmed human selection')
+      .not.toMatch(/human[_ ]selection[_ ]confirmed:?\s*true/i);
+
+    // No credential leakage: the single-use selection token must never be
+    // written into an archive that outlives the session.
+    expect(archivedText, 'the selection token leaked into the archive')
+      .not.toContain(delegatedToken);
+
+    // The inert entry we injected is unrelated content and must survive the
+    // additive provenance section rather than being displaced by it.
+    expect(archivedText, 'pre-existing archive content was dropped by the new section')
+      .toMatch(/dv1172ae archive probe/);
+  }, 30000);
+
+  it('refuses auto_execute under delegated selection without taking any turn', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const delegatedToken = await mintDelegated(harness, speakers);
+    expect(delegatedToken, 'deliberation_select_speakers did not mint a delegated token').toBeTruthy();
+
+    const text = getText(await harness.callTool('deliberation_start', {
+      topic: 'delegated selection grants no actuation',
+      selection_token: delegatedToken,
+      speakers,
+      rounds: 1,
+      auto_execute: true,
+    }));
+
+    // The refusal must be explicit about auto_execute rather than a silent
+    // downgrade that leaves the caller believing execution was scheduled.
+    expect(text).toMatch(/auto_execute/i);
+
+    const found = findSession(harness.homeDir);
+    if (found) {
+      expect(found.session.auto_execute).toBeFalsy();
+      expect(found.session.auto_synthesize).toBeFalsy();
+      // No turn may have been executed or fabricated.
+      expect(found.session.log.filter(e => e.event !== 'context_injection')).toHaveLength(0);
+      expect(found.session.synthesis).toBeFalsy();
+    }
+  }, 30000);
+
+  it('keeps deliberation_confirm_speakers as an independent human route', async () => {
+    const harness = await createHarness();
+    harnesses.push(harness);
+    const speakers = ['claude', 'codex'];
+
+    const snapshot = getText(await harness.callTool('deliberation_speaker_candidates', {
+      include_cli: true,
+      include_browser: false,
+    }));
+    const candidateToken = (snapshot.match(/\*\*Candidate token:\*\*\s*`([^`]+)`/) || [])[1];
+
+    await harness.callTool('deliberation_confirm_speakers', {
+      selection_token: candidateToken,
+      speakers,
+    });
+
+    const found = findSelectionState(harness.homeDir);
+    expect(found, 'confirm_speakers persisted no state').toBeTruthy();
+    // The human route must not be silently re-labelled as delegated.
+    expect(found.state.selection_origin).not.toBe(DELEGATED_ORIGIN);
+    expect(found.state.delegation).toBeUndefined();
+  }, 30000);
 });
