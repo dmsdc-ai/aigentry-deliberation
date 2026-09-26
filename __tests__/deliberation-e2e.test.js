@@ -775,6 +775,39 @@ const DIAG_STDERR_MARKERS = Object.freeze([
   'ECONNREFUSED', 'ETIMEDOUT', 'SIGKILL', 'SIGTERM',
   'ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_ESM_URL_SCHEME',
 ]);
+// Shutdown records `appendRuntimeLog` can write that carry NO `AUTO_HANDOFF`
+// substring, so diagHandoffEvents' family pre-filter drops them before its
+// grammar runs and they reach neither `unparsed_lines` nor `dedup_lines`.
+// `[label, level, exactMessage]`, each entry read off the actual call site;
+// a record is counted only when BOTH fields sit in their grammar positions
+// (index.js:733 `<ISO> [<level>] <message>`):
+//   index.js:896,910 — level `INFO`, message exactly the EPIPE sentence, so a
+//   message that merely quotes that sentence is not a record of one;
+//   index.js:902,914 — the marker IS the level argument, so the record is
+//   `[UNCAUGHT_EXCEPTION] <formatRuntimeError>` / `[UNHANDLED_REJECTION] …`
+//   with a free-form message (`exactMessage: null` = message not constrained).
+// Consequently the same token inside a message body — at any level — is not
+// counted, which is what the substring match this replaces got wrong.
+// Only the label and an integer are emitted, never the surrounding line.
+const DIAG_SHUTDOWN_MARKERS = Object.freeze([
+  ['client_disconnect_epipe', 'INFO', 'Client disconnected (EPIPE). Shutting down.'],
+  ['uncaught_exception', 'UNCAUGHT_EXCEPTION', null],
+  ['unhandled_rejection', 'UNHANDLED_REJECTION', null],
+]);
+// The same two grammars as DIAG_RUNTIME_EVENT_RE / DIAG_RUNTIME_DEDUP_RE, but
+// capturing the level token and the message instead of an event name — the
+// shutdown levels above are not the INFO/WARN/ERROR set and carry no `EVENT: `
+// prefix. No new parser: this is index.js:733 and index.js:613 written out.
+const DIAG_SHUTDOWN_RECORD_RE = /^\S+ \[([A-Z][A-Z0-9_]{0,47})\] (.*)$/;
+const DIAG_SHUTDOWN_DEDUP_RE = /^\S+ \[DEDUP\] \[\d{1,9}x in \d{1,12}ms\] \[([A-Z][A-Z0-9_]{0,47})\] (.*)$/;
+// Signals the harness child could be reaped with. Anything else is `other`.
+const DIAG_EXIT_SIGNAL_ENUM = Object.freeze([
+  'SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGPIPE', 'SIGSEGV', 'SIGABRT',
+]);
+// Shape of a `ChildProcess.signalCode`. Wider than the enum above — a real
+// reap can name a signal the enum does not list, and that is still a real
+// observation — but narrow enough that arbitrary text is not mistaken for one.
+const DIAG_SIGNAL_NAME_RE = /^SIG[A-Z0-9]{1,12}$/;
 // The captured group is never emitted raw: it is passed through diagEnum.
 const DIAG_BLOCK_REASON_RE = /block_reason["' :=]+([A-Za-z0-9_.-]{1,40})/;
 
@@ -907,7 +940,108 @@ function diagStderrShape(stderr) {
   ].join(' ');
 }
 
-async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, stderr = null) {
+/**
+ * What the runtime has OBSERVED about the harness-owned server child.
+ *
+ * Read off the harness's own handle — no `ps`, no new process, no host
+ * inspection. An exit is OBSERVED only on a POSITIVE fact: `exitCode` is an
+ * integer (a reaped status) or `signalCode` names a signal (a reaped
+ * signal-termination). Anything else — both absent, one absent, a field of
+ * the wrong type, or a handle that is not a ChildProcess at all — is an
+ * ABSENCE OF INFORMATION, reported as `exit_not_observed`. It is not evidence
+ * that the child is running, and no label here says or implies that.
+ * (Mirrors the positive-fact test `hasObservedExit` in
+ * helpers/cli-discovery-fixture.js:319, which is not exported.)
+ *
+ * Testing the positive fact rather than `!== null` is what keeps that promise:
+ * on a handle missing the fields both reads are `undefined`, and
+ * `undefined !== null` is true, which would report the exact opposite.
+ *
+ * Bounded: `kill_signal_sent` and `pid_present` describe the handle passed in,
+ * not an exit; on an unknown shape both read falsy and report `no`.
+ *
+ * `child.killed` records only that a signal was accepted for delivery — not
+ * that the child terminated, and not that the signal was fatal — so it is
+ * reported under that name and no other.
+ */
+function diagServerChildExit(child) {
+  if (!child) return 'server_child=not_supplied';
+  const observed = Number.isInteger(child.exitCode)
+    || (typeof child.signalCode === 'string' && DIAG_SIGNAL_NAME_RE.test(child.signalCode));
+  return [
+    `server_child=${observed ? 'exit_observed' : 'exit_not_observed'}`,
+    // `none` = no status reaped (absent or never set), distinct from
+    // `other` = a status that is present but not an integer.
+    `exit_code=${child.exitCode === null || child.exitCode === undefined ? 'none' : diagInt(child.exitCode)}`,
+    `exit_signal=${diagEnum(child.signalCode, DIAG_EXIT_SIGNAL_ENUM)}`,
+    `kill_signal_sent=${child.killed ? 'yes' : 'no'}`,
+    `pid_present=${child.pid ? 'yes' : 'no'}`,
+  ].join(' ');
+}
+
+/**
+ * The marker a parsed record IS, else `null`.
+ *
+ * Both fields must sit in their grammar positions: the level token must be the
+ * one the call site passes, and — where the table pins a message — the message
+ * must be exactly it. A marker mentioned inside a message body is therefore
+ * not a record of one, at any level.
+ */
+function diagShutdownLabel(level, message) {
+  for (const [label, recordLevel, exactMessage] of DIAG_SHUTDOWN_MARKERS) {
+    if (level !== recordLevel) continue;
+    if (exactMessage === null || message === exactMessage) return label;
+  }
+  return null;
+}
+
+/**
+ * Counts of the shutdown records above in the SAME private runtime.log
+ * diagHandoffEvents reads.
+ *
+ * Counted per line rather than over the whole text, because the dedup summary
+ * (index.js:613) REPLAYS the original `[<level>] <message>` inside itself: a
+ * whole-text substring count would score the real record and its summary as
+ * two occurrences. A summary also stands for an UNKNOWN multiplicity, so — as
+ * with handoff events above — it is counted on its own line and never folded
+ * into a marker count. Labels and integers only; no line text is emitted.
+ */
+function diagShutdownMarkers(homeDir) {
+  const logPath = path.join(getInstallDir(homeDir), 'runtime.log');
+  if (!fs.existsSync(logPath)) return 'shutdown_markers=runtime_log_absent';
+  let lines;
+  try {
+    lines = fs.readFileSync(logPath, 'utf-8').split('\n');
+  } catch (err) {
+    return `shutdown_markers=unreadable(${diagEnum(err.code, DIAG_FS_ERROR_ENUM)})`;
+  }
+  const direct = new Map();
+  let dedupMarkerLines = 0;
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    // Dedup first: a summary also matches the plain record grammar, with
+    // `DEDUP` as its level, so testing it second would classify it as neither.
+    const summary = DIAG_SHUTDOWN_DEDUP_RE.exec(line);
+    if (summary) {
+      if (diagShutdownLabel(summary[1], summary[2]) !== null) dedupMarkerLines += 1;
+      continue;
+    }
+    const record = DIAG_SHUTDOWN_RECORD_RE.exec(line);
+    if (!record) continue;
+    const label = diagShutdownLabel(record[1], record[2]);
+    if (label !== null) direct.set(label, (direct.get(label) || 0) + 1);
+  }
+  const counts = DIAG_SHUTDOWN_MARKERS
+    .filter(([label]) => direct.has(label))
+    .map(([label]) => `${label}=${direct.get(label)}`)
+    .join(',');
+  return [
+    `shutdown_markers=${counts || 'none'}`,
+    `shutdown_dedup_lines=${dedupMarkerLines}`,
+  ].join(' ');
+}
+
+async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, stderr = null, child = null) {
   const archiveDir = path.join(getProjectStateDir(homeDir, project), 'archive');
   const sessionFile = getSessionFile(homeDir, project, sessionId);
   const start = Date.now();
@@ -925,6 +1059,8 @@ async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, st
     `archive_dir=${fs.existsSync(archiveDir) ? 'present' : 'absent'}`,
     diagSessionState(homeDir, project, sessionId),
     diagHandoffEvents(homeDir),
+    diagShutdownMarkers(homeDir),
+    diagServerChildExit(child),
     diagStderrShape(typeof stderr === 'function' ? stderr() : stderr),
   ].join(' | '));
 }
@@ -987,7 +1123,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr, harness.child);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
     // Round bookkeeping: 3 speakers × 2 rounds = 6 log entries total
@@ -1035,7 +1171,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness.stderr, harness.child);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
 
