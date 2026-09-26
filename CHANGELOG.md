@@ -59,6 +59,132 @@ Also removed:
   (§9 독립).
 - **Wrapper unit tests** at `__tests__/logger-emit.test.js` (9 cases).
   Full suite 226/226 with the opt-out env.
+- **Stdin-cleanup deadline regressions** at `__tests__/stdin-deadline.test.js`
+  (40 cases). Drives the real `runCliAutoTurnCore` / `generateAutoSynthesis`
+  with owned in-process fake children and fake timers — no provider, no
+  spawned process — and pins settlement against each path's own measured
+  deadline: initial failure, deadline-1 ms, the stage boundary, close before
+  and after the deadline, duplicate/late errors, a synchronous stdin throw,
+  and a stdin error arriving after the deadline already settled the call
+  (15 cases), plus 17 cases for the system-clock-step contract below: a
+  3-assertion harness probe that the fake monotonic clock, the fake wall clock
+  and the timer queue can be moved independently; the two deadlines re-measured
+  in scheduler time; proof that two mid-flight wall-clock steps do not move the
+  deadline the product enforces; and the six stepped arms (backward 60 s and
+  3 s, forward on both paths, forward mid-grace) each beside its unchanged-clock
+  twin. Settlement instants in the stepped arms are read from a scheduler-elapsed
+  accumulator, never from `Date.now()`, which is the perturbed quantity there.
+  Plus 8 cases for the measured-window contract below, on both callsites: a
+  loop-lag control that moves the monotonic clock without running the scheduler
+  (re-proved at every use), a zero-lag control on each path, the 4000 ms-lag
+  counterexample, lag past the deadline, a fractional elapsed, a later error
+  that must not restart the window, and an observed close that reports no
+  window at all.
+  Measured evidence, and its exact limits: an independent tester ran this suite
+  against two trees differing only in `lib/transport.js` and recorded 40 passed
+  on the corrected bytes versus 5 failed / 35 passed on the predecessor bytes,
+  the five failures being exactly the measured-window arms. That run was
+  **virtual time, in process**: fake timers and a faked `performance` clock over
+  in-memory fake children, with no provider, no spawned process and no real
+  scheduling. Real event-loop lag, native clocks, suspend/resume and NTP slew
+  are **unmeasured**, and `SIGTERM`/`SIGKILL` there are recorded calls on fakes,
+  not delivered signals. The composition onto this release base is newer than
+  that run and was syntax-checked only here; re-execution, the rest of the
+  repository's suites, CI, build and installed-release acceptance are all
+  separate gates and none of them is claimed.
+
+### Changed
+
+- **A failed provider-stdin turn now waits for the provider's observed
+  close before it returns.** On this release base the provider-stdin write
+  carried no guard at all: there was no 'error' listener, so an EPIPE from
+  writing the prompt escaped to the process-level fatal handlers, where it is
+  indistinguishable from the MCP client going away, and no signal was issued
+  or awaited on the turn's behalf. The write is now guarded, a synchronous
+  throw funnels into the same path, and the turn — not the process — owns the
+  failure. The bullets in this section describe that whole path as it lands
+  here; the wall-clock and summed-window defects they correct were never
+  shipped on this base and are recorded because the path is new to it. The
+  wait is bounded by the cleanup budget in `lib/transport.js`: a 5000 ms
+  SIGTERM grace, then a 2000 ms SIGKILL confirmation (7000 ms worst case).
+  If the close is still not observed, the turn stays **failed** and its
+  error is marked `UNOBSERVED` — the outcome is never upgraded on an
+  unconfirmed signal.
+
+  **That cleanup is bounded by whatever is left of the original turn (or
+  synthesis) deadline, not by an unconditional 7 s.** 5000 ms and 2000 ms
+  are each stage's *maximum*; a stage runs for its own length or until the
+  original deadline, whichever comes first. So a stdin failure schedules no
+  wait that reaches past the deadline — including when the
+  failure arrives moments before the deadline, where the earlier code
+  cleared the deadline, started a fresh 7000 ms budget and overran it by
+  up to 6999 ms. Reaching the deadline mid-cleanup does **not** convert the
+  outcome into a generic `CLI timeout (Ns)` / `Synthesis generation
+  timeout`: the first stdin error stays the reported failure (verbatim,
+  and as `cause`) with the provider's termination stated as `UNOBSERVED`.
+  When the deadline cuts the SIGTERM grace short, that stage never runs,
+  so **no SIGKILL is issued and none is claimed** — the error names only
+  the signals actually attempted, and the window it reports is the one that
+  actually elapsed.
+
+  This is measured cleanup latency on the failure path only. Normal turns
+  are unaffected. Because `runAutoHandoff` runs speakers in sequence, a run
+  with K such failures can spend up to 7 s each — and, per the bound above,
+  never past each turn's own deadline. This is **not** a claim that every
+  provider is reaped, nor that an attempted signal was delivered — only
+  that each one is waited for, bounded, and reported honestly when it is
+  not.
+
+- **That deadline bound is now measured on the monotonic clock, so a system
+  clock change cannot move it** (`lib/transport.js`). The bound was computed
+  as `deadlineAt - Date.now()`: a *wall*-clock remainder clipping a deadline
+  that `setTimeout` enforces on libuv's *monotonic* clock. An NTP correction,
+  a manual clock change or a suspend/resume moves one of those clocks without
+  the scheduler making any progress, and the remainder was then wrong by
+  exactly that step — independently measured on both callsites, with 8
+  unchanged-clock controls passing beside 6 failing stepped arms:
+
+  - a **backward** step gave the stages budget the deadline no longer had, so
+    settlement overran the original deadline by `min(step, 6999)` ms; at a step
+    of 60 s that is the full pre-fix 6999 ms overrun *and* the false
+    `SIGTERM+SIGKILL within 7000ms` claim the bound exists to prevent;
+  - a **forward** step collapsed the remainder to zero, so both stages were
+    skipped: the call settled up to 7000 ms early and **no SIGKILL was ever
+    issued**, leaving a wedged provider un-reaped.
+
+  The deadline origin and each stage's remainder are now monotonic: the origins
+  come from `performance.now()` (a Node global — no dependency and no public API
+  change), and each remainder is a difference on that one clock, floored to whole
+  milliseconds so the bound stays conservative. Everything else is unchanged: the same
+  original deadline, the same first-error-wins outcome, one cleanup escalation
+  handle cancelled by an observed close, only the signals actually attempted
+  named, `UNOBSERVED` still stated rather than termination claimed, and the
+  full 5000+2000 ms path for a failure that arrives with room for it. No
+  timeout or termination policy changed, and the unrelated wall-clock
+  `elapsedMs` result fields were deliberately left alone.
+
+- **The cleanup window an `UNOBSERVED` failure reports is now measured, not
+  summed** (`lib/transport.js`, both stdin-failure callsites). It was
+  accumulated from each cleanup stage's *scheduled* length. `setTimeout`
+  guarantees a floor and never a ceiling, so a blocked or saturated event loop
+  serves each stage late and that sum states less time than really elapsed —
+  independently measured on the synthesis callsite as `within 7000ms` reported
+  for 11000 ms of monotonic progress under 4000 ms of loop lag, beside a
+  zero-lag control that reported 7000 ms for 7000 ms. The window is now the real
+  duration from the **first** stdin error to settlement, read from the same
+  monotonic clock the stages are clipped against, rounded to whole milliseconds
+  and never negative, and stamped once so a later error cannot restart it.
+
+  The overshoot is **reported, not clamped** to the 7000 ms budget or to the
+  original deadline. Clipping later waits bounds the scheduled wait; it cannot
+  guarantee event-loop responsiveness, so a wedged loop can still carry
+  settlement past the deadline instant, and hiding that in the diagnostic was
+  the defect. This is a diagnostic-accuracy change only: the operation-start
+  monotonic deadline, the ceil/floor stage budget handling, first-error-wins,
+  observed-close cancellation, the bounded stages and the signals named are all
+  unchanged, and an observed close still hands the first error back untouched
+  with no window reported at all. No dependency, public API, permission,
+  provider, auth, router or CLI change.
 
 ### Snyk note (pre-existing, not introduced by #440)
 

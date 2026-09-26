@@ -79,6 +79,24 @@
 //      product and the provider, so a `kill()` reaches the wrapper and the
 //      provider grandchild's fate is unmeasured (it is still listed in
 //      `declaredUnmeasured`). Green argv fidelity does not answer it.
+//   7. ic1172fd CORRECTION — TEST-side only, two coupled edits, both in suite G,
+//      carried onto this release base from the er1172co revision:
+//      a. the ChildProcess stand-in's `stdin` is now EventEmitter-shaped. The
+//         product registers an 'error' listener on provider stdin BEFORE writing
+//         the prompt, and the bare `{ write, end }` object it replaced made that
+//         registration throw `TypeError` — which the product's own try/catch
+//         then routed into its stdin-failure path, failing every turn through
+//         the fixture for a fixture-shape reason with nothing wrong in the
+//         product. The rationale, and why the correction belongs here and not in
+//         the product, are recorded at `fakeChildStdin` below.
+//      b. the `lib/transport.js` source pin moves to this revision's bytes. That
+//         module is no longer byte-unchanged: its provider-stdin write is now
+//         guarded, single-settling and bounded. `lib/cli-process.js` and
+//         `lib/speaker-discovery.js` stay at their frozen values.
+//      Both are needed together — the pin alone leaves the fixture-shape
+//      failures red. Nothing else in this file changed: suites A-F, the
+//      `parity()` helper and every pre-existing release assertion are untouched,
+//      and no assertion was added, skipped, relaxed or platform-gated.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -1285,7 +1303,7 @@ describe("product adoption of cli-process.js", () => {
     // Pins every assertion in this suite to the manifest'd candidate, so the
     // structural claims below cannot drift onto some other revision.
     //
-    // PIN UPDATE (v3) — exactly one module changed: `lib/cli-process.js`.
+    // PIN UPDATE (v3) — one module changed in that revision: `lib/cli-process.js`.
     //   was: 35c913692ad9bbdc5c3e62e53fb6fb76ad01941346e57765a30e9d543e2d37e8
     //   now: f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78
     // Review basis for the update: native CI 36215641444 / WindowsNode20 job
@@ -1299,13 +1317,40 @@ describe("product adoption of cli-process.js", () => {
     // off cmd.exe's localized text. `spawnCliCommand`, `checkExecSyncError`, the
     // pass-through of caller options and the cross-spawn 7.0.6 pin are all
     // unchanged; no dependency, API, permission or provider choice changed.
-    // transport.js and speaker-discovery.js are byte-unchanged, so their pins
-    // below are the frozen values.
+    // speaker-discovery.js is byte-unchanged, so its pin below is the frozen value.
+    //
+    // PIN UPDATE (ic1172fd) — `lib/transport.js` changed; `lib/cli-process.js` did
+    // not and keeps its v3 value, as does `lib/speaker-discovery.js`.
+    //   was: 3f1a1b002c6423f0826ff5d91a522311847931337ba2f55e50c45e8bc7d0d28c
+    //   now: 710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37
+    // This one update lands the whole provider-stdin failure path on this release
+    // base, which never carried any part of it: the write was bare, so an EPIPE
+    // escaped to the process-level fatal handlers where it is indistinguishable
+    // from the MCP client going away. It now (a) registers an 'error' listener
+    // before writing and funnels a synchronous throw into the same path, (b)
+    // records only the FIRST error — verbatim, and as `cause` — so a duplicate or
+    // late event can neither re-signal nor re-arm, (c) owns its escalation handle
+    // so an observed 'close' cancels it and no signal outlives the child, (d)
+    // waits for that close inside a bounded SIGTERM-grace / SIGKILL-confirm budget
+    // that is itself clipped to whatever is left of the original turn or synthesis
+    // deadline, measured on the MONOTONIC clock (`performance.now()`) that
+    // `setTimeout` actually counts down on, so no system-clock step can move it
+    // and a stage with no room left is neither run nor claimed, and (e) reports
+    // the cleanup window it MEASURED from the first error to settlement rather
+    // than a sum of the scheduled stage lengths — `setTimeout` is a floor and
+    // never a ceiling, so under event-loop lag that sum understated the very
+    // quantity the `UNOBSERVED` diagnostic exists to expose. The overshoot is
+    // reported, not clamped: `UNOBSERVED` states that termination was not
+    // observed, and is NOT proof the provider terminated.
+    // No dependency, public API, permission, provider, auth, router or CLI change,
+    // and the provider launch surface this suite pins — 8 `spawnCliCommand` calls,
+    // 1 `execFileSyncCliCommand`, no bare `spawn(`, no `shell: true` — is
+    // unchanged and re-asserted structurally below.
     expect(evidence.sourceHashes["lib/cli-process.js"]).toBe(
       "f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78"
     );
     expect(evidence.sourceHashes["lib/transport.js"]).toBe(
-      "3f1a1b002c6423f0826ff5d91a522311847931337ba2f55e50c45e8bc7d0d28c"
+      "710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37"
     );
     expect(evidence.sourceHashes["lib/speaker-discovery.js"]).toBe(
       "56c18364517fcd663f0b09217dba37828824acab04a2b6ceef18dcda6ac526a4"
@@ -1400,13 +1445,43 @@ describe("product adoption of cli-process.js", () => {
 // there is no filesystem, provider, browser, MCP, network or auth involvement.
 // ---------------------------------------------------------------------------
 describe("product CLI-caller regression against a substituted cli-process", () => {
+  /**
+   * An inert stand-in for a ChildProcess stdin, with the EventEmitter surface a
+   * real one has. A genuine `child.stdin` is a Socket, so `.on` is part of the
+   * shape this stand-in is standing in for.
+   *
+   * ic1172fd: this used to be a bare `{ written, write, end }` object. The
+   * product now registers an 'error' listener on provider stdin BEFORE writing
+   * the prompt — it must, or an EPIPE from that write escapes to the
+   * process-level fatal handlers where its origin is unidentifiable. Against the
+   * bare object `child.stdin.on(...)` threw `TypeError`, the product's own
+   * try/catch routed that into its stdin-failure path, and every turn through
+   * this fixture failed for a fixture-shape reason with nothing wrong in the
+   * product.
+   *
+   * The fix is HERE and not in the product, deliberately. Making the listener
+   * registration optional would mean shipping a provider write whose EPIPE is
+   * unguarded whenever the stdin handle is unusual — which is the defect. The
+   * one real shape that legitimately lacks `.on` is a NULL stdin
+   * (`stdio: 'ignore'`), and that still degrades to a contained failed turn
+   * rather than escaping, because the registration sits inside that try/catch.
+   */
+  function fakeChildStdin() {
+    const stdin = new EventEmitter();
+    stdin.written = [];
+    stdin.ended = false;
+    stdin.write = (c) => { stdin.written.push(String(c)); return true; };
+    stdin.end = () => { stdin.ended = true; };
+    return stdin;
+  }
+
   /** An inert stand-in for a ChildProcess. Starts nothing; emits on demand. */
   function fakeChild({ stdout = "", stderr = "", code = 0, signal = null } = {}) {
     const child = new EventEmitter();
     child.pid = 424242;
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
-    child.stdin = { written: [], write(c) { this.written.push(String(c)); }, end() { this.ended = true; }, ended: false };
+    child.stdin = fakeChildStdin();
     child.killed = [];
     child.kill = (sig) => { child.killed.push(sig); return true; };
     setImmediate(() => {
@@ -1660,7 +1735,7 @@ describe("product CLI-caller regression against a substituted cli-process", () =
       child.pid = undefined;
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
-      child.stdin = { write() {}, end() {} };
+      child.stdin = fakeChildStdin();
       child.kill = () => true;
       // cross-spawn on win32 emits 'error' IN PLACE OF 'exit' for an
       // unresolvable command; 'close' may still follow and must not un-settle.
