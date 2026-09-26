@@ -410,7 +410,7 @@ try {
 const failures = [];
 
 say("cp1172br diagnose-native-unicode-copy");
-say("runtime=plain-node runner=none fs-patched=no");
+say("imports=node-builtins-only fs-mutation=unmeasured");
 say("node=" + process.versions.node + " platform=" + process.platform + " arch=" + process.arch);
 say("setupError=" + (setupError === null ? "none" : setupError));
 if (setupError !== null) failures.push("setup(" + setupError + ")");
@@ -485,4 +485,4 @@ say(
 say("cp1172br: this measures WHAT happened only. No mechanism is established or claimed.");
 
 process.stdout.write(out.join("\n") + "\n");
-process.exit(failures.length === 0 ? 0 : 1);
+process.exitCode = failures.length === 0 ? 0 : 1;
