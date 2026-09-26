@@ -9,17 +9,43 @@
 // `stubFileName` / `writeStub`). Nobody has executed that spawn natively. This
 // harness executes it, and nothing else, so the claim stops being an inference.
 //
-// It does NOT implement or endorse `shell: true`, does not import or run product
-// code, never looks up a host CLI, never authenticates and never opens a network
-// connection. The only executables it may name are the fixture it just wrote
-// inside its own root, plus `process.execPath` for the positive control.
+// WHAT CHANGED IN v3 (native CI 36215641444, WindowsNode20 job 108330955350)
+// v2 was a raw reproduction only: it spawned the bare name through
+// `child_process.spawn` and asserted that it WORKS, so on win32 it went red by
+// design and the red was the evidence. The reproduction has now served its
+// purpose — the win32 ENOENT is measured, not inferred — and a permanently red
+// file cannot gate the fix. So this file now carries TWO bare-name arms:
+//
+//   `bare-name`          raw `child_process.spawn`, unchanged signature. Its
+//                        outcome is asserted EXACTLY per platform in a
+//                        separately named regression control: on win32 an
+//                        asynchronous ENOENT that started nothing, on POSIX a
+//                        clean run. Not skipped, not softened, not a blanket
+//                        "expected failure" — the win32 shape is pinned field by
+//                        field, so a regression that changed it would fail here.
+//   `bare-name-adapter`  the SAME bare name and the SAME fixed args through the
+//                        actual product adapter, `spawnCliCommand` from
+//                        `lib/cli-process.js`. Asserted to succeed on EVERY
+//                        platform with no gating. This is the acceptance the
+//                        raw reproduction never was.
+//
+// So this file DOES now import product code: exactly one module,
+// `lib/cli-process.js`, because "the product adapter fixes the launch this file
+// reproduced" is not provable without executing the product adapter. It still
+// does NOT import `lib/transport.js`, run a deliberation, read a config or touch
+// any other product module.
+//
+// It does NOT implement or endorse `shell: true`, never looks up a host CLI,
+// never authenticates and never opens a network connection. The only executables
+// it may name are the fixture it just wrote inside its own root, plus
+// `process.execPath` for the positive control.
 //
 // DECLARED LIMITS
-// 1. A Windows red is the deliverable, not a defect of this file. The ordinary
-//    positive contract ("the bare fixture executes once and returns the fixed
-//    output") is asserted on EVERY platform. On win32 it is expected to fail,
-//    and that failure — carrying the captured error phase and code — IS the
-//    evidence. It is never skipped and never conditionally passed.
+// 1. The raw arm's win32 red is a measured platform fact, now recorded as a
+//    documented control rather than as the file's verdict. No arm is ever
+//    skipped or conditionally passed, and the summary assertions at the bottom
+//    read EVERY arm, so a green run cannot omit a product-side failure: if the
+//    adapter arm fails, this file fails.
 // 2. `transport.js` builds its child env as `{ ...process.env }`. This harness
 //    seals the env instead (owned-only PATH, faked HOME/TMP/XDG, owned cwd) so
 //    that executable lookup is the only free variable. The *spawn signature* —
@@ -63,8 +89,40 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { getSystemErrorMap } from 'util';
+
+// The one product module this file loads, and only for the adapter arm. Import
+// is side-effect free: it starts nothing at module load.
+import { spawnCliCommand } from '../lib/cli-process.js';
 
 const IS_WINDOWS = process.platform === 'win32';
+
+/**
+ * libuv's numeric ENOENT for THIS platform (-2 on POSIX, -4058 on win32), read
+ * out of Node's own system error table rather than hard-coded, so the raw-arm
+ * regression control below pins the exact native value without carrying a magic
+ * per-platform literal. `null` only if the runtime's table somehow lacks it, in
+ * which case the control falls back to "numeric and non-zero".
+ */
+const UV_ENOENT = (() => {
+  for (const [errno, [name]] of getSystemErrorMap()) {
+    if (name === 'ENOENT') return errno;
+  }
+  return null;
+})();
+
+/**
+ * The two launchers under comparison. Same call signature, so the arm records
+ * differ in the launcher and nothing else.
+ */
+const LAUNCHERS = Object.freeze({
+  raw: Object.freeze({ id: 'raw', label: 'child_process.spawn', fn: spawn }),
+  adapter: Object.freeze({
+    id: 'adapter',
+    label: 'lib/cli-process.js spawnCliCommand',
+    fn: spawnCliCommand,
+  }),
+});
 
 /** The speaker whose spawn site is under reproduction (transport.js:798). */
 const SPEAKER = 'claude';
@@ -147,6 +205,7 @@ let evidencePath = null;
 const ownedHandles = [];
 
 let bareArm = null;
+let adapterArm = null;
 let controlArm = null;
 let cleanup = null;
 let setupError = null;
@@ -243,10 +302,12 @@ function describeError(err) {
  * true byte counts and an overflow flag are kept, and overflow fails a test.
  * Nothing here asserts; assertions read the record later.
  */
-function observeArm({ arm, command, argv, commandKind, ownedHandleRel, writesStdin }) {
+function observeArm({ arm, command, argv, commandKind, ownedHandleRel, writesStdin, launcher }) {
   const env = sealedEnv(arm);
   const rec = {
     arm,
+    launcher: launcher.label,
+    launcherId: launcher.id,
     commandKind,
     commandShown: commandKind === 'bare-name' ? command : path.basename(command),
     ownedHandleRel,
@@ -313,7 +374,9 @@ function observeArm({ arm, command, argv, commandKind, ownedHandleRel, writesStd
   let child;
   try {
     // ---- the exact signature under reproduction (lib/transport.js:798) ----
-    child = spawn(command, argv, { env, windowsHide: true });
+    // The adapter arm passes the identical (command, argv, options) triple; only
+    // the function differs, which is the single variable this file isolates.
+    child = launcher.fn(command, argv, { env, windowsHide: true });
   } catch (err) {
     rec.errorPhase = 'sync';
     rec.syncThrow = describeError(err);
@@ -469,6 +532,7 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
           commandKind: 'process.execPath',
           ownedHandleRel: path.relative(ownedRoot, controlJsPath),
           writesStdin: true,
+          launcher: LAUNCHERS.raw,
         });
 
         bareArm = await observeArm({
@@ -478,6 +542,19 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
           commandKind: 'bare-name',
           ownedHandleRel: path.relative(ownedRoot, fixturePath),
           writesStdin: true,
+          launcher: LAUNCHERS.raw,
+        });
+
+        // The same owned command, the same fixed args, the same sealed env and
+        // the same owned cwd — through the product adapter instead of raw Node.
+        adapterArm = await observeArm({
+          arm: 'bare-name-adapter',
+          command: SPEAKER,
+          argv: [...FIXED_ARGS],
+          commandKind: 'bare-name',
+          ownedHandleRel: path.relative(ownedRoot, fixturePath),
+          writesStdin: true,
+          launcher: LAUNCHERS.adapter,
         });
       } finally {
         // Restored before any removal: the owned cwd must not be the live cwd
@@ -492,6 +569,7 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
         track: 'aw1172bs',
         frozenBase: 'cf1587a3b68779bf9d3a23c37a32842833b84007',
         reproduces: 'lib/transport.js:798 spawn("claude", getCliExecArgs("claude", null), { env, windowsHide: true })',
+        adapterUnderTest: 'lib/cli-process.js spawnCliCommand (same command, args, env and cwd)',
         fixtureContract: '__tests__/helpers/cli-discovery-fixture.js stubFileName/writeStub',
         fixtureFileName: path.basename(fixturePath),
         bounds: {
@@ -502,7 +580,11 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
           eventLogCap: EVENT_LOG_CAP,
         },
         cleanup,
-        arms: { 'positive-control': controlArm, 'bare-name': bareArm },
+        arms: {
+          'positive-control': controlArm,
+          'bare-name': bareArm,
+          'bare-name-adapter': adapterArm,
+        },
       });
       fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
       // Also emit to stdout: the owned root is removed in afterAll, so the
@@ -540,11 +622,11 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
     rootRemoval = { removed: true, reason: null };
   }, 10000);
 
-  it('persists both arms, with bounded fields and no raw host paths', () => {
+  it('persists all three arms, with bounded fields and no raw host paths', () => {
     expect(setupError).toBe(null);
     expect(fs.existsSync(evidencePath)).toBe(true);
     const onDisk = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
-    expect(Object.keys(onDisk.arms).sort()).toEqual(['bare-name', 'positive-control']);
+    expect(Object.keys(onDisk.arms).sort()).toEqual(['bare-name', 'bare-name-adapter', 'positive-control']);
     const blob = JSON.stringify(onDisk);
     // Check the JSON-escaped form too: on win32 a raw `C:\...` never appears in
     // JSON output (backslashes are doubled), so a raw-only check is vacuous
@@ -560,8 +642,8 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
     }
   });
 
-  it('keeps both captured streams inside the retention cap', () => {
-    for (const rec of [controlArm, bareArm]) {
+  it('keeps every captured stream inside the retention cap', () => {
+    for (const rec of [controlArm, bareArm, adapterArm]) {
       const why = JSON.stringify({ arm: rec.arm, stdoutBytes: rec.stdoutBytes, stderrBytes: rec.stderrBytes });
       // Overflow is a failure, not a silently truncated record: an owned
       // fixture that emits more than one sentinel line is not the fixture
@@ -588,7 +670,12 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
   });
 
   it('isolates the sandbox: one owned PATH entry, owned cwd, no shell option', () => {
-    for (const rec of [controlArm, bareArm]) {
+    // `shellOption` reports the option THIS FILE passed, and it is absent in all
+    // three arms. On win32 cross-spawn does route the adapter arm through
+    // `cmd.exe /d /s /c` internally, with per-argument escaping — that is the
+    // fix under test, and it is not the same thing as handing Node `shell: true`
+    // and a concatenated command string. Nothing here passes `shell`.
+    for (const rec of [controlArm, bareArm, adapterArm]) {
       expect(rec.pathEntryCount, `${rec.arm} PATH must hold only the owned bin dir`).toBe(1);
       expect(rec.cwdIsOwnedAtSpawn, `${rec.arm} must spawn from the owned cwd`).toBe(true);
       expect(rec.shellOption).toBe('absent');
@@ -613,33 +700,144 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
     expect(c.ownedHandleRel).toBe(path.join('control', 'owned-cli.js'));
   });
 
-  // ---- the ordinary positive contract -------------------------------------
-  // Asserted on every platform. On win32 this is EXPECTED to fail: the record
-  // in the failure message (and in the persisted evidence) is the native proof
-  // that a bare-name, no-shell spawn cannot reach a `.cmd` on PATH. Not
-  // skipped, not gated, not softened.
-  it('bare-name spawn resolves the owned fixture from an owned-only PATH and returns the fixed output', () => {
+  // ---- raw `child_process.spawn`: the documented regression control ---------
+  // This is the reproduction, kept as a control and named as one. It asserts the
+  // EXACT platform outcome of the unfixed launch path, on every platform, with
+  // no skip, no `it.fails`, and no blanket "expected failure" wrapper:
+  //
+  //   win32   raw spawn cannot apply PATHEXT and cannot execute a `.cmd`, so the
+  //           launch fails ASYNCHRONOUSLY with ENOENT having started nothing.
+  //           Measured natively at CI 36215641444 / WindowsNode20 job
+  //           108330955350; pinned field by field below, so a Node or libuv
+  //           change to that shape fails HERE, where it is documented, instead
+  //           of silently changing what the product's fix is worth.
+  //   POSIX   the same bare name executes normally. Nothing was ever broken
+  //           here, and this arm proves the harness itself is sound.
+  //
+  // What this control does NOT claim: that the product works. `spawn` is not the
+  // product's launch path any more. The acceptance for that is the next test,
+  // and it is ungated on every platform — so a green run cannot be produced by
+  // this control alone.
+  it('regression control: raw child_process.spawn reproduces the exact native platform outcome', () => {
     const b = bareArm;
     const why = JSON.stringify(deepSanitize(b));
+    expect(b.launcherId).toBe('raw');
     expect(b.ownedHandleRel).toBe(path.join('bin', fixtureFileName(SPEAKER)));
     expect(b.commandShown).toBe(SPEAKER);
     expect(b.argv).toEqual([...FIXED_ARGS]);
-    expect(b.syncThrow, `bare-name spawn threw synchronously: ${why}`).toBe(null);
-    expect(b.errorPhase, `bare-name spawn error phase: ${why}`).toBe('none');
-    expect(b.errors, `bare-name spawn emitted error events: ${why}`).toEqual([]);
-    expect(b.timedOut, `bare-name spawn hit the ${CHILD_BOUND_MS}ms bound: ${why}`).toBe(false);
-    expect(b.spawnEventSeen, `bare-name spawn never started: ${why}`).toBe(true);
-    expect(b.eventCounts.close, `bare-name close count (must be exactly one run): ${why}`).toBe(1);
-    expect(b.exit, `bare-name exit: ${why}`).toEqual({ code: 0, signal: null });
-    expect(b.stdout.trim(), `bare-name stdout: ${why}`).toBe(SENTINEL);
+    // Never a synchronous throw on either platform: `spawn` reports through the
+    // event, which is precisely why the product could not detect this by
+    // try/catch around the launch.
+    expect(b.syncThrow, `raw spawn threw synchronously: ${why}`).toBe(null);
+    expect(b.timedOut, `raw spawn hit the ${CHILD_BOUND_MS}ms bound: ${why}`).toBe(false);
+
+    if (IS_WINDOWS) {
+      expect(b.errorPhase, `raw spawn error phase: ${why}`).toBe('async');
+      expect(b.errors.length, `raw spawn error count: ${why}`).toBe(1);
+      const e = b.errors[0];
+      expect(e.code, `raw spawn error code: ${why}`).toBe('ENOENT');
+      expect(e.syscall).toBe(`spawn ${SPEAKER}`);
+      expect(e.path).toBe(SPEAKER);
+      expect(e.messageHead).toBe(`spawn ${SPEAKER} ENOENT`);
+      // Node's own numeric libuv errno, not a synthesized string. This is the
+      // native value the product wrapper has to reproduce on the sync side.
+      expect(typeof e.errno, `raw spawn errno type: ${why}`).toBe('number');
+      if (UV_ENOENT !== null) expect(e.errno).toBe(UV_ENOENT);
+      else expect(e.errno).not.toBe(0);
+      // Nothing started: no 'spawn' event, no pid, no output, no exit status.
+      expect(b.spawnEventSeen, `raw spawn unexpectedly started a process: ${why}`).toBe(false);
+      expect(b.pidPresent, `raw spawn unexpectedly produced a pid: ${why}`).toBe(false);
+      expect(b.exit, `raw spawn exit: ${why}`).toBe(null);
+      expect(b.stdout, `raw spawn stdout: ${why}`).toBe('');
+      expect(b.stdoutBytes).toBe(0);
+      // 'close' still fires, carrying the spawn error rather than an exit code —
+      // the ordering the product's `settled`-guarded handlers depend on.
+      expect(b.eventOrder, `raw spawn event order: ${why}`).toEqual(['error', 'close']);
+      expect(b.eventCounts.error).toBe(1);
+      expect(b.eventCounts.close).toBe(1);
+      expect(b.close, `raw spawn close: ${why}`).toEqual({ code: e.errno, signal: null });
+    } else {
+      expect(b.errorPhase, `raw spawn error phase: ${why}`).toBe('none');
+      expect(b.errors, `raw spawn emitted error events: ${why}`).toEqual([]);
+      expect(b.spawnEventSeen, `raw spawn never started: ${why}`).toBe(true);
+      expect(b.pidPresent, `raw spawn produced no pid: ${why}`).toBe(true);
+      expect(b.eventCounts.close, `raw spawn close count (must be exactly one run): ${why}`).toBe(1);
+      expect(b.exit, `raw spawn exit: ${why}`).toEqual({ code: 0, signal: null });
+      expect(b.close, `raw spawn close: ${why}`).toEqual({ code: 0, signal: null });
+      expect(b.stdout.trim(), `raw spawn stdout: ${why}`).toBe(SENTINEL);
+    }
   });
 
-  it('both arms agree on args, stdin and output, so the only variable is lookup', () => {
-    expect(bareArm.argv.slice(-FIXED_ARGS.length)).toEqual(controlArm.argv.slice(-FIXED_ARGS.length));
-    expect(bareArm.stdinBytes).toBe(controlArm.stdinBytes);
-    expect(bareArm.stdinBytes).toBe(Buffer.byteLength(FIXED_STDIN));
-    expect(bareArm.envKeys).toEqual(controlArm.envKeys);
-    expect(bareArm.nodeMajor).toBe(controlArm.nodeMajor);
+  // ---- the product adapter: acceptance, ungated on every platform -----------
+  // Same bare name, same fixed args, same sealed env, same owned cwd, same owned
+  // `.cmd`/shim on disk — through `spawnCliCommand` instead of raw `spawn`. The
+  // launcher is the only variable, so a green here is attributable to the
+  // adapter and to nothing else. No platform branch: this must hold everywhere,
+  // and if it does not, this file fails and the product side of the run cannot
+  // be omitted from the summary.
+  it('product adapter: the same owned bare-name command launches and returns the fixed output', () => {
+    const a = adapterArm;
+    const why = JSON.stringify(deepSanitize(a));
+    expect(a.launcherId).toBe('adapter');
+    expect(a.ownedHandleRel).toBe(path.join('bin', fixtureFileName(SPEAKER)));
+    expect(a.commandShown).toBe(SPEAKER);
+    expect(a.commandKind).toBe('bare-name');
+    expect(a.argv).toEqual([...FIXED_ARGS]);
+    // `shell` is never passed by this file. On win32 the adapter routes through
+    // cmd.exe internally with per-argument escaping — that IS the fix, and it is
+    // not the same thing as handing Node `shell: true` and a joined string.
+    expect(a.shellOption).toBe('absent');
+    expect(a.syncThrow, `adapter threw synchronously: ${why}`).toBe(null);
+    expect(a.errorPhase, `adapter error phase: ${why}`).toBe('none');
+    expect(a.errors, `adapter emitted error events: ${why}`).toEqual([]);
+    expect(a.timedOut, `adapter hit the ${CHILD_BOUND_MS}ms bound: ${why}`).toBe(false);
+    expect(a.spawnEventSeen, `adapter never started a process: ${why}`).toBe(true);
+    expect(a.pidPresent, `adapter produced no pid: ${why}`).toBe(true);
+    expect(a.eventCounts.close, `adapter close count (must be exactly one run): ${why}`).toBe(1);
+    expect(a.exit, `adapter exit: ${why}`).toEqual({ code: 0, signal: null });
+    expect(a.close, `adapter close: ${why}`).toEqual({ code: 0, signal: null });
+    expect(a.stdout.trim(), `adapter stdout: ${why}`).toBe(SENTINEL);
+    expect(a.stdinWriteCalled).toBe(true);
+    expect(a.stdinEndCalled).toBe(true);
+  });
+
+  // The whole point of the three-arm shape: on win32 the raw arm and the adapter
+  // arm differ ONLY in the launcher, so the adapter is the cause of the
+  // difference in outcome. Asserted as an explicit contrast, not left implicit.
+  it('raw and adapter differ only in the launcher, so the outcome difference is attributable', () => {
+    expect(bareArm.launcherId).toBe('raw');
+    expect(adapterArm.launcherId).toBe('adapter');
+    expect(adapterArm.launcher).not.toBe(bareArm.launcher);
+    expect(adapterArm.commandShown).toBe(bareArm.commandShown);
+    expect(adapterArm.commandKind).toBe(bareArm.commandKind);
+    expect(adapterArm.ownedHandleRel).toBe(bareArm.ownedHandleRel);
+    expect(adapterArm.argv).toEqual(bareArm.argv);
+    expect(adapterArm.envKeys).toEqual(bareArm.envKeys);
+    expect(adapterArm.pathEntryCount).toBe(bareArm.pathEntryCount);
+    expect(adapterArm.pathextEntries).toEqual(bareArm.pathextEntries);
+    expect(adapterArm.cwdIsOwnedAtSpawn).toBe(bareArm.cwdIsOwnedAtSpawn);
+    expect(adapterArm.stdinBytes).toBe(bareArm.stdinBytes);
+    if (IS_WINDOWS) {
+      // The measured contrast: raw fails to start, the adapter runs the fixture.
+      expect(bareArm.spawnEventSeen).toBe(false);
+      expect(adapterArm.spawnEventSeen).toBe(true);
+      expect(bareArm.stdout.trim()).not.toBe(SENTINEL);
+      expect(adapterArm.stdout.trim()).toBe(SENTINEL);
+    } else {
+      // No divergence to attribute on POSIX: both launchers already worked.
+      expect(bareArm.stdout.trim()).toBe(SENTINEL);
+      expect(adapterArm.stdout.trim()).toBe(SENTINEL);
+    }
+  });
+
+  it('every arm agrees on args, stdin and runtime, so the only variable is lookup', () => {
+    for (const rec of [bareArm, adapterArm]) {
+      expect(rec.argv.slice(-FIXED_ARGS.length)).toEqual(controlArm.argv.slice(-FIXED_ARGS.length));
+      expect(rec.stdinBytes).toBe(controlArm.stdinBytes);
+      expect(rec.stdinBytes).toBe(Buffer.byteLength(FIXED_STDIN));
+      expect(rec.envKeys).toEqual(controlArm.envKeys);
+      expect(rec.nodeMajor).toBe(controlArm.nodeMajor);
+    }
   });
 
   it('joins every observed child, bounded, before the owned root may be removed', () => {
@@ -651,7 +849,7 @@ describe('aw1172bs — native bare-name CLI spawn (transport.js:798 reproduction
     // A clean run needs no escalation at all; every child ended on its own.
     expect(cleanup.escalated, `unexpected cleanup escalation: ${why}`).toBe(0);
     expect(cleanup.escalationErrors).toEqual([]);
-    for (const rec of [controlArm, bareArm]) {
+    for (const rec of [controlArm, bareArm, adapterArm]) {
       expect(rec.joined, `${rec.arm} was not joined via an observed exit/close`).toBe(true);
       expect(rec.latencyMs, `${rec.arm} exceeded the child bound`).toBeLessThanOrEqual(CHILD_BOUND_MS);
     }

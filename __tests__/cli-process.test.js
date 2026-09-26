@@ -57,6 +57,28 @@
 //      unjoined when the cleanup bound expires the owned root is PRESERVED and
 //      cleanup fails loudly; the root is never removed from under a live child.
 //   5. Nothing here speaks to the Linux archive stall.
+//   6. v3 CORRECTIONS, from the first real native run (CI 36215641444,
+//      WindowsNode20 job 108330955350, 5 red of 414). Three of the five reds
+//      belonged to this file; all three are corrected here, and NOTHING is
+//      skipped, gated by platform, or converted into an expected failure:
+//        a. "missing command" measured a REAL product divergence, not a test
+//           defect: the sync wrapper handed back cross-spawn's synthesized
+//           ENOENT verbatim. Fixed in `lib/cli-process.js`; the assertion here
+//           is unchanged and now additionally pins errno type, status and
+//           streams in the bare-name-absent case.
+//        b. "signal death" was a TEST defect: it hard-coded the POSIX
+//           status/signal pair before comparing Node. Windows has no POSIX
+//           signals, and Node reports the TerminateProcess exit status there.
+//           Now: exact Node parity plus abnormal non-zero termination.
+//        c. both bare-name cases were a FIXTURE defect: the `.cmd` embedded the
+//           fixture's non-ASCII absolute path, which cmd.exe decodes through the
+//           console OEM codepage. Now an ASCII body with a `%~dp0` locator. The
+//           owned root is still unicode-and-spaces; it was not made ASCII.
+//      STILL OPEN after this file goes green, and not addressed by it: Windows
+//      child/grandchild teardown. cross-spawn inserts a `cmd.exe` between the
+//      product and the provider, so a `kill()` reaches the wrapper and the
+//      provider grandchild's fate is unmeasured (it is still listed in
+//      `declaredUnmeasured`). Green argv fidelity does not answer it.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -283,16 +305,45 @@ function sealedEnv(extra = {}) {
   return env;
 }
 
-/** Write the owned bare-name shim: extensionless on POSIX, `.cmd` on win32. */
+/**
+ * Write the owned bare-name shim: extensionless on POSIX, `.cmd` on win32.
+ *
+ * WIN32 CODEPAGE CONTRACT (v3, corrected from native CI 36215641444 /
+ * WindowsNode20 job 108330955350). v2 wrote the fixture's ABSOLUTE path into the
+ * batch body. `fs.writeFileSync` emits UTF-8, but `cmd.exe` decodes a `.cmd`
+ * through the console OEM codepage (437 on the runner), so the owned root's
+ * `ünïcödé 한글` bytes reached Node as mojibake and the child died with
+ * MODULE_NOT_FOUND on a corrupted path — both bare-name cases went red for that
+ * reason alone. The defect was the ENCODING OF A STRING LITERAL, not the Unicode
+ * directory: Windows itself handles the directory fine.
+ *
+ * So the body is kept pure ASCII and the non-ASCII part of the path is never
+ * written into it. `%~dp0` is expanded by cmd.exe at run time from `%0`, which
+ * arrived as a UTF-16 command-line argument and never passed through a codepage,
+ * exactly as npm's own `npm.cmd` locates `npm-cli.js` beside itself. The owned
+ * root KEEPS its spaces and non-ASCII, so this suite still measures them — now
+ * through the OS, instead of through a codepage-dependent literal.
+ */
 function writeShim(binDir, name) {
   if (IS_WINDOWS) {
     // The whole point of the candidate: a bare name that only resolves via
     // PATHEXT to a `.cmd`, which `child_process` cannot launch without a shell.
     const p = path.join(binDir, `${name}.cmd`);
-    fs.writeFileSync(
-      p,
-      `@echo off\r\n"${process.execPath}" "${owned.bodyPath}" %*\r\n`
-    );
+    // Relative, so the unicode/space segments stay out of the file's bytes.
+    const bodyRel = path.relative(binDir, owned.bodyPath);
+    const body = `@echo off\r\n"${process.execPath}" "%~dp0${bodyRel}" %*\r\n`;
+    // Codepage safety is the entire point of the change, so it is enforced and
+    // not merely intended: if anything non-ASCII ever entered this body again
+    // (a Node installed under a non-ASCII path, a renamed fixture) cmd.exe would
+    // corrupt it exactly as it corrupted v2. Fail loudly instead of silently
+    // re-running the same regression.
+    if (/[^\x20-\x7E\r\n]/.test(body)) {
+      throw new Error(
+        "wv1172bu: the win32 .cmd shim body must be pure ASCII — refusing to " +
+          "write a codepage-dependent literal (see the v3 contract above)"
+      );
+    }
+    fs.writeFileSync(p, body);
     return p;
   }
   // POSIX counterpart: extensionless, owned JS, launched through process.execPath
@@ -435,6 +486,31 @@ beforeAll(() => {
   evidence.fixtureSha256 = sha256File(owned.bodyPath);
   evidence.shimRelative = path.relative(owned.root, owned.shimPath);
   evidence.trustedPathDirs = TRUSTED_OS_PATH_DIRS;
+  // v3 shim-encoding facts, as booleans: the body itself is never persisted,
+  // because it embeds process.execPath and this evidence file carries no host
+  // paths. See writeShim's win32 codepage contract.
+  // Recorded per platform: ASCII-only is a win32 contract, not a POSIX one.
+  {
+    const shimBytes = fs.readFileSync(owned.shimPath);
+    const shimBody = shimBytes.toString("utf8");
+    evidence.shimBodyEncodingContract = IS_WINDOWS
+      ? "win32: cmd.exe OEM codepage — body must be ASCII-only"
+      : "posix: shebang + Node UTF-8 — non-ASCII body is valid";
+    // Raw measurement, not a contract claim: true on win32, false on POSIX.
+    evidence.shimBodyAsciiOnly = !/[^\x20-\x7E\r\n]/.test(shimBody);
+    // POSIX counterpart: non-ASCII body present and lossless as UTF-8.
+    evidence.shimBodyNonAsciiIsLosslessUtf8 =
+      !IS_WINDOWS &&
+      /[^\x00-\x7F]/.test(shimBody) &&
+      Buffer.compare(shimBytes, Buffer.from(shimBody, "utf8")) === 0 &&
+      !shimBody.includes(String.fromCharCode(0xfffd));
+    evidence.shimFixtureLocator = IS_WINDOWS
+      ? "%~dp0 self-relative (expanded from %0, never codepage-decoded)"
+      : "shebang + absolute UTF-8 require";
+    evidence.shimLocatesFixtureCorrectly = IS_WINDOWS
+      ? shimBody.includes("%~dp0") && !shimBody.includes(owned.root)
+      : shimBody.includes(owned.bodyPath); // POSIX: UTF-8 shebang file, no codepage
+  }
 
   for (const rel of ["lib/cli-process.js", "lib/transport.js", "lib/speaker-discovery.js", "package.json"]) {
     evidence.sourceHashes[rel] = sha256File(path.join(REPO, rel));
@@ -445,6 +521,7 @@ beforeAll(() => {
 
   evidence.declaredUnmeasured = [
     "win32 cmd.exe routing in cross-spawn parse.js parseNonShell (non-win32 returns unchanged)",
+    "win32 OEM-codepage decoding of the .cmd shim body (the v3 ASCII/%~dp0 contract is enforced at write time by writeShim and asserted only on a win32 run)",
     "win32 PATHEXT resolution of a bare name to a .cmd shim",
     "win32 escape.argument quoting of metacharacters through cmd.exe /d /s /c",
     "win32 synthesized ENOENT from enoent.js verifyENOENT/verifyENOENTSync",
@@ -642,13 +719,60 @@ describe("execFileSyncCliCommand matches the Node execFileSync contract", () => 
     expect(nodeKilled).toBe("unset");
   });
 
-  it("signal death: status null and signal reported, identically", () => {
+  it("signal death: abnormal non-zero termination, reported identically to Node", () => {
     const opts = direct("selfsignal");
     const { candidate, node } = parity("signal-death", process.execPath, [owned.bodyPath], opts);
     expect(candidate.threw).toBe(true);
-    expect(candidate.status).toBe(null);
-    expect(candidate.signal).toBe("SIGTERM");
+
+    // v3 correction (native CI 36215641444): v2 asserted `status === null` and
+    // `signal === "SIGTERM"` BEFORE comparing against Node, which hard-coded the
+    // POSIX reporting pair. Windows has no POSIX signals at all — libuv turns
+    // `process.kill(pid, "SIGTERM")` into a TerminateProcess, so Node itself
+    // reports `signal: null` and a non-zero exit status, and the run went red on
+    // the wrapper's behalf for something Node does identically. Asserting the
+    // POSIX pair here claimed a Windows signal the OS never delivers.
+    //
+    // What is genuinely cross-platform, and what this case is actually for: the
+    // child died abnormally, the wrapper threw for it, and the wrapper reports
+    // EXACTLY what Node reports.
+    //
+    // WHICH shape is correct is a property of the OS, so it is selected by the
+    // platform and then asserted IN FULL — not read back off the value under
+    // test. Branching on `candidate.signal` would have made the expectation
+    // circular: a wrapper that lost the signal on POSIX would simply have
+    // selected the other branch. Neither branch is softened to "either is fine",
+    // and neither is skipped.
+    //
+    //   POSIX  the fixture's `process.kill(process.pid, "SIGTERM")` is really
+    //          delivered, is unhandled, and kills the child: `status` null,
+    //          `signal` "SIGTERM".
+    //   win32  there is no signal delivery at all. libuv's `uv__kill` turns
+    //          SIGTERM into `TerminateProcess(handle, 1)`, and `term_signal` is
+    //          reported only when the PARENT killed the child through
+    //          `uv_process_kill` — which never happens here, because the child
+    //          terminates itself. So Node reports `signal: null` and a non-zero
+    //          exit status, and the wrapper must report exactly that, non-zero
+    //          being the part that proves the death was abnormal.
+    if (IS_WINDOWS) {
+      expect(candidate.signal).toBe(null);
+      expect(candidate.status).not.toBe(null);
+      expect(candidate.status).not.toBe(0);
+    } else {
+      expect(candidate.signal).toBe("SIGTERM");
+      expect(candidate.status).toBe(null);
+    }
+    // The real parity assertion, unchanged and unweakened.
     expect(candidate).toEqual(node);
+
+    record("signal-death-reporting", {
+      reportedVia: IS_WINDOWS ? "exit-status" : "signal",
+      signal: candidate.signal,
+      status: candidate.status,
+      abnormal: true,
+      note: IS_WINDOWS
+        ? "win32: no signal delivery; TerminateProcess(handle, 1) surfaces as a non-zero status"
+        : "POSIX: SIGTERM was delivered and is reported as the signal",
+    });
   });
 
   it("stdio:'ignore' yields a null stdout return, identically", () => {
@@ -988,6 +1112,70 @@ describe("argument fidelity: metacharacters are data, not a second command", () 
 // E. PATH / PATHEXT resolution of a bare name
 // ---------------------------------------------------------------------------
 describe("bare-name resolution honours the caller's PATH", () => {
+  // v3 regression control for native CI 36215641444 (both bare-name cases).
+  // Named separately so a future edit cannot quietly put an absolute non-ASCII
+  // path back into the batch body and reintroduce the OEM-decoding corruption.
+  // The ASCII half is win32-only (cmd.exe decodes through a codepage); POSIX
+  // embeds the absolute path and is read as UTF-8. Both must still resolve the
+  // bare name through the adapter with exact argv.
+  it("the owned shim honours its platform's encoding contract: win32 ASCII %~dp0 body, POSIX lossless-UTF-8 absolute body", () => {
+    const bodyBytes = fs.readFileSync(owned.shimPath);
+    const body = bodyBytes.toString("utf8");
+    expect(evidence.shimLocatesFixtureCorrectly).toBe(true);
+    // The owned root is NOT made ASCII to achieve this — it still carries spaces
+    // and non-ASCII, and every case in this file runs out of it.
+    expect(/[^\x00-\x7F]/.test(owned.root)).toBe(true);
+    expect(owned.root).toContain("한글");
+
+    if (IS_WINDOWS) {
+      // cmd.exe expands %~dp0 from %0, which arrived as UTF-16 and never went
+      // through a codepage. The corrupting literal is simply absent.
+      expect(evidence.shimBodyAsciiOnly).toBe(true);
+      expect(/[^\x20-\x7E\r\n]/.test(body)).toBe(false);
+      expect(body).toContain("%~dp0");
+      expect(body).not.toContain(owned.root);
+      expect(body.endsWith("%*\r\n")).toBe(true);
+    } else {
+      // No codepage here: kernel shebang + Node UTF-8. The opposite contract —
+      // the absolute non-ASCII path is present and survives byte-for-byte.
+      expect(evidence.shimBodyNonAsciiIsLosslessUtf8).toBe(true);
+      expect(/[^\x00-\x7F]/.test(body)).toBe(true);
+      expect(Buffer.compare(bodyBytes, Buffer.from(body, "utf8"))).toBe(0);
+      expect(body.includes(String.fromCharCode(0xfffd))).toBe(false);
+      expect(body).toContain(owned.bodyPath);
+      expect(body.startsWith(`#!${process.execPath}\n`)).toBe(true);
+    }
+
+    // The encoding claim is vacuous unless the shim actually launches: bare name
+    // through the adapter, exact argv. Crosses PATHEXT/cmd.exe on win32.
+    clearWitnesses();
+    const out = execFileSyncCliCommand("wv1172bu-cli", ["--encoding-probe"], {
+      encoding: "utf-8",
+      env: sealedEnv({ FIXTURE_MODE: "echo" }),
+      cwd: owned.cwdDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: CHILD_MS,
+      windowsHide: true,
+    });
+    expect(out).toContain(FIXTURE_MARKER);
+    expect(JSON.parse(out).argv).toEqual(["--encoding-probe"]);
+    expect(readWitnesses()).toHaveLength(1);
+
+    record("shim-encoding-contract", {
+      shimRelative: evidence.shimRelative,
+      platform: process.platform,
+      // The win32 OEM-codepage half is NOT measured on a POSIX run.
+      bodyEncodingContract: evidence.shimBodyEncodingContract,
+      bodyAsciiOnly: evidence.shimBodyAsciiOnly,
+      bodyNonAsciiIsLosslessUtf8: evidence.shimBodyNonAsciiIsLosslessUtf8,
+      windowsCodepageSurfaceMeasuredHere: IS_WINDOWS,
+      fixtureLocator: evidence.shimFixtureLocator,
+      ownedRootStillNonAscii: true,
+      adapterArgvExact: true,
+      regressionOf: "native CI 36215641444 WindowsNode20 job 108330955350: MODULE_NOT_FOUND on an OEM-mangled absolute path",
+    });
+  });
+
   it("resolves a bare name from the owned bin dir on the caller's PATH (sync)", () => {
     clearWitnesses();
     const out = execFileSyncCliCommand("wv1172bu-cli", ["--version"], {
@@ -1055,16 +1243,34 @@ describe("bare-name resolution honours the caller's PATH", () => {
     );
     expect(shape.threw).toBe(true);
     expect(shape.code).toBe("ENOENT");
+    // v3: the errno type is now asserted, not merely recorded. v2 recorded the
+    // string/number divergence as a source-derived note; native CI 36215641444
+    // measured it, and lib/cli-process.js normalizes it, so the wrapper owes a
+    // numeric libuv errno on BOTH platforms — that is the whole point of the fix.
+    expect(shape.errnoType).toBe("number");
+    expect(typeof shape.errno).toBe("number");
+    // A wrapper that merely *rewrote* the errno while leaving cmd.exe's status
+    // and streams in place would still be diverging, so pin those too.
+    expect(shape.status).toBe(null);
+    expect(shape.signal).toBe(null);
+    expect(shape.stdout).toBe(null);
+    expect(shape.stderr).toBe(null);
+    expect(shape.outputLength).toBe(null);
     expect(readWitnesses()).toHaveLength(0);
     record("bare-name-absent-from-path", {
       code: shape.code,
       errnoType: shape.errnoType,
       processesStarted: 0,
-      // Source-derived divergence, unmeasured here: on win32 this ENOENT is
-      // synthesized by cross-spawn enoent.js with `errno: "ENOENT"` (a STRING),
-      // whereas Node's own POSIX ENOENT carries a NUMERIC errno. Callers that
-      // compare errno numerically would see a cross-platform difference.
+      // v2's note, kept as the record of WHY the wrapper now normalizes: on win32
+      // cross-spawn's enoent.js synthesizes this ENOENT with `errno: "ENOENT"` (a
+      // STRING) and leaves cmd.exe's `status: 1` and streams attached, whereas
+      // Node's own ENOENT carries a NUMERIC errno with null status/streams.
       win32ErrnoDivergence: "cross-spawn notFoundError sets errno to the string 'ENOENT'",
+      normalizedByWrapper: "lib/cli-process.js normalizeUnresolvedCommand restores the native numeric errno and null status/streams",
+      // No process is started by the fixture, but note honestly that on win32 a
+      // cmd.exe DID run and exit 1 before cross-spawn classified the failure;
+      // it writes no witness, so the zero-witness assertion above still holds.
+      win32CmdExeRanBeforeClassification: IS_WINDOWS,
     });
   });
 });
@@ -1078,8 +1284,25 @@ describe("product adoption of cli-process.js", () => {
   it("the analysed bytes are the frozen candidate bytes", () => {
     // Pins every assertion in this suite to the manifest'd candidate, so the
     // structural claims below cannot drift onto some other revision.
+    //
+    // PIN UPDATE (v3) — exactly one module changed: `lib/cli-process.js`.
+    //   was: 35c913692ad9bbdc5c3e62e53fb6fb76ad01941346e57765a30e9d543e2d37e8
+    //   now: f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78
+    // Review basis for the update: native CI 36215641444 / WindowsNode20 job
+    // 108330955350 measured the sync wrapper returning cross-spawn's synthesized
+    // ENOENT verbatim (string `errno`, cmd.exe's `status: 1`, cmd.exe's streams,
+    // 3-element `output`) where Node reports a numeric libuv errno with null
+    // status and null streams. The module gained `normalizeUnresolvedCommand`,
+    // which restores the native shape for that one case, keyed off cross-spawn's
+    // own resolution verdict (`lib/enoent.js verifyENOENTSync` fires only when
+    // `status === 1 && !parsed.file`, reviewed at cross-spawn 7.0.6) and never
+    // off cmd.exe's localized text. `spawnCliCommand`, `checkExecSyncError`, the
+    // pass-through of caller options and the cross-spawn 7.0.6 pin are all
+    // unchanged; no dependency, API, permission or provider choice changed.
+    // transport.js and speaker-discovery.js are byte-unchanged, so their pins
+    // below are the frozen values.
     expect(evidence.sourceHashes["lib/cli-process.js"]).toBe(
-      "35c913692ad9bbdc5c3e62e53fb6fb76ad01941346e57765a30e9d543e2d37e8"
+      "f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78"
     );
     expect(evidence.sourceHashes["lib/transport.js"]).toBe(
       "3f1a1b002c6423f0826ff5d91a522311847931337ba2f55e50c45e8bc7d0d28c"
