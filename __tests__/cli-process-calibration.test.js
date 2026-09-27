@@ -4,20 +4,31 @@
 // ============================================================================
 // EVIDENCE CLASS: FIXTURE PROOF. **NOT** NATIVE WINDOWS EVIDENCE.
 // ============================================================================
-// This host is macOS. Every case below fakes `process.platform` and substitutes
+// Every case below fakes `process.platform` — to `win32` for the correction path
+// and to an explicit POSIX value for the pass-through path — and substitutes
 // `node:child_process.spawnSync` and `cross-spawn` *inside the module graph of
 // the module under test*, so what is measured is the candidate's own decision
 // logic driven by controlled inputs. It is NOT a measurement of Windows.
+//
+// PLATFORM IS A FIXTURE, THE HOST IS ONLY RECORDED. No case asserts what machine
+// it is running on. Both sides of the module's `process.platform !== "win32"`
+// branch are driven by an explicit fake, so all 34 cases produce the same verdicts
+// on macOS, Linux and Windows. The host's real platform is written to the evidence
+// artifact as the MEASURED HOST of a mocked-platform run — never as a categorical
+// claim that the suite only runs on, or only describes, one OS. Nothing is skipped,
+// platform-gated or xfailed to achieve that.
 //
 // In particular this file DOES NOT and CANNOT establish:
 //   - that `C:\aigentry-cli-process-calibration|target` produces UV_ENOENT on a
 //     real Windows kernel (native CI 36311416695 measured that on both pinned
 //     runtimes; it is quoted, not reproduced);
 //   - the win32 numeric `UV_ENOENT` (-4058). The probe stubs here use THIS
-//     runtime's own value, read from the real `util.getSystemErrorMap()` (-2 on
-//     darwin), because that is what the module under test computed at load. What
-//     is proven is that the module accepts *its own runtime's* number and
-//     rejects any other — which is the mechanism, not the Windows constant;
+//     runtime's own value, read from the real `util.getSystemErrorMap()`
+//     (-2 on POSIX, -4058 on win32), because that is what the module under test
+//     computed at load. What is proven is that the module accepts *its own
+//     runtime's* number and rejects any other — the mechanism, not any one
+//     platform's constant. On a win32 host that number happens to be the native
+//     one, but this file still does not MEASURE Windows;
 //   - cmd.exe routing, PATHEXT resolution, or win32 kill propagation.
 // Native acceptance remains `__tests__/cli-process.test.js` run ON Windows.
 //
@@ -152,6 +163,11 @@ const evidence = {
   subject: "lib/cli-process.js ENOENT calibration path, reached through execFileSyncCliCommand",
   evidenceClass: "fixture-proof",
   nativeWindowsEvidence: false,
+  // The platform under test is a FIXTURE; `hostPlatform` is only the host that
+  // measurement happened to run on. A win32 `hostPlatform` here still means a
+  // mocked-platform fixture run, NOT native Windows evidence.
+  platformSource: "mocked",
+  hostPlatformIsMeasuredNotAsserted: true,
   hostPlatform: REAL_PLATFORM,
   hostArch: process.arch,
   nodeVersion: process.version,
@@ -332,6 +348,22 @@ function missOnWin32(sut, extra) {
   );
 }
 
+/**
+ * The POSIX platforms this file drives as EXPLICIT fixtures. These are the two
+ * `process.platform` values the product ships on besides win32; the module's
+ * POSIX branch is a single `!== "win32"` test, so driving both covers it on any
+ * host — including a Windows runner, where the real platform can never supply one.
+ */
+const POSIX_FIXTURE_PLATFORMS = ["linux", "darwin"];
+
+/** The exact counterpart of `missOnWin32`, with a controlled POSIX platform. */
+function missOnPosix(sut, platform, extra) {
+  expect(POSIX_FIXTURE_PLATFORMS).toContain(platform);
+  return onPlatform(platform, () =>
+    outcome(() => sut.execFileSyncCliCommand(CALLER_COMMAND, [CALLER_ARG], callerOptions(extra))),
+  );
+}
+
 /** The refusal's bounded reason, pulled off the real error the module threw. */
 function refusalReason(result) {
   expect(result.threw).toBe(true);
@@ -440,19 +472,37 @@ describe("the probe is reachable from nothing but a win32 unresolved-command mis
   });
 
   it("on POSIX the module returns before probing and leaves cross-spawn's string errno in place", async () => {
-    // No platform fake at all: this runs on the real host platform.
-    expect(REAL_PLATFORM).not.toBe("win32");
-    const { sut, localProbeCalls } = await loadSut({ probeStub: null, syncResult: () => crossSpawnSynthesizedEnoent() });
-    const r = outcome(() => sut.execFileSyncCliCommand(CALLER_COMMAND, [CALLER_ARG], callerOptions()));
-    expect(r.threw).toBe(true);
-    expect(r.error.code).toBe("ENOENT");
-    // Untouched: still cross-spawn's STRING errno and cmd.exe's status/streams.
-    expect(r.error.errno).toBe("ENOENT");
-    expect(r.error.status).toBe(1);
-    expect(Buffer.isBuffer(r.error.stderr)).toBe(true);
-    expect(Array.isArray(r.error.output)).toBe(true);
-    expect(localProbeCalls).toEqual([]);
-    record("no-probe-on-posix", { hostPlatform: REAL_PLATFORM, probeCalls: 0, errnoLeftAsString: true });
+    // The POSIX side of the module's `process.platform !== "win32"` branch is
+    // driven by an EXPLICIT POSIX fixture, exactly as the win32 side is driven by
+    // `missOnWin32`. It is NOT inferred from the host: asserting
+    // `REAL_PLATFORM !== "win32"` would test the machine rather than the module,
+    // and makes the case unrunnable on a Windows runner while proving nothing
+    // extra on a POSIX one. Every declared POSIX value is exercised, so the oracle
+    // is strictly stronger than the single ambient platform it replaces.
+    const measured = [];
+    for (const platform of POSIX_FIXTURE_PLATFORMS) {
+      const { sut, localProbeCalls } = await loadSut({ probeStub: null, syncResult: () => crossSpawnSynthesizedEnoent() });
+      const r = missOnPosix(sut, platform);
+      expect(r.threw).toBe(true);
+      expect(r.error.code).toBe("ENOENT");
+      // Untouched: still cross-spawn's STRING errno and cmd.exe's status/streams.
+      expect(r.error.errno).toBe("ENOENT");
+      expect(r.error.status).toBe(1);
+      expect(Buffer.isBuffer(r.error.stderr)).toBe(true);
+      expect(Array.isArray(r.error.output)).toBe(true);
+      // `probeStub: null` throws if reached, and this asserts it never was: the
+      // whole calibration path is unreachable on a POSIX platform.
+      expect(localProbeCalls).toEqual([]);
+      measured.push(platform);
+    }
+    expect(measured).toEqual(POSIX_FIXTURE_PLATFORMS);
+    record("no-probe-on-posix", {
+      posixFixturePlatforms: measured,
+      hostPlatform: REAL_PLATFORM, // the measured host, not an asserted one
+      platformSource: "fixture",
+      probeCalls: 0,
+      errnoLeftAsString: true,
+    });
   });
 });
 
@@ -820,11 +870,23 @@ describe("the probe operand is a fixed constant, never anything the caller suppl
     // The operand cannot resolve on this host either: it is a win32-shaped path,
     // and nothing here ever handed it to a real `spawnSync`.
     expect(APPROVED_CALIBRATION_TARGET).toContain("|");
-    expect(path.isAbsolute(APPROVED_CALIBRATION_TARGET)).toBe(false); // not a POSIX path
+    // The substantive claim is about the OPERAND's shape, so it is made against
+    // the explicitly-named path flavours. Bare `path.isAbsolute` is the host's
+    // binding — posix off Windows, win32 on it — so it answers `false` here and
+    // `true` on a Windows runner for the very same string, which makes the
+    // operand's shape look host-dependent when it is a fixed literal. Both
+    // flavours are asserted, which states the property exactly: this is a win32
+    // absolute path and is NOT a POSIX one.
+    expect(path.win32.isAbsolute(APPROVED_CALIBRATION_TARGET)).toBe(true);
+    expect(path.posix.isAbsolute(APPROVED_CALIBRATION_TARGET)).toBe(false);
+    // It cannot resolve on ANY host: `|` is illegal in a win32 filename, and the
+    // literal is not a POSIX path at all. Never handed to a real `spawnSync`.
     expect(fs.existsSync(APPROVED_CALIBRATION_TARGET)).toBe(false);
     record("all-probe-operands-constant", {
       totalProbeCalls: probeCalls.length,
       distinctOperands: [...new Set(probeCalls.map((c) => c.command))].length,
+      win32Absolute: true,
+      posixAbsolute: false,
       operandExistsOnThisHost: false,
       reachedRealSpawnSync: false,
     });
@@ -907,10 +969,36 @@ describe("failures that are NOT cross-spawn's resolution verdict are untouched a
 // I. Containment, and the honest classification of this evidence
 // ---------------------------------------------------------------------------
 describe("containment and evidence classification", () => {
-  it("process.platform was restored, and this host is not Windows", () => {
+  it("process.platform is restored strictly, on whatever host this ran on", () => {
+    // The substantive oracle is RESTORATION — that no faked platform leaks out of
+    // `onPlatform` into the rest of the process. `REAL_PLATFORM !== "win32"` was
+    // never part of it: it asserted a property of the machine, which this file
+    // does not control and does not need, and which fails on a Windows runner for
+    // a suite whose platform is a fixture throughout.
     expect(process.platform).toBe(REAL_PLATFORM);
-    expect(REAL_PLATFORM).not.toBe("win32");
-    record("platform-restored", { hostPlatform: REAL_PLATFORM });
+    // The descriptor itself is back, not just the value — a fake left behind as a
+    // non-configurable own property would still read correctly here.
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    expect(descriptor.configurable).toBe(true);
+    expect(descriptor.value).toBe(REAL_PLATFORM);
+    // Restoration holds on the throwing path too: `onPlatform`'s `finally` runs
+    // whether the driven call returns or throws, and the win32 refusal cases
+    // depend on exactly that.
+    const sentinel = new Error("nt1172jq: deliberate throw inside onPlatform");
+    expect(() => onPlatform("win32", () => { throw sentinel; })).toThrow(sentinel);
+    expect(process.platform).toBe(REAL_PLATFORM);
+    // And every POSIX fixture value restores as well as the win32 one.
+    for (const platform of POSIX_FIXTURE_PLATFORMS) {
+      onPlatform(platform, () => expect(process.platform).toBe(platform));
+      expect(process.platform).toBe(REAL_PLATFORM);
+    }
+    record("platform-restored", {
+      hostPlatform: REAL_PLATFORM, // recorded as the measured host, not asserted
+      restoredAfterReturn: true,
+      restoredAfterThrow: true,
+      descriptorRestored: true,
+      platformsFaked: ["win32", ...POSIX_FIXTURE_PLATFORMS],
+    });
   });
 
   it("no outbound request was attempted anywhere in this file", () => {
@@ -927,6 +1015,7 @@ describe("containment and evidence classification", () => {
       "real spawnSync behaviour: spawnSync is substituted inside the module graph of the module under test",
       "cmd.exe routing, PATHEXT resolution, escape.argument quoting and win32 kill propagation",
       "Node's actual 20->22 stdout/stderr derivation: the two shapes are supplied as fixtures, not observed from a real failed spawn",
+      "the host OS: process.platform is faked on BOTH branches, so running this file on a Windows runner still measures the fixture and never the kernel — native acceptance stays __tests__/cli-process.test.js run ON Windows",
     ];
     expect(evidence.declaredUnmeasured.length).toBeGreaterThanOrEqual(5);
     // The module under test is real; the drivers are not. Both stated.
