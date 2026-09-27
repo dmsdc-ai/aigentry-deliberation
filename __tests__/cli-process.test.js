@@ -97,6 +97,36 @@
 //      failures red. Nothing else in this file changed: suites A-F, the
 //      `parity()` helper and every pre-existing release assertion are untouched,
 //      and no assertion was added, skipped, relaxed or platform-gated.
+//   8. np1172cf CORRECTION, carried onto this release base by np1172jc —
+//      TEST-side only, and it is HALF of a two-part fix.
+//      Node changed how it derives a failed spawn's `stdout`/`stderr` from its
+//      null `output` (shipped `internal/child_process`:
+//      `result.output && result.output[1]` on 20.20.0 vs `result.output?.[1]` on
+//      22.23.2), so both became `undefined` from Node 22 while `output` stayed
+//      `null` and every other field of the shape stayed identical. That one
+//      runtime change produced two independent reds:
+//        a. mac22/linux22 was a TEST defect HERE — the bare-name-absent case
+//           asserted `toBe(null)` on those two fields, i.e. a Node-<=20 runtime
+//           constant, against a wrapper measured 16/16 native-identical on both
+//           runtimes. FIXED in this revision: it now compares the exact fields
+//           real `execFileSync` reports on the RUNNING runtime, via `parity()`.
+//           No version gate was introduced and the 20.20.0->22.23.2 boundary is
+//           NOT relied upon anywhere.
+//        b. win22 is a PRODUCT defect in `lib/cli-process.js` —
+//           `normalizeUnresolvedCommand` hard-codes those two fields to `null`
+//           and so over-corrects from Node 22 on. It is **NOT fixed in this
+//           revision**: the correction is on HOLD, because restoring the fields
+//           to a runtime-correct value requires measuring the running runtime,
+//           and no measurement mechanism could be shown to preserve the parity
+//           contract unconditionally. See `output/REPORT.md`.
+//      CONSEQUENCE, stated so a red is not misread: on win32 + Node >= 22 the
+//      bare-name-absent case and suite B's `:715` parity case both report that
+//      product defect. Those reds are correct for an unfixed product and clear
+//      when the product half lands. Nothing here is skipped, platform-gated,
+//      relaxed, retried or turned into an expected failure to hide them, and the
+//      three source PINs are left exactly as this base has them, because
+//      `lib/cli-process.js`, `lib/transport.js` and `lib/speaker-discovery.js`
+//      are all byte-unchanged by this revision.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -1245,49 +1275,89 @@ describe("bare-name resolution honours the caller's PATH", () => {
     expect(r.buf).toContain(FIXTURE_MARKER);
   });
 
-  it("a bare name absent from the caller's PATH fails with ENOENT and starts nothing", () => {
+  it("a bare name absent from the caller's PATH fails with ENOENT and runs no fixture", () => {
     clearWitnesses();
-    const shape = syncShape(() =>
-      execFileSyncCliCommand("wv1172bu-cli", ["--version"], {
-        encoding: "utf-8",
-        // Same command, PATH pointed at an empty owned dir. Proves resolution
-        // really came from options.env.PATH above and not from the host.
-        env: sealedEnv({ PATH: pathValue(owned.emptyBinDir), FIXTURE_MODE: "echo" }),
-        cwd: owned.cwdDir,
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: CHILD_MS,
-        windowsHide: true,
-      })
-    );
-    expect(shape.threw).toBe(true);
-    expect(shape.code).toBe("ENOENT");
+    const opts = {
+      encoding: "utf-8",
+      // Same command, PATH pointed at an empty owned dir. Proves resolution
+      // really came from options.env.PATH above and not from the host.
+      env: sealedEnv({ PATH: pathValue(owned.emptyBinDir), FIXTURE_MODE: "echo" }),
+      cwd: owned.cwdDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: CHILD_MS,
+      windowsHide: true,
+    };
+    // np1172cf: measured against the REAL `child_process.execFileSync` on the
+    // RUNNING runtime, through this file's own `parity()` helper, instead of
+    // against literals.
+    //
+    // WHY. v3 asserted `stdout`/`stderr` === null. That is a Node-<=20 runtime
+    // constant, not a property of the wrapper: Node derives both fields from a
+    // failed spawn's null `output`, and changed how it derives them in shipped
+    // `internal/child_process` — `result.output && result.output[1]` on 20.20.0
+    // versus `result.output?.[1]` on 22.23.2 — so both are `undefined` from Node
+    // 22 on while `output` itself stays `null` and every other field of the shape
+    // stays identical. The literal therefore went red on mac22/linux22 against a
+    // wrapper that was measured 16/16 native-identical on BOTH runtimes: the test
+    // was wrong there, not the wrapper.
+    //
+    // The contract this case defends is native parity, so parity is what it now
+    // measures. This is STRONGER than the literal and version-agnostic: a wrapper
+    // that diverged on any of these fields now fails on whichever runtime it
+    // diverges on, instead of passing on Node 20 and failing on Node 22 for being
+    // correct. Nothing is skipped, platform-gated, relaxed or inflated.
+    //
+    // ON WIN32 THIS CASE NOW REPORTS A PRODUCT DEFECT, DELIBERATELY. The current
+    // `lib/cli-process.js normalizeUnresolvedCommand` hard-codes these two fields
+    // to `null`, so on win32 + Node >= 22 it OVER-corrects and this case goes red
+    // — the same real defect suite B's `:715` parity assertion already reports
+    // there. That red is the correct outcome for an unfixed product, not a
+    // regression of this file, and it clears when the product half lands. The
+    // product half is NOT in this revision: see output/REPORT.md, it is on HOLD.
+    const { candidate, node } = parity("bare-name-absent-from-path", "wv1172bu-cli", ["--version"], opts);
+    expect(candidate.threw).toBe(true);
+    expect(candidate.code).toBe("ENOENT");
     // v3: the errno type is now asserted, not merely recorded. v2 recorded the
     // string/number divergence as a source-derived note; native CI 36215641444
     // measured it, and lib/cli-process.js normalizes it, so the wrapper owes a
     // numeric libuv errno on BOTH platforms — that is the whole point of the fix.
-    expect(shape.errnoType).toBe("number");
-    expect(typeof shape.errno).toBe("number");
+    expect(candidate.errnoType).toBe("number");
+    expect(typeof candidate.errno).toBe("number");
     // A wrapper that merely *rewrote* the errno while leaving cmd.exe's status
-    // and streams in place would still be diverging, so pin those too.
-    expect(shape.status).toBe(null);
-    expect(shape.signal).toBe(null);
-    expect(shape.stdout).toBe(null);
-    expect(shape.stderr).toBe(null);
-    expect(shape.outputLength).toBe(null);
+    // and streams in place would still be diverging, so pin those too — each
+    // against the exact value this runtime's own execFileSync reports.
+    expect(candidate.errno).toBe(node.errno);
+    expect(candidate.status).toBe(node.status);
+    expect(candidate.signal).toBe(node.signal);
+    expect(candidate.stdout).toEqual(node.stdout);
+    expect(candidate.stderr).toEqual(node.stderr);
+    expect(candidate.outputLength).toBe(node.outputLength);
     expect(readWitnesses()).toHaveLength(0);
     record("bare-name-absent-from-path", {
-      code: shape.code,
-      errnoType: shape.errnoType,
-      processesStarted: 0,
+      code: candidate.code,
+      errnoType: candidate.errnoType,
+      streamsComparedAgainst: "measured native execFileSync on the running runtime",
+      fixtureWitnesses: 0,
+      // Corrected from v3's `processesStarted: 0`, which overstated this
+      // evidence: a zero-witness count proves the fixture BODY never ran, it
+      // does NOT prove that no OS process was created. On POSIX a failed execvp
+      // still forks a child first, on win32 a real cmd.exe ran and exited 1
+      // (below), and `parity()` makes one additional native attempt of its own.
+      processStartClaim: "not measured; witnesses prove only that no fixture body executed",
       // v2's note, kept as the record of WHY the wrapper now normalizes: on win32
       // cross-spawn's enoent.js synthesizes this ENOENT with `errno: "ENOENT"` (a
       // STRING) and leaves cmd.exe's `status: 1` and streams attached, whereas
       // Node's own ENOENT carries a NUMERIC errno with null status/streams.
       win32ErrnoDivergence: "cross-spawn notFoundError sets errno to the string 'ENOENT'",
       normalizedByWrapper: "lib/cli-process.js normalizeUnresolvedCommand restores the native numeric errno and null status/streams",
-      // No process is started by the fixture, but note honestly that on win32 a
-      // cmd.exe DID run and exit 1 before cross-spawn classified the failure;
-      // it writes no witness, so the zero-witness assertion above still holds.
+      // np1172cf: `status`, `signal` and `output` were measured runtime-invariant,
+      // so restoring them as literals is sound. The two STREAM fields were not,
+      // and the wrapper still hard-codes them — which is the open product defect
+      // this case reports on win32 + Node >= 22.
+      streamFieldsStillHardCodedByWrapper: true,
+      // On win32 a cmd.exe DID run and exit 1 before cross-spawn classified the
+      // failure; it writes no witness, so the zero-witness assertion above still
+      // holds — which is exactly why that assertion is not a process count.
       win32CmdExeRanBeforeClassification: IS_WINDOWS,
     });
   });

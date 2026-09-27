@@ -810,6 +810,70 @@ const DIAG_EXIT_SIGNAL_ENUM = Object.freeze([
 const DIAG_SIGNAL_NAME_RE = /^SIG[A-Z0-9]{1,12}$/;
 // The captured group is never emitted raw: it is passed through diagEnum.
 const DIAG_BLOCK_REASON_RE = /block_reason["' :=]+([A-Za-z0-9_.-]{1,40})/;
+// The `reason:` field of an AUTO_HANDOFF_RETRY record. `block_reasons` above is
+// a measured FALSE NEGATIVE for the one record that names why a turn was
+// retried: the writer (`lib/transport.js:1619`) emits
+//   AUTO_HANDOFF_RETRY: <id> | speaker: <s> | attempt <n>/<m> | reason: <cause> | retrying in <d>ms
+// whose literal token is `reason:` — never `block_reason` — so
+// DIAG_BLOCK_REASON_RE cannot match it and every retry is counted `none`.
+// `block_reasons=none` must therefore be read as NOT MEASURED, and this field
+// is what measures it. The whole field is bracketed by the record's own
+// trailing `| retrying in <d>ms`, so a `<cause>` carrying `|` cannot truncate
+// it; the capture is NEVER emitted — it is matched against the closed table
+// below and reported only as a label from it, or `other`.
+const DIAG_RETRY_REASON_RE = /\| reason: (.*) \| retrying in \d{1,12}ms$/;
+// `<cause>` is `runResult.block_reason || runResult.error || "unknown"`
+// (transport.js:1619). Every pattern below is the exact CURRENT source literal
+// of a value that expression can take, with only its interpolated holes
+// generalised — no code is recognised that the writer does not write. First
+// match wins; `stdin_term_unobserved` precedes `stdin_write_failed` because the
+// unobserved-termination wrapper (transport.js:1115) wraps the inner stdin
+// message, and the wrapper is the stronger observation of the same cause.
+//
+// The reachable stdin causes the writer does NOT construct — a raw stdin
+// `error` event message (Node's own errno text, e.g. the UNPROVEN EPIPE
+// hypothesis) and a child `error` event message (transport.js:1073) — are
+// byte-identically shaped free text here and are NOT separable at this seam.
+// They fall to `other`, deliberately: an invented code would name a cause the
+// source cannot support.
+const DIAG_RETRY_REASON_PATTERNS = Object.freeze([
+  // runUntilBlockedCore block_reason literals (transport.js:1281,1300,1321).
+  ['manual_transport', /^manual_transport$/],
+  ['unsupported_transport', /^unsupported_transport$/],
+  ['transport_blocked', /^transport_blocked$/],
+  // runUntilBlockedCore session lookup (transport.js:1245).
+  ['session_not_found', /^Session not found$/],
+  // runCliAutoTurnCore pre-flight returns (transport.js:823,828,832,833,841).
+  ['session_not_active', /^Session not active$/],
+  ['transport_not_cli', /^Speaker "[^"]{0,64}" is not CLI type$/],
+  ['cli_hint_missing', /^No CLI hints for "[^"]{0,64}"$/],
+  ['cli_not_available', /^CLI "[^"]{0,64}" not available$/],
+  ['cli_auto_incapable', /^Speaker "[^"]{0,64}" \([^)]{0,64}\) is not cli_auto-capable; respond manually via deliberation_respond\.$/],
+  // Turn deadline (transport.js:1043).
+  ['cli_timeout', /^CLI timeout \(\d{1,12}(?:\.\d{1,6})?s\)$/],
+  // Observed non-zero exit with no stdout (transport.js:1062). The 500-byte
+  // child stderr that follows the colon is matched away, never captured.
+  ['cli_exit_nonzero', /^CLI exit code (?:-?\d{1,12}|null): /],
+  // stdin write failure, in the two shapes the writer itself builds: the
+  // synchronous-throw prefix (transport.js:980) and the unobserved-termination
+  // wrapper (transport.js:1115-1118), whose signal list is exactly
+  // `stdinSignalsAttempted.join("+")` over the SIGTERM (:993) then SIGKILL
+  // (:958) order, or the empty-list sentence.
+  ['stdin_term_unobserved', / \(provider termination UNOBSERVED after (?:SIGTERM(?:\+SIGKILL)?|SIGKILL|no signal attempted) within \d{1,12}ms\)$/],
+  ['stdin_write_failed', /^CLI stdin write failed: /],
+  // The writer's own fallback when neither field was set (transport.js:1619).
+  ['writer_unknown', /^unknown$/],
+]);
+// Closed by construction: the labels above, plus `unextracted` for a record
+// whose `reason:` field could not be read as a whole field at all. That case is
+// REACHABLE and is not folded into `other`: `appendRuntimeLog` does not strip
+// newlines (index.js:715), so a `<cause>` carrying one — a multi-line child
+// stderr under cli_exit_nonzero — splits the record across physical lines and
+// its trailing bracket lands on a later line. `other` means the field was read
+// and is not a known writer literal; `unextracted` means it was not read.
+const DIAG_RETRY_REASON_ENUM = Object.freeze([
+  ...DIAG_RETRY_REASON_PATTERNS.map(([label]) => label), 'unextracted',
+]);
 
 /** A member of `allowed`, else `none` / `other`. Never the raw value. */
 function diagEnum(value, allowed) {
@@ -833,6 +897,21 @@ function diagIntList(values, limit) {
   const shown = values.slice(0, limit).map(value => diagInt(value)).join(',');
   const rest = values.length - limit;
   return rest > 0 ? `${shown},+${rest}` : shown;
+}
+
+/**
+ * The retry cause of ONE AUTO_HANDOFF_RETRY line, as a fixed label. Returns a
+ * member of DIAG_RETRY_REASON_ENUM or `other`, and nothing else: the captured
+ * field is only ever a `test()` subject, so no reason text, prompt, path,
+ * stderr, speaker, session id or signal detail can leave this function.
+ */
+function diagRetryReason(line) {
+  const field = line.match(DIAG_RETRY_REASON_RE);
+  if (!field) return 'unextracted';
+  for (const [label, pattern] of DIAG_RETRY_REASON_PATTERNS) {
+    if (pattern.test(field[1])) return label;
+  }
+  return 'other';
 }
 
 /** Sorted `enum=count` pairs over `values`. Deterministic and order-free. */
@@ -880,6 +959,7 @@ function diagHandoffEvents(homeDir) {
   }
   const events = [];
   const reasons = [];
+  const retryReasons = [];
   const turnElapsed = [];
   let dedupLines = 0;
   let unparsedLines = 0;
@@ -907,6 +987,14 @@ function diagHandoffEvents(homeDir) {
       const elapsed = line.match(DIAG_TURN_ELAPSED_RE);
       turnElapsed.push(elapsed ? Number(elapsed[1]) : null);
     }
+    // Gated on the SAME exact-equality event name as the line above, so the
+    // field is read only from a record the grammar already resolved to
+    // AUTO_HANDOFF_RETRY. A dedup summary is not such a record — its `[DEDUP]`
+    // level fails DIAG_RUNTIME_EVENT_RE, so it took the `!parsed` branch above
+    // and counted itself in `dedup_lines` — so, exactly as before this field
+    // existed, a collapsed repeat contributes no reason and stands for an
+    // unknown number of occurrences.
+    if (event === 'AUTO_HANDOFF_RETRY') retryReasons.push(diagRetryReason(line));
   }
   return [
     'runtime_log=present',
@@ -914,6 +1002,9 @@ function diagHandoffEvents(homeDir) {
     `handoff_events=${events.length}`,
     `events=${diagCounts(events, DIAG_HANDOFF_EVENT_ENUM)}`,
     `block_reasons=${diagCounts(reasons, DIAG_BLOCK_REASON_ENUM)}`,
+    // Counts only, over the closed label set. `none` here means no
+    // AUTO_HANDOFF_RETRY record was parsed at all — never "no reason".
+    `retry_reasons=${diagCounts(retryReasons, DIAG_RETRY_REASON_ENUM)}`,
     `turn_ok_elapsed_ms=${diagIntList(turnElapsed, DIAG_TURN_ELAPSED_LIMIT)}`,
     `dedup_lines=${dedupLines}`,
     `unparsed_lines=${unparsedLines}`,
