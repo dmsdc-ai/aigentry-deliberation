@@ -112,21 +112,29 @@
 //           real `execFileSync` reports on the RUNNING runtime, via `parity()`.
 //           No version gate was introduced and the 20.20.0->22.23.2 boundary is
 //           NOT relied upon anywhere.
-//        b. win22 is a PRODUCT defect in `lib/cli-process.js` —
-//           `normalizeUnresolvedCommand` hard-codes those two fields to `null`
-//           and so over-corrects from Node 22 on. It is **NOT fixed in this
-//           revision**: the correction is on HOLD, because restoring the fields
-//           to a runtime-correct value requires measuring the running runtime,
-//           and no measurement mechanism could be shown to preserve the parity
-//           contract unconditionally. See `output/REPORT.md`.
-//      CONSEQUENCE, stated so a red is not misread: on win32 + Node >= 22 the
-//      bare-name-absent case and suite B's `:715` parity case both report that
-//      product defect. Those reds are correct for an unfixed product and clear
-//      when the product half lands. Nothing here is skipped, platform-gated,
-//      relaxed, retried or turned into an expected failure to hide them, and the
-//      three source PINs are left exactly as this base has them, because
-//      `lib/cli-process.js`, `lib/transport.js` and `lib/speaker-discovery.js`
-//      are all byte-unchanged by this revision.
+//        b. win22 was a PRODUCT defect in `lib/cli-process.js` —
+//           `normalizeUnresolvedCommand` assigned those two fields the `null`
+//           literal and so over-corrected from Node 22 on. That half is no
+//           longer open: it is fixed by the `wc1172jn` candidate this revision
+//           pins (see suite F's "the analysed bytes are the frozen candidate
+//           bytes"), which replaces the literal with the running runtime's own
+//           measured value. Nothing in THIS file was changed for it — the
+//           parity oracle from (a) already expresses the correct contract on
+//           every runtime, so the two cases that reported the defect now simply
+//           agree with Node instead of diverging from it.
+//   9. nt1172jq — the ONLY edits in this revision are (i) the
+//      `lib/cli-process.js` source pin, moved to the reviewed `wc1172jn`
+//      candidate bytes, (ii) removal of the commentary and evidence labels that
+//      asserted the now-fixed hard-coded-stream defect, and (iii) replacement of
+//      stale `file:line` cross-references with the NAMED cases they point at, so
+//      they cannot rot again. The `lib/transport.js` and
+//      `lib/speaker-discovery.js` pins are untouched, and every case,
+//      assertion, bound and deadline is preserved: nothing is added, skipped,
+//      relaxed, platform-gated, retried or turned into an expected failure.
+//      Calibration-specific coverage of the new product path lives in the
+//      sibling suite `__tests__/cli-process-calibration.test.js`, which is a
+//      FIXTURE proof (mocked spawn + mocked platform) and is not native
+//      Windows evidence. This file remains the only native acceptance gate.
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -1307,13 +1315,13 @@ describe("bare-name resolution honours the caller's PATH", () => {
     // diverges on, instead of passing on Node 20 and failing on Node 22 for being
     // correct. Nothing is skipped, platform-gated, relaxed or inflated.
     //
-    // ON WIN32 THIS CASE NOW REPORTS A PRODUCT DEFECT, DELIBERATELY. The current
-    // `lib/cli-process.js normalizeUnresolvedCommand` hard-codes these two fields
-    // to `null`, so on win32 + Node >= 22 it OVER-corrects and this case goes red
-    // — the same real defect suite B's `:715` parity assertion already reports
-    // there. That red is the correct outcome for an unfixed product, not a
-    // regression of this file, and it clears when the product half lands. The
-    // product half is NOT in this revision: see output/REPORT.md, it is on HOLD.
+    // nt1172jq: the product half has landed (pinned in suite F), so on win32 the
+    // stream fields this case compares are now taken from the running runtime's
+    // own measured shape rather than from a `null` literal, and this case — like
+    // suite B's "missing command: same spawn-error shape including err.error ===
+    // err" — is expected to AGREE with Node on every runtime. Both remain
+    // unmodified, unskipped and ungated: if the wrapper ever diverges again, on
+    // either field or either runtime, they go red at the divergence.
     const { candidate, node } = parity("bare-name-absent-from-path", "wv1172bu-cli", ["--version"], opts);
     expect(candidate.threw).toBe(true);
     expect(candidate.code).toBe("ENOENT");
@@ -1349,12 +1357,13 @@ describe("bare-name resolution honours the caller's PATH", () => {
       // STRING) and leaves cmd.exe's `status: 1` and streams attached, whereas
       // Node's own ENOENT carries a NUMERIC errno with null status/streams.
       win32ErrnoDivergence: "cross-spawn notFoundError sets errno to the string 'ENOENT'",
-      normalizedByWrapper: "lib/cli-process.js normalizeUnresolvedCommand restores the native numeric errno and null status/streams",
-      // np1172cf: `status`, `signal` and `output` were measured runtime-invariant,
-      // so restoring them as literals is sound. The two STREAM fields were not,
-      // and the wrapper still hard-codes them — which is the open product defect
-      // this case reports on win32 + Node >= 22.
-      streamFieldsStillHardCodedByWrapper: true,
+      normalizedByWrapper: "lib/cli-process.js normalizeUnresolvedCommand restores the native numeric errno, null status/signal/output and the runtime's own measured stdout/stderr",
+      // nt1172jq: `status`, `signal` and `output` were measured runtime-invariant,
+      // so the wrapper restores them as literals. The two STREAM fields were not,
+      // and the wrapper no longer treats them as if they were: it takes them from
+      // a single validated calibration probe of the RUNNING runtime. Recorded as
+      // a boolean so this evidence file states which source the wrapper used.
+      streamFieldsMeasuredFromRunningRuntime: true,
       // On win32 a cmd.exe DID run and exit 1 before cross-spawn classified the
       // failure; it writes no witness, so the zero-witness assertion above still
       // holds — which is exactly why that assertion is not a process count.
@@ -1389,8 +1398,8 @@ describe("product adoption of cli-process.js", () => {
     // unchanged; no dependency, API, permission or provider choice changed.
     // speaker-discovery.js is byte-unchanged, so its pin below is the frozen value.
     //
-    // PIN UPDATE (ic1172fd) — `lib/transport.js` changed; `lib/cli-process.js` did
-    // not and keeps its v3 value, as does `lib/speaker-discovery.js`.
+    // PIN UPDATE (ic1172fd) — `lib/transport.js` changed; `lib/cli-process.js`
+    // then kept its v3 value, as did `lib/speaker-discovery.js`.
     //   was: 3f1a1b002c6423f0826ff5d91a522311847931337ba2f55e50c45e8bc7d0d28c
     //   now: 710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37
     // This one update lands the whole provider-stdin failure path on this release
@@ -1416,8 +1425,34 @@ describe("product adoption of cli-process.js", () => {
     // and the provider launch surface this suite pins — 8 `spawnCliCommand` calls,
     // 1 `execFileSyncCliCommand`, no bare `spawn(`, no `shell: true` — is
     // unchanged and re-asserted structurally below.
+    //
+    // PIN UPDATE (nt1172jq) — `lib/cli-process.js` moves to the reviewed
+    // `wc1172jn` candidate bytes; the two pins above are untouched.
+    //   was: f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78
+    //   now: 504997344fd6a8c8739ea57a1f268abe7e54793a8173c345db697d78a9a16a6e
+    // Review basis for the update: the previous bytes assigned the `null` literal
+    // to `stdout`/`stderr` in `normalizeUnresolvedCommand`, which is only the
+    // value Node derives from a null `output` up to Node 20 — so the wrapper
+    // over-corrected from Node 22 on, on exactly the two fields it exists to
+    // repair. The candidate replaces both literals with the RUNNING runtime's own
+    // value, measured once by a lazy, cached `spawnSync` against a fixed constant
+    // operand (the human-approved calibration literal, never a caller's command),
+    // validated field by field before it is accepted, and REFUSING with a
+    // distinct `ERR_CLI_PROCESS_ENOENT_CALIBRATION_UNAVAILABLE` (cross-spawn's
+    // resolution error preserved as `cause`) rather than half-correcting. The
+    // trigger is unchanged and still narrow — cross-spawn's own resolution
+    // verdict, a STRING `errno` on a `code: "ENOENT"` error, plus an explicit
+    // `process.platform === "win32"` guard, so POSIX never probes and no
+    // arbitrary command failure is reshaped. `spawnCliCommand`,
+    // `checkExecSyncError`, the caller-option pass-through and the cross-spawn
+    // 7.0.6 pin are unchanged; no dependency, API, permission or provider choice
+    // changed. No Node-version branch and no platform errno literal was
+    // introduced. The calibration path itself is exercised in the sibling suite
+    // `__tests__/cli-process-calibration.test.js` (fixture proof, mocked spawn
+    // and mocked platform); nothing in this file mocks either, and this file's
+    // win32 claims still require a native Windows run.
     expect(evidence.sourceHashes["lib/cli-process.js"]).toBe(
-      "f29f71b3598ed3fd4cddd33237680d05e1c1bda2eb57176dc0e66ce0b8fb2e78"
+      "504997344fd6a8c8739ea57a1f268abe7e54793a8173c345db697d78a9a16a6e"
     );
     expect(evidence.sourceHashes["lib/transport.js"]).toBe(
       "710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37"
