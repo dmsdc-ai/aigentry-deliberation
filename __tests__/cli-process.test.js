@@ -1454,8 +1454,21 @@ describe("product adoption of cli-process.js", () => {
     expect(evidence.sourceHashes["lib/cli-process.js"]).toBe(
       "504997344fd6a8c8739ea57a1f268abe7e54793a8173c345db697d78a9a16a6e"
     );
+    // PIN UPDATE (lt1172kb) — `lib/transport.js` moves to the ld1172jt-v2
+    // candidate bytes under independent test. The other two pins are untouched.
+    //   was: 710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37
+    //   now: 6d1b24568925a738ab18254518efc369b24e1f07e6af0c747341d4c15f0c9726
+    // This is a PIN MOVE ONLY, made because the analysed bytes are now the
+    // candidate's. It carries no verdict: the diff those bytes contain adds an
+    // auto-turn failure-provenance field (`origin` / `code`, recorded at the
+    // four raising sites and reported through `describeCliFailure` /
+    // `formatCliFailureProvenance`) and is measured by the owned suite
+    // `__tests__/cli-failure-provenance.test.js`, not here. The provider launch
+    // surface this suite pins — 8 `spawnCliCommand` calls, 1
+    // `execFileSyncCliCommand`, no bare `spawn(`, no `shell: true` — is
+    // unchanged and still re-asserted structurally below on these bytes.
     expect(evidence.sourceHashes["lib/transport.js"]).toBe(
-      "710cc7c4f79227ee424eaf51f49e100021ed5f461e1891c26270b56fb1a7bf37"
+      "6d1b24568925a738ab18254518efc369b24e1f07e6af0c747341d4c15f0c9726"
     );
     expect(evidence.sourceHashes["lib/speaker-discovery.js"]).toBe(
       "56c18364517fcd663f0b09217dba37828824acab04a2b6ceef18dcda6ac526a4"

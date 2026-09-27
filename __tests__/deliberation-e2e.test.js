@@ -874,6 +874,58 @@ const DIAG_RETRY_REASON_PATTERNS = Object.freeze([
 const DIAG_RETRY_REASON_ENUM = Object.freeze([
   ...DIAG_RETRY_REASON_PATTERNS.map(([label]) => label), 'unextracted',
 ]);
+// The TYPED provenance the writer now emits beside the free-text `reason:`
+// field, recorded at the site that RAISED the error rather than re-derived
+// from its message (lib/transport.js, `describeCliFailure` /
+// `formatCliFailureProvenance`):
+//   AUTO_HANDOFF_RETRY: <id> | speaker: <s> | attempt <n>/<m>
+//                     | origin: <o> code: <c> | reason: <cause> | retrying in <d>ms
+//
+// This exists because the `reason:` field cannot separate two of the causes it
+// carries. `DIAG_RETRY_REASON_PATTERNS` matches the writer's own CONSTRUCTED
+// literals; a raw stdin `error` message and a raw child `error` message are
+// neither — they are Node's own free text, identically shaped — so both land
+// in `other`, exactly as that table's comment already states.
+//
+// `other` is therefore a BUCKET, not a proof. It holds those two, and equally
+// any shape the table does not cover. Which causes actually occupied it in a
+// given run is precisely what was never measured, and these two fields are
+// what measure it. Nothing here asserts what a past run's `other` contained.
+//
+// Bracketed by writer literals on BOTH sides — the preceding `| attempt
+// <n>/<m>` and the following `| reason: ` — so neither capture can run past
+// its own field. (`String.match` takes the leftmost occurrence, so a session
+// id or speaker name would have to contain a complete counterfeit
+// `attempt … origin … code … | reason: ` run to be read in its place; both
+// captures still pass through the closed tables below, so even that yields a
+// label, never text.)
+const DIAG_RETRY_PROVENANCE_RE =
+  /\| attempt \d{1,9}\/\d{1,9} \| origin: ([a-z_]{1,24}) code: ([A-Za-z0-9_]{1,32}) \| reason: /;
+// The writer's closed origin set, mirrored. `unknown` is a WRITER value with
+// its own meaning — the error that reached the writer's catch carried no
+// origin tag, so the site that raised it is not known — and is deliberately
+// kept distinct from the `none` diagEnum yields when a record carried no
+// provenance field at all (one written before this field existed, or a
+// failure the transport reported without one). Neither means "failed for an
+// unsupported reason"; both mean UNPROVEN, for two different reasons.
+const DIAG_RETRY_ORIGIN_ENUM = Object.freeze([
+  'stdin_error', 'child_error', 'timeout', 'exit', 'unknown',
+]);
+// Mirror of the writer's own allowlist (lib/transport.js
+// `CLI_FAILURE_CODE_ALLOWLIST`), plus the two labels below. The writer emits
+// the literal tokens `none` and `other` for "the error carried no code" and
+// "a code outside its allowlist"; they are RENAMED on the way in because
+// diagEnum already reserves both words — `none` for "field not present",
+// `other` for "present but unrecognised" — and reusing them would collapse
+// four distinct facts into two.
+const DIAG_RETRY_CODE_ENUM = Object.freeze([
+  'EPIPE', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
+  'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END',
+  'ERR_STREAM_ALREADY_FINISHED',
+  'ENOENT', 'EACCES', 'EPERM', 'EAGAIN', 'EBADF', 'EINVAL',
+  'EMFILE', 'ENFILE', 'ENOMEM', 'EIO', 'ESPIPE',
+  'absent', 'unlisted',
+]);
 
 /** A member of `allowed`, else `none` / `other`. Never the raw value. */
 function diagEnum(value, allowed) {
@@ -912,6 +964,34 @@ function diagRetryReason(line) {
     if (pattern.test(field[1])) return label;
   }
   return 'other';
+}
+
+/**
+ * The typed provenance of ONE AUTO_HANDOFF_RETRY line: `{ origin, code }`,
+ * each `null` when the line carries no provenance field.
+ *
+ * Both values are returned for diagEnum to close over the tables above — they
+ * are never emitted directly — so the only things that can leave here are a
+ * table label, `none` or `other`. Captured text is otherwise used solely as an
+ * equality subject.
+ *
+ * The writer's `none` / `other` code tokens are renamed to `absent` /
+ * `unlisted` so that four states stay separable downstream:
+ *   <CODE>     the error carried that allowlisted code;
+ *   absent     the error carried no code at all;
+ *   unlisted   it carried one, outside the writer's allowlist;
+ *   none       this record carried no provenance field (diagEnum, on null);
+ *   other      a provenance field was read but names no known token.
+ */
+function diagRetryProvenance(line) {
+  const field = line.match(DIAG_RETRY_PROVENANCE_RE);
+  if (!field) return { origin: null, code: null };
+  const rawCode = field[2];
+  let code;
+  if (rawCode === 'none') code = 'absent';
+  else if (rawCode === 'other') code = 'unlisted';
+  else code = rawCode;
+  return { origin: field[1], code };
 }
 
 /** Sorted `enum=count` pairs over `values`. Deterministic and order-free. */
@@ -960,6 +1040,8 @@ function diagHandoffEvents(homeDir) {
   const events = [];
   const reasons = [];
   const retryReasons = [];
+  const retryOrigins = [];
+  const retryCodes = [];
   const turnElapsed = [];
   let dedupLines = 0;
   let unparsedLines = 0;
@@ -994,7 +1076,19 @@ function diagHandoffEvents(homeDir) {
     // and counted itself in `dedup_lines` — so, exactly as before this field
     // existed, a collapsed repeat contributes no reason and stands for an
     // unknown number of occurrences.
-    if (event === 'AUTO_HANDOFF_RETRY') retryReasons.push(diagRetryReason(line));
+    if (event === 'AUTO_HANDOFF_RETRY') {
+      retryReasons.push(diagRetryReason(line));
+      // Read under the SAME exact-equality event gate as the reason above, and
+      // pushed unconditionally so all three lists stay one-entry-per-record: a
+      // record with no provenance contributes null to both, which diagEnum
+      // reports as `none`. A dedup summary reaches neither — its `[DEDUP]`
+      // level already failed the record grammar and it was counted in
+      // `dedup_lines` — so a collapsed repeat still stands for an unknown
+      // number of occurrences and contributes no origin and no code.
+      const provenance = diagRetryProvenance(line);
+      retryOrigins.push(provenance.origin);
+      retryCodes.push(provenance.code);
+    }
   }
   return [
     'runtime_log=present',
@@ -1005,6 +1099,16 @@ function diagHandoffEvents(homeDir) {
     // Counts only, over the closed label set. `none` here means no
     // AUTO_HANDOFF_RETRY record was parsed at all — never "no reason".
     `retry_reasons=${diagCounts(retryReasons, DIAG_RETRY_REASON_ENUM)}`,
+    // The same retries, counted by where the failure was RAISED rather than by
+    // what its message looked like. This is the field that separates the two
+    // causes `retry_reasons=other` cannot: `stdin_error` vs `child_error`.
+    // `unknown` = the error reached the writer's catch untagged; `none` = the
+    // record carried no provenance at all. Neither names a cause.
+    `retry_origins=${diagCounts(retryOrigins, DIAG_RETRY_ORIGIN_ENUM)}`,
+    // The allowlisted error code that accompanied each, or `absent` when the
+    // error carried none. An EPIPE claim — still unproven — would have to show
+    // up HERE, as an observed code on an observed origin, before it is a fact.
+    `retry_codes=${diagCounts(retryCodes, DIAG_RETRY_CODE_ENUM)}`,
     `turn_ok_elapsed_ms=${diagIntList(turnElapsed, DIAG_TURN_ELAPSED_LIMIT)}`,
     `dedup_lines=${dedupLines}`,
     `unparsed_lines=${unparsedLines}`,
