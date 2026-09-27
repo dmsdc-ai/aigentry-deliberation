@@ -215,14 +215,16 @@ afterEach(() => {
 // §1. WHAT THIS RUN ACTUALLY MEASURED
 // ─────────────────────────────────────────────────────────────────────────────
 describe('§1 composition of the bytes under test', () => {
-  it('records the analysed source hashes and the runtime, and asserts neither', () => {
+  it('records the analysed source hashes and the runtime; pins no hash, asserts only the declared Node floor', () => {
     expect(evidence.sourceHashes['lib/transport.js']).toMatch(/^[0-9a-f]{64}$/);
     expect(evidence.sourceHashes['__tests__/deliberation-e2e.test.js']).toMatch(/^[0-9a-f]{64}$/);
     evidence.notes.push(`node=${process.version}`);
     // A behavioural suite must not gate on a hash: every arm below has to fail
     // by observation on the old bytes, so the composition is RECORDED here and
     // asserted only where a text slice makes it load-bearing (§7).
-    expect(Number(process.versions.node.split('.')[0])).toBeGreaterThanOrEqual(20);
+    // The runtime floor is package.json `engines.node` (">=18"), which the CI
+    // matrix exercises on 18/20/22; this suite must not demand more than that.
+    expect(Number(process.versions.node.split('.')[0])).toBeGreaterThanOrEqual(18);
   });
 });
 
