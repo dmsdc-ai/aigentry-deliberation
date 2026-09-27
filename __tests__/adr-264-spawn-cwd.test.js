@@ -8,6 +8,16 @@ import os from 'os';
 import path from 'path';
 import { validateSpawnCwd, sanitizeSessionDirName, ensureSessionSubdir } from '../index.js';
 
+// An existing directory that is outside the configured prefixes. POSIX has
+// `/etc`; on win32 that path does not exist, so validateSpawnCwd returned
+// E_CWD_NOT_FOUND before it ever reached the allowlist check and the case
+// measured the wrong rejection. The system directory is the win32 equivalent:
+// present, and never under a mkdtemp root. The security semantic under test is
+// untouched — only the fixture's choice of an out-of-allowlist path is derived.
+const OUTSIDE_ALLOWLIST_DIR = process.platform === 'win32'
+  ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')
+  : '/etc';
+
 describe('ADR-264 §2.3 — validateSpawnCwd (M6 security matrix)', () => {
   let tmpRoot;
   let symlinkOutside;
@@ -37,8 +47,8 @@ describe('ADR-264 §2.3 — validateSpawnCwd (M6 security matrix)', () => {
   });
 
   it('rejects path outside allowedPrefixes with E_CWD_NOT_ALLOWED', () => {
-    // "/etc" exists on Darwin/Linux but is outside the configured prefixes.
-    const result = validateSpawnCwd('/etc', { allowedPrefixes: [tmpRoot] });
+    // Exists on this platform, but is outside the configured prefixes.
+    const result = validateSpawnCwd(OUTSIDE_ALLOWLIST_DIR, { allowedPrefixes: [tmpRoot] });
     expect(result.ok).toBe(false);
     expect(result.code).toBe('E_CWD_NOT_ALLOWED');
   });

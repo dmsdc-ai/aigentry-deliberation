@@ -1,0 +1,168 @@
+name: Upstream Runtime Monitor
+
+# cp1172br — the reduced native Unicode copy diagnostic, in its own lane.
+#
+# WHY THIS IS ITS OWN WORKFLOW (task #1172)
+# -----------------------------------------
+# This lane observes an UPSTREAM RUNTIME behaviour (`fs.cpSync` against a
+# non-ASCII destination segment). It is NOT a product gate:
+#
+#   * The product gate is `CI` / `Release` running `npm test`, which excludes
+#     exactly one file, `__tests__/native-unicode-copy.test.js`.
+#   * This workflow is the only place that file runs, via the explicit
+#     `npm run test:upstream` script, which inherits no exclusion.
+#
+# The separation is about ATTRIBUTION, not about tolerance. A red run here is a
+# real, visible, unmasked failure: this workflow stays RED until the upstream
+# behaviour changes or the diagnostic is retired by a reviewed decision. What it
+# no longer does is block the product's install / security / regression gates on
+# a defect that is not the product's.
+#
+# The actual installer copy caller (`copyFileIfExists` / `copyDirRecursive` ->
+# `fs.copyFileSync`, install.js:72-92) is covered by
+# `__tests__/installer-unicode.test.js`, which stays in the PRODUCT gate. Nothing
+# here substitutes for it.
+#
+# SHAPE PRESERVED FROM THE FORMER `ci.yml` JOB
+# --------------------------------------------
+# Same push/PR triggers, same windows-latest runner, same Node 20 and 22 matrix,
+# same `fail-fast: false`, same job and step timeouts, same plain-`node` raw
+# diagnostic BEFORE any install, same always-run Vitest comparison. No new
+# dependency, credential, permission or account.
+#
+# BRANCH / PR COVERAGE MOVED HERE FROM THE FORMER PRODUCT GATE
+# ------------------------------------------------------------
+# The former `ci.yml` job above was never the only place the diagnostic ran.
+# Baseline `npm test` was a bare `vitest run`, so it COLLECTED
+# `__tests__/native-unicode-copy.test.js` on every arm of the product matrix —
+# ubuntu / macos / windows x Node 18 / 20 / 22, NINE arms per push. Excluding
+# the file from the product gate would have silently dropped the ubuntu, macOS
+# and Node-18 arms, leaving only the two Windows arms above: the same
+# `fs.cpSync` behaviour appearing on Linux, macOS or Node 18 would then be
+# observed nowhere.
+#
+# `upstream-runtime-coverage` below restores those nine arms, unchanged in count
+# and composition, in this lane instead of the product gate, and the two Windows
+# raw-vs-Vitest comparisons above are likewise unchanged. So on a push to `main`
+# and on a pull request the diagnostic runs on the same arms as before, and only
+# WHICH workflow's verdict it carries has moved. The test file itself skips no OS
+# and no Node version (see its DELIBERATE NON-BEHAVIOURS header), so every arm
+# really executes it.
+#
+# TRIGGER COVERAGE IS NOT UNCHANGED — THE TAG LANE WAS DROPPED
+# ------------------------------------------------------------
+# Read the paragraph above as scoped to `main` pushes and pull requests, because
+# it is NOT true of every trigger. Baseline `npm test` was also the `test` job of
+# the tag-triggered `release.yml`, on ubuntu-latest / Node 20, so a `v*` tag push
+# collected the diagnostic there too — a third place it ran. That publication
+# gate now runs the excluding `npm test`, and this workflow triggers only on
+# `push` to `main` and `pull_request`, neither of which a tag push matches. No
+# tag-triggered monitor is provided here as a replacement, so at tag /
+# publication time the diagnostic is observed NOWHERE.
+#
+# That removal from the product's publication gate is the approved intent of the
+# separation, not an accident, and it is recorded here rather than worked around:
+# nothing below re-adds a tag trigger or otherwise re-couples the diagnostic to
+# publication. No claim is made that all trigger coverage is unchanged — only
+# that the nine branch/PR arms and the two Windows comparisons are preserved.
+# See docs/testing.md for the arm-by-arm accounting.
+#
+# The two jobs are not redundant: the Windows job answers "runtime or
+# Vitest-runtime contamination?" by running the raw builtin-only reproduction
+# before any install and comparing it side by side, on the two arms where the
+# defect was recorded. The coverage job answers "does this happen anywhere
+# else?" across the full former matrix. Neither substitutes for the other.
+#
+# NO FAILURE MASKING ANYWHERE
+# ---------------------------
+# No failure-tolerating key, no forced-success shell suffix, no forced zero
+# exit, no skip and no conditional that can turn a discrepancy into a green
+# run. See docs/testing.md for the enumerated list. The `if: always()`
+# below is the opposite of masking: it forces the comparison steps to run even
+# after a red raw diagnostic, so the side-by-side observation is always
+# collected. The raw step's own failure is already recorded and is never
+# downgraded by them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  native-unicode-copy-diagnostic:
+    name: cp1172br diagnostic (windows, node ${{ matrix.node }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # Builtin-only: deliberately runs BEFORE any install, so no dependency,
+      # loader or lifecycle script can be on its import path.
+      - name: Raw diagnostic (no runner, no dependencies)
+        timeout-minutes: 3
+        run: node scripts/diagnose-native-unicode-copy.mjs
+
+      # Comparison only. `if: always()` so a red raw diagnostic still yields the
+      # side-by-side Vitest observation.
+      - name: Install dependencies (for comparison step)
+        if: always()
+        run: npm ci
+
+      # The explicit upstream script. It names the diagnostic file directly and
+      # carries none of the product gate's exclusion, so it can never collapse
+      # to zero tests silently — Vitest exits non-zero when a named file matches
+      # nothing, and no tolerate-empty-run flag is supplied.
+      - name: Comparison — same case under Vitest
+        if: always()
+        timeout-minutes: 5
+        run: npm run test:upstream
+
+  # The nine arms the diagnostic lost when it left the product gate: the exact
+  # OS and Node lists `ci.yml`'s `test` job still uses, so this lane observes the
+  # upstream behaviour everywhere the product is tested — not only on the two
+  # Windows arms where it was first recorded.
+  #
+  # Deliberately the Vitest lane only. The raw builtin-only reproduction is the
+  # Windows job's contamination control above and is not duplicated here; the
+  # baseline coverage this job restores was Vitest coverage.
+  #
+  # Same explicit `npm run test:upstream` script, which carries none of the
+  # product gate's exclusion. No failure-tolerating key, no forced-success shell
+  # suffix, no skip: a discrepancy on any arm fails this job.
+  upstream-runtime-coverage:
+    name: cp1172br coverage (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Diagnostic under Vitest
+        timeout-minutes: 5
+        run: npm run test:upstream
