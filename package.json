@@ -47,9 +47,10 @@
   ],
   "scripts": {
     "start": "node index.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "prepublishOnly": "vitest run",
+    "test": "vitest run --exclude=__tests__/native-unicode-copy.test.js",
+    "test:watch": "vitest --exclude=__tests__/native-unicode-copy.test.js",
+    "test:upstream": "vitest run __tests__/native-unicode-copy.test.js",
+    "prepublishOnly": "npm test",
     "postversion": "node install.js",
     "release:patch": "npm version patch && git push && git push --tags",
     "release:minor": "npm version minor && git push && git push --tags",
