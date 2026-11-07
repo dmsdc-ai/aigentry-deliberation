@@ -79,7 +79,7 @@ const E2E_SRC = path.join(REPO, '__tests__', 'deliberation-e2e.test.js');
 // reader has no provenance to extract, and a suite that quietly passed there
 // would be asserting nothing.
 const E2E_READER_SOURCE_SHA256 =
-  '95c4d9c1b9a26589988023ee6957498838c373abfa3b3eeda3038a23dc1437c0';
+  '25c5af5d4fe2d097e1834c9dfd0d938a7c9237bec0242aac68681143b58a7fae';
 
 // Recorded, NOT pinned: the transport bytes every behavioural arm below
 // measured. Deliberately not an assertion — §4-§6 must fail on the old bytes by

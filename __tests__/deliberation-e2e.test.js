@@ -575,13 +575,29 @@ function writeStubCli(dir, name) {
   // Behaviour-bearing stub: unlike the inert discovery stubs it emits a
   // response line, because these cases assert on turn content.
   //
-  // Stub must exit immediately without reading stdin. The gemini invocation path
-  // (spawn('gemini', ['-p', prompt])) never closes the child's stdin, so a stub
-  // that blocks on `cat` would hang indefinitely. Claude/codex invocations close
-  // stdin after writing, but we keep the stub uniform and stdin-agnostic.
+  // stdin contract mirrors the product invocation per speaker
+  // (lib/transport.js runCliAutoTurnCore / synthesis switch):
+  //   * claude / codex: the prompt is written to stdin and stdin is then
+  //     ended (writeStdinPrompt). The product treats an EPIPE on that write
+  //     as a failed turn by design (stdin_error -> AUTO_HANDOFF_RETRY with a
+  //     10000ms delay). A stub that exits WITHOUT reading races that write:
+  //     when it exits first the write hits a closed pipe and the turn fails
+  //     (CI 42336211995 Ubuntu22: retry_origins=stdin_error=3 EPIPE=3). So
+  //     these stubs drain stdin to EOF before answering, as the real CLIs do.
+  //     The drain uses shell builtins only (no `cat`), so it needs nothing
+  //     from PATH. It terminates because every product spawn of these names
+  //     either ends stdin or passes stdio 'ignore'.
+  //   * gemini / others: the prompt travels in argv and stdin is never
+  //     closed, so these stubs must NOT read stdin (a read would never see
+  //     EOF and would hang).
+  // The win32 body is unchanged (Windows path UNVERIFIED, see helper).
+  const drainsStdin = name === 'claude' || name === 'codex';
+  const drain = drainsStdin
+    ? `while IFS= read -r _stub_line || [ -n "$_stub_line" ]; do :; done\n`
+    : '';
   const body = process.platform === 'win32'
     ? `@echo off\r\necho [STUB] ${name} response [AGREE]\r\nexit /b 0\r\n`
-    : `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
+    : `#!/bin/sh\n${drain}echo '[STUB] ${name} response [AGREE]'\nexit 0\n`;
   writeStub(dir, name, body);
 }
 
