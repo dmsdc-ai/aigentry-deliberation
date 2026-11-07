@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import { fixtureLocalAppData, getFixtureInstallDir } from './helpers/cli-discovery-fixture.js';
 
 // Doctor runtime.log footprint check (v0.0.45):
 // - WARN at >= 50 MB, ERROR at >= 500 MB (env-configurable)
@@ -12,8 +13,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 const REPO_ROOT = process.cwd();
 const DOCTOR_ENTRY = path.join(REPO_ROOT, 'doctor.js');
 
+// Platform-correct, mirroring index.js:296-299. The POSIX-only literal this
+// replaced seeded runtime.log where doctor.js never looks on win32 (it resolves
+// LOCALAPPDATA first), so the footprint section was simply absent.
 function getInstallDir(homeDir) {
-  return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
+  return getFixtureInstallDir(homeDir);
 }
 
 function mkHome() {
@@ -42,6 +46,14 @@ function runDoctor(homeDir, env = {}) {
         ...process.env,
         HOME: homeDir,
         ...env,
+        // Forced LAST, after the caller env merge. The spread above carries
+        // the host LOCALAPPDATA on a Windows runner and doctor.js resolves it
+        // before falling back to HOME, so an override here would read a tree
+        // outside the owned home. Value equals the product own HOME fallback,
+        // so POSIX is unaffected.
+        ...(process.platform === 'win32'
+          ? { LOCALAPPDATA: fixtureLocalAppData(homeDir) }
+          : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

@@ -1,0 +1,81 @@
+name: CLI Process Calibration Probe
+
+# np1172jc — the win32 ENOENT-shape calibration probe, in its own ephemeral lane.
+#
+# WHY THIS IS ITS OWN WORKFLOW (task #1172)
+# -----------------------------------------
+# `input/review-r2.md` §4 leaves exactly one question undecidable from source, and
+# only a real Windows kernel can answer it: whether `GetFileAttributesW` fails for
+# a final path component containing `|`. This lane runs
+# `scripts/probe-cli-process-enoent-calibration.mjs` to observe that, and nothing
+# else.
+#
+# It is NOT a product gate, and nothing is gated on it:
+#
+#   * `ci.yml` is the product gate (`npm test`). It is untouched by this file and
+#     must not be made to depend on this workflow.
+#   * `upstream-runtime.yml` owns the separate `fs.cpSync` diagnostic. Also
+#     untouched: this probe is a different question with a different operand.
+#
+# Per the approval of 2026-09-27T06:26:01.456Z, calibration is validated in
+# disposable Windows CI FIRST and product adoption follows only on native
+# evidence. `lib/cli-process.js` is byte-unchanged (`f29f71b3…`) by this revision,
+# so there is no product behaviour here for this workflow to gate.
+#
+# TRIGGERS — DELIBERATELY NARROW
+# ------------------------------
+# `push` to `release/1172-delegated-selection-20260925` plus `workflow_dispatch`.
+# This workflow does not yet exist on the default branch, so a `main`-scoped
+# trigger would never fire for it; the release branch is where the probe lives and
+# where its evidence is needed. `workflow_dispatch` makes a re-measurement
+# explicit rather than requiring a synthetic push. No `pull_request` trigger, no
+# tag trigger, no schedule: this is a one-question probe, not a monitor.
+#
+# NO FAILURE MASKING
+# ------------------
+# No `continue-on-error`, no forced-success shell suffix, no forced zero exit, no
+# skip, and no conditional that can turn a mismatch into a green run. A red run
+# here means the approved literal did NOT behave as an unresolvable command on
+# that arm — which is precisely the evidence being collected, and it must stay
+# visible. The probe also exits non-zero on any non-`win32` platform, so a green
+# run can only ever be a real Windows observation.
+#
+# NO INSTALL, NO SECRETS, NO WRITE
+# --------------------------------
+# The probe imports Node builtins only, so `npm ci` is not needed and is not run:
+# no dependency, loader or lifecycle script is ever on its import path. Read-only
+# `contents: read`, no secret is referenced, and the job writes nothing outside
+# the ephemeral runner's own temp directory, which the probe itself removes.
+
+on:
+  push:
+    branches: [release/1172-delegated-selection-20260925]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  enoent-calibration-probe:
+    name: np1172jc probe (windows, node ${{ matrix.node }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The exact pinned tags the prior validation measured on, so this native
+        # result lines up one-to-one with it. Both arms run even if one fails.
+        node: ["20.20.0", "22.23.2"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Builtin-only, so there is deliberately no install step before it.
+      - name: Native ENOENT-shape calibration probe
+        timeout-minutes: 3
+        run: node scripts/probe-cli-process-enoent-calibration.mjs
