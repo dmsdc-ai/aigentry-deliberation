@@ -4,6 +4,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTeleptySynthesisEnvelope } from '../index.js';
+// The vector the product means to send to codex, from the product itself, so
+// the argv oracle below compares against one definition instead of a copy.
+import { cliDispatchArgs } from '../lib/speaker-discovery.js';
 
 const REPO_ROOT = process.cwd();
 const SERVER_ENTRY = path.join(REPO_ROOT, 'index.js');
@@ -609,17 +612,41 @@ function expectPromptChannels(archiveText, speakers) {
 // this change. On POSIX it is passed through untouched and must be identical,
 // which is exactly what makes the assertion portable.
 function expectCodexArgvFidelity(archiveText) {
+  // Read the Debate Log section ONLY. `## Synthesis` can be the documented
+  // fallback (lib/transport.js runAutoHandoff), which renders every turn as
+  // `**<speaker>**: <content.substring(0, 200)>...` — and the codex turn's
+  // content is 235 characters, so that copy of this very line is cut mid-JSON
+  // and carries a literal `...`. Scanning the whole archive therefore hits a
+  // truncated copy first (Synthesis is written before the Debate Log) and
+  // `JSON.parse` dies on it. The Debate Log is the one place `lib/session.js`
+  // stateToMarkdown writes `${entry.content}` verbatim, so it is the only
+  // honest source for a byte-level assertion. `lastIndexOf` because the marker
+  // must be the archive's own heading, not a line of CLI output.
+  const marker = '## Debate Log';
+  const at = archiveText.lastIndexOf(marker);
+  expect(at, `archive has no "${marker}" section`).toBeGreaterThanOrEqual(0);
+  const debateLog = archiveText.slice(at + marker.length);
+
   const prefix = '[STUB_ARGV] codex ';
-  const lines = archiveText.split('\n')
+  const lines = debateLog.split('\n')
     .map(l => l.trim())
     .filter(l => l.startsWith(prefix));
-  expect(lines.length).toBeGreaterThanOrEqual(2); // once per round
+  expect(lines.length, debateLog).toBeGreaterThanOrEqual(2); // once per round
+  // Element-for-element, order and count included — not set membership of a few
+  // elements, which would let a dropped, duplicated, reordered or mangled
+  // argument through (R3-07). `cliDispatchArgs('codex')` is what
+  // runCliAutoTurnCore builds (getCliExecArgs + the hint's defaultModel), so
+  // this also checks on every leg that the vector liveness models is the vector
+  // the dispatcher really sent.
+  const expected = cliDispatchArgs('codex');
+  // …and that the vector still contains the arguments that make this a
+  // round-trip proof at all: quotes, `=` and the 2n+1-backslash rule, escaped
+  // twice on Windows and passed through untouched on POSIX.
+  expect(expected).toContain('approval_policy="never"');
+  expect(expected).toContain('sandbox_mode="read-only"');
   for (const line of lines) {
     const argv = JSON.parse(line.slice(prefix.length));
-    expect(argv).toContain('approval_policy="never"');
-    expect(argv).toContain('sandbox_mode="read-only"');
-    expect(argv).toContain('exec');
-    expect(argv).toContain('-');
+    expect(argv).toEqual(expected);
   }
 }
 

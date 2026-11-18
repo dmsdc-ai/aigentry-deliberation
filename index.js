@@ -1199,7 +1199,13 @@ server.tool(
       if (!(await checkCliLiveness(s))) {
         // A pre-spawn refusal (E_CLI_*) is permanent on this platform, not a
         // transient "not running right now", so say which it is and why.
-        nonLiveCli.push({ speaker: s, refusal: cliDispatchRefusal(s) });
+        //
+        // Only for speakers that are actually CLIs: this list is
+        // `speakerOrder` minus `web-*`, so it also holds telepty session ids
+        // and manual speaker names, for which a CLI refusal code would be a
+        // misleading answer to a question that was never asked (R3-11).
+        const isCli = Boolean(CLI_INVOCATION_HINTS[s]);
+        nonLiveCli.push({ speaker: s, refusal: isCli ? cliDispatchRefusal(s) : null });
       }
     }
     // Warn but proceed — user explicitly selected these speakers.

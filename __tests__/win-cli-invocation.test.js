@@ -22,8 +22,11 @@ import {
   buildWindowsCliInvocation,
   buildCliInvocation,
   cliDispatchRefusal,
+  cliDispatchArgs,
+  getCliExecArgs,
   checkCliLiveness,
   terminateCliProcess,
+  abandonCliProcess,
   buildTreeKillCommand,
   isPermanentCliFailure,
   isWindowsFullyQualifiedPath,
@@ -31,7 +34,7 @@ import {
   CLI_INVOCATION_FAILURE_CODES,
   CLI_INVOCATION_HINTS,
 } from '../lib/speaker-discovery.js';
-import { invokeCliReviewer } from '../lib/transport.js';
+import { invokeCliReviewer, isPermanentTurnFailure, boundReviewerStderr } from '../lib/transport.js';
 
 const INTERP = String.raw`C:\Windows\System32\cmd.exe`;
 const CODEX_SHIM = String.raw`C:\tools\codex.cmd`;
@@ -246,7 +249,10 @@ describe('buildWindowsCliInvocation — .cmd/.bat shim', () => {
     expect(inv.ok).toBe(true);
     expect(inv.file).toBe(INTERP);
     expect(inv.args.slice(0, 4)).toEqual(['/d', '/s', '/v:off', '/c']);
-    expect(inv.args[4]).toBe(String.raw`"^"C:\tools\codex.cmd^" ^^^"exec^^^" ^^^"-^^^""`);
+    // `--prompt` is on the line and `hi` is not: for a stdinMode CLI only the
+    // prompt TEXT moves to stdin, its flags stay where the CLI expects them
+    // (R3-06 — before r4 the whole of promptArgs was dropped here).
+    expect(inv.args[4]).toBe(String.raw`"^"C:\tools\codex.cmd^" ^^^"exec^^^" ^^^"-^^^" ^^^"--prompt^^^""`);
     // argv0 is the quoted interpreter: windowsVerbatimArguments makes libuv
     // join argv without quoting anything, and cmd.exe parses its own switches
     // out of that line.
@@ -284,6 +290,45 @@ describe('buildWindowsCliInvocation — .cmd/.bat shim', () => {
     expect(inv.promptMovedToStdin).toBe(true);
     expect(inv.args[4]).not.toContain('topic line');
     expect(inv.args[4]).not.toContain('echo pwned');
+  });
+
+  it('keeps a stdin CLI\'s prompt FLAGS on the line and moves only the text', () => {
+    // Dropping the flags is the same failure the builder refuses to create for
+    // every other CLI — the CLI is launched without arguments it was given. The
+    // dispatch sites build flags and text into one array, so the builder is the
+    // only place that can separate them (R3-06).
+    const prompt = 'topic line\nsecond line & echo pwned';
+    const inv = buildWindowsCliInvocation('codex', ['exec'], {
+      promptArgs: ['--prompt', '--format', 'text', prompt],
+      promptText: prompt,
+      resolvedPath: CODEX_SHIM,
+      interpreter: INTERP,
+    });
+    expect(inv.ok).toBe(true);
+    expect(inv.args[4]).toBe(
+      String.raw`"^"C:\tools\codex.cmd^" ^^^"exec^^^" ^^^"--prompt^^^" ^^^"--format^^^" ^^^"text^^^""`,
+    );
+    expect(inv.args[4]).not.toContain('topic line');
+    expect(inv.args[4]).not.toContain('echo pwned');
+    expect(inv.stdinPrompt).toBe(prompt);
+    expect(inv.promptMovedToStdin).toBe(true);
+  });
+
+  it('runs the kept flags through the same fail-closed guard as `args`', () => {
+    for (const [flag, code] of [
+      ['--pro%mpt', 'E_CLI_ARG_META'],
+      ['--pro\u001ampt', 'E_CLI_ARG_META'],
+      ['--pro\nmpt', 'E_CLI_ARG_NEWLINE'],
+    ]) {
+      const inv = buildWindowsCliInvocation('codex', ['exec'], {
+        promptArgs: [flag, 'prompt text'],
+        promptText: 'prompt text',
+        resolvedPath: CODEX_SHIM,
+        interpreter: INTERP,
+      });
+      expect(inv.ok, flag).toBe(false);
+      expect(inv.code).toBe(code);
+    }
   });
 
   it('refuses a CLI whose prompt must be an argv element instead of dropping its flags', () => {
@@ -333,6 +378,15 @@ describe('buildWindowsCliInvocation — .cmd/.bat shim', () => {
       // of the line — including the closing quote `/s` strips — is lost below
       // this layer and the remainder is re-parsed with unbalanced quotes.
       ['a\u0000b', 'E_CLI_ARG_META'],
+      // Every other C0 control is refused for the same reason it cannot be
+      // argued about: 0x1A is cmd.exe's batch end-of-file, 0x0B/0x0C are
+      // whitespace cmd's tokeniser may split on but CommandLineToArgvW does
+      // not, and none of them can be escaped by a caret (R3-10).
+      ['a\u001ab', 'E_CLI_ARG_META'],
+      ['a\u000bb', 'E_CLI_ARG_META'],
+      ['a\u000cb', 'E_CLI_ARG_META'],
+      ['a\u0007b', 'E_CLI_ARG_META'],
+      ['a\u001bb', 'E_CLI_ARG_META'],
       ['a\nb', 'E_CLI_ARG_NEWLINE'],
       ['a\rb', 'E_CLI_ARG_NEWLINE'],
     ];
@@ -391,6 +445,8 @@ describe('buildWindowsCliInvocation — .cmd/.bat shim', () => {
       String.raw`C:\%TMP%\cmd.exe`,     // percent expansion runs before carets
       String.raw`C:\a!b\cmd.exe`,
       'C:\\a\tb\\cmd.exe',
+      'C:\\a\u001ab\\cmd.exe',          // any C0 control, not just the four named
+      'C:\\a\u0000b\\cmd.exe',
       String.raw`C:\a"b\cmd.exe`,       // argv[0] is quoted, not caret-escaped
     ]) {
       const inv = buildWindowsCliInvocation('codex', ['exec'], {
@@ -494,6 +550,62 @@ describe('cliDispatchRefusal — liveness asks the question the dispatcher will 
       expect(cliDispatchRefusal('gemini', { platform, resolvedPath: GEMINI_SHIM })).toBeNull();
     }
   });
+
+  // The probe has to ask with the arguments the dispatch will really put on the
+  // line. Three of the eight refusal codes are decided from `args` alone, so a
+  // probe with an empty `args` answers for five of eight and the other three
+  // stay invisible to discovery — R2-01's shape, narrowed (R3-01).
+  it('models the arguments the dispatcher sends, per CLI', () => {
+    expect(cliDispatchArgs('codex')).toEqual(getCliExecArgs('codex', CLI_INVOCATION_HINTS.codex.defaultModel));
+    expect(cliDispatchArgs('codex')).toEqual([
+      'exec', '--ephemeral',
+      '-c', 'approval_policy="never"',
+      '-c', 'sandbox_mode="read-only"',
+      '-c', 'model_reasoning_effort="low"',
+      '-m', 'gpt-5.4',
+      '-',
+    ]);
+    expect(cliDispatchArgs('claude')).toEqual(['-p', '--output-format', 'text']);
+    // gemini's model args are empty while defaultModel is null, and the CLIs
+    // that carry everything in promptArgs put nothing on the line.
+    expect(cliDispatchArgs('gemini')).toEqual([]);
+    expect(cliDispatchArgs('grok')).toEqual([]);
+    expect(cliDispatchArgs('no-such-cli')).toEqual([]);
+  });
+
+  it('reaches the three refusals that are decided from `args` alone', () => {
+    for (const [args, code] of [
+      [['-c', 'a%b'], 'E_CLI_ARG_META'],
+      [['-c', 'a!b'], 'E_CLI_ARG_META'],
+      [['-c', 'a\u001ab'], 'E_CLI_ARG_META'],
+      [['-c', 'a\nb'], 'E_CLI_ARG_NEWLINE'],
+      [['a'.repeat(9000)], 'E_CLI_ARG_TOO_LONG'],
+    ]) {
+      const refusal = cliDispatchRefusal('codex', {
+        platform: 'win32', resolvedPath: CODEX_SHIM, interpreter: INTERP, args,
+      });
+      expect(refusal?.code, JSON.stringify(args)).toBe(code);
+    }
+  });
+
+  it('uses the real vector by default, not an empty one', () => {
+    // A shim path that fits on the line by itself but not once codex's own 11
+    // arguments are escaped onto it: with `args: []` the probe says
+    // "dispatchable", with the vector the dispatcher actually sends it does not.
+    const longShim = `C:\\${'a'.repeat(7963)}\\codex.cmd`;
+    const withEmptyArgs = cliDispatchRefusal('codex', {
+      platform: 'win32', resolvedPath: longShim, interpreter: INTERP, args: [],
+    });
+    expect(withEmptyArgs).toBeNull();
+    const withDispatchArgs = cliDispatchRefusal('codex', {
+      platform: 'win32', resolvedPath: longShim, interpreter: INTERP,
+    });
+    expect(withDispatchArgs?.code).toBe('E_CLI_ARG_TOO_LONG');
+    // …and the ordinary shim path is still dispatchable with those same args.
+    expect(cliDispatchRefusal('codex', {
+      platform: 'win32', resolvedPath: CODEX_SHIM, interpreter: INTERP,
+    })).toBeNull();
+  });
 });
 
 describe('isPermanentCliFailure — a pre-spawn refusal must not be retried', () => {
@@ -528,6 +640,69 @@ describe('isPermanentCliFailure — a pre-spawn refusal must not be retried', ()
     expect(isPermanentCliFailure('')).toBe(false);
     expect(isPermanentCliFailure(null)).toBe(false);
     expect(isPermanentCliFailure(undefined)).toBe(false);
+  });
+});
+
+describe('isPermanentTurnFailure — the retry decision reads a field, not prose', () => {
+  // The failure text of a turn can be `CLI exit code N: <child stderr>`, and
+  // child stderr is CLI- and model-influenced. Deciding "permanent" by looking
+  // for E_CLI_* codes in that text lets a process the deliberation is talking
+  // to suppress the retry loop and have a platform refusal recorded that never
+  // happened, on every platform (R3-02).
+  it('trusts the structured flag', () => {
+    expect(isPermanentTurnFailure({ ok: false, permanent: true, error: 'anything' })).toBe(true);
+    expect(isPermanentTurnFailure({ ok: false, permanent: false, error: 'anything' })).toBe(false);
+    expect(isPermanentTurnFailure({ ok: false, error: 'anything' })).toBe(false);
+    expect(isPermanentTurnFailure({})).toBe(false);
+    expect(isPermanentTurnFailure(null)).toBe(false);
+    expect(isPermanentTurnFailure(undefined)).toBe(false);
+  });
+
+  it('ignores a refusal code that only appears in text a child could have printed', () => {
+    const fromStderr = {
+      ok: false,
+      error: 'CLI exit code 1: upstream rejected (E_CLI_NOT_FOUND in cache key)',
+    };
+    // The text test says yes — which is why the decision must not use it…
+    expect(isPermanentCliFailure(fromStderr.error)).toBe(true);
+    // …and the decision says no, because nothing structural marked it.
+    expect(isPermanentTurnFailure(fromStderr)).toBe(false);
+  });
+
+  it('does not treat a blocked transport or a timeout as permanent', () => {
+    expect(isPermanentTurnFailure({ ok: false, blocked: true, error: 'self_turn' })).toBe(false);
+    expect(isPermanentTurnFailure({ ok: false, error: 'CLI timeout (180s)' })).toBe(false);
+  });
+});
+
+describe('boundReviewerStderr — the bound maxBuffer used to provide', () => {
+  // The base passed `maxBuffer: 10 * 1024 * 1024`, which bounded stdout AND
+  // stderr; after the spawn rewrite stderr had no bound at all, so a reviewer
+  // CLI that streams to stderr for the whole deadline grew the heap (R3-03).
+  it('keeps the retained text bounded however many chunks arrive', () => {
+    let stderr = '';
+    for (let i = 0; i < 64; i += 1) stderr = boundReviewerStderr(stderr, 'x'.repeat(1024));
+    expect(stderr.length).toBe(4096);
+  });
+
+  it('keeps the HEAD, so the first 500 characters still mean what they meant', () => {
+    const chunks = ['first chunk: the real error\n', 'y'.repeat(100000), 'tail'];
+    let bounded = '';
+    let unbounded = '';
+    for (const chunk of chunks) {
+      bounded = boundReviewerStderr(bounded, chunk);
+      unbounded += chunk;
+    }
+    expect(bounded.slice(0, 500)).toBe(unbounded.slice(0, 500));
+    expect(bounded.length).toBeLessThanOrEqual(4096);
+  });
+
+  it('clips a single oversized chunk and stops appending once full', () => {
+    expect(boundReviewerStderr('', 'z'.repeat(99999)).length).toBe(4096);
+    const full = 'a'.repeat(4096);
+    expect(boundReviewerStderr(full, 'ignored')).toBe(full);
+    expect(boundReviewerStderr(undefined, undefined)).toBe('');
+    expect(boundReviewerStderr('ab', 'cd', 3)).toBe('abc');
   });
 });
 
@@ -711,6 +886,67 @@ describe('terminateCliProcess', () => {
     const calls = treeKill({ pid: undefined, kill: (sig) => signals.push(sig) }, fakeKiller());
     expect(calls).toHaveLength(0);
     expect(signals).toEqual(['SIGTERM']);
+  });
+});
+
+describe('abandonCliProcess — what both async deadlines do', () => {
+  // The deadline has to close the TREE, not the interpreter it holds (R2-02),
+  // and escalate at most once, only if the child survived (R3-05). Both
+  // deadlines call this one function, so the wiring is driven here instead of
+  // being visible only by reading the two call sites (R3-08).
+  const run = (child, options = {}) => {
+    const calls = [];
+    const timers = [];
+    const timer = abandonCliProcess(child, {
+      terminate: (c, opts) => calls.push(opts),
+      timerFn: (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; },
+      ...options,
+    });
+    return { calls, timers, timer };
+  };
+  const liveChild = () => ({ pid: 4242, exitCode: null, signalCode: null });
+
+  it('closes the tree immediately, carrying viaInterpreter', () => {
+    const { calls, timers } = run(liveChild(), { viaInterpreter: true });
+    expect(calls).toEqual([{ viaInterpreter: true }]);
+    expect(timers).toHaveLength(1);
+    expect(timers[0].ms).toBe(2000);
+  });
+
+  it('escalates once, with force, when the child is still alive', () => {
+    const child = liveChild();
+    const { calls, timers } = run(child, { viaInterpreter: true });
+    timers[0].fn();
+    expect(calls).toEqual([{ viaInterpreter: true }, { viaInterpreter: true, force: true }]);
+  });
+
+  it('does not escalate against a child that has already exited', () => {
+    const exited = { pid: 4242, exitCode: 0, signalCode: null };
+    const { calls, timers } = run(exited, { viaInterpreter: true });
+    timers[0].fn();
+    expect(calls).toEqual([{ viaInterpreter: true }]);
+
+    const killed = { pid: 4242, exitCode: null, signalCode: 'SIGTERM' };
+    const second = run(killed, { viaInterpreter: true });
+    second.timers[0].fn();
+    expect(second.calls).toEqual([{ viaInterpreter: true }]);
+  });
+
+  it('passes viaInterpreter: false through unchanged, and honours an explicit grace', () => {
+    const { calls, timers } = run(liveChild(), { graceMs: 5000 });
+    expect(calls).toEqual([{ viaInterpreter: false }]);
+    expect(timers[0].ms).toBe(5000);
+    timers[0].fn();
+    expect(calls).toEqual([{ viaInterpreter: false }, { viaInterpreter: false, force: true }]);
+  });
+
+  it('unrefs the escalation timer so it cannot hold the event loop open', () => {
+    let unrefCalled = false;
+    abandonCliProcess(liveChild(), {
+      terminate: () => {},
+      timerFn: () => ({ unref() { unrefCalled = true; } }),
+    });
+    expect(unrefCalled).toBe(true);
   });
 });
 
