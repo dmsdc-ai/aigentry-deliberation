@@ -589,6 +589,12 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
   const responses = new Map();
   let stdoutBuffer = '';
   let stderrBuffer = '';
+  // The server is an MCP stdio process that does its auto-handoff work in the
+  // background, so a crash or a silent `process.exit(0)` mid-deliberation shows
+  // up only as "nothing ever happened". Record its exit so waitForArchive can
+  // report WHY the archive never arrived instead of just that it did not.
+  let serverExit = null;
+  child.on('exit', (code, signal) => { serverExit = { code, signal, at: Date.now() }; });
   child.stdout.on('data', (data) => {
     stdoutBuffer += data.toString();
     const lines = stdoutBuffer.split('\n');
@@ -633,6 +639,7 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     homeDir,
     child,
     stderr: () => stderrBuffer,
+    serverExit: () => serverExit,
     async callTool(name, args, timeoutMs = 10000) {
       const id = Math.floor(Math.random() * 1_000_000);
       send(id, 'tools/call', { name, arguments: args });
@@ -666,7 +673,51 @@ async function confirmSpeakers(harness, speakers) {
   return confirmedToken;
 }
 
-async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
+function listDirSafe(dir) {
+  try {
+    return fs.readdirSync(dir).join(', ') || '(empty)';
+  } catch (err) {
+    return `(unreadable: ${err.code || err.message})`;
+  }
+}
+
+function tail(text, maxChars) {
+  const value = String(text || '');
+  if (!value) return '(empty)';
+  return value.length <= maxChars ? value : `...(truncated)...\n${value.slice(-maxChars)}`;
+}
+
+// The archive is produced by runAutoHandoff, which runs fire-and-forget inside
+// the MCP server. Every failure path in there logs to the server's own
+// runtime.log and nothing else: transport.js runAutoHandoff swallows into
+// AUTO_HANDOFF_ERROR, and index.js routes uncaughtException/unhandledRejection
+// to the same file (exiting outright for EPIPE-shaped errors). None of that
+// reaches the test runner, which is why a dead handoff looked for months like
+// a bare "timeout waiting for archive" with no cause attached. Attach the
+// server-side evidence to the failure so CI prints the actual first error.
+function describeArchiveTimeout({ homeDir, project, sessionId, timeoutMs, harness }) {
+  const stateDir = getProjectStateDir(homeDir, project);
+  const runtimeLog = path.join(getInstallDir(homeDir), 'runtime.log');
+  const exit = harness?.serverExit?.() ?? null;
+  const lines = [
+    `timeout waiting for archive after ${timeoutMs}ms`,
+    `  session:        ${sessionId}`,
+    `  project:        ${project}`,
+    `  state dir:      ${stateDir}`,
+    `  sessions/:      ${listDirSafe(path.join(stateDir, 'sessions'))}`,
+    `  archive/:       ${listDirSafe(path.join(stateDir, 'archive'))}`,
+    `  server process: ${exit
+      ? `EXITED code=${exit.code} signal=${exit.signal} — the MCP server died mid-deliberation, so runAutoHandoff never reached synthesis/archive`
+      : 'still running'}`,
+    '  --- server runtime.log ---',
+    tail(fs.existsSync(runtimeLog) ? fs.readFileSync(runtimeLog, 'utf-8') : '', 4000),
+    '  --- server stderr ---',
+    tail(harness?.stderr?.() ?? '', 2000),
+  ];
+  return lines.join('\n');
+}
+
+async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000, harness = null) {
   const archiveDir = path.join(getProjectStateDir(homeDir, project), 'archive');
   const sessionFile = getSessionFile(homeDir, project, sessionId);
   const start = Date.now();
@@ -677,7 +728,7 @@ async function waitForArchive(homeDir, project, sessionId, timeoutMs = 25000) {
     }
     await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error('timeout waiting for archive');
+  throw new Error(describeArchiveTimeout({ homeDir, project, sessionId, timeoutMs, harness }));
 }
 
 function parseArchiveLog(markdown) {
@@ -738,7 +789,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
     // Round bookkeeping: 3 speakers × 2 rounds = 6 log entries total
@@ -786,7 +837,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     });
     expect(getText(startResult)).toContain('Deliberation started');
 
-    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000);
+    const archivePath = await waitForArchive(harness.homeDir, project, sessionId, 25000, harness);
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
 
