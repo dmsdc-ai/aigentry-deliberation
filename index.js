@@ -115,6 +115,7 @@ import {
   resolveCliCandidates,
   checkCliLiveness,
   buildCliInvocation,
+  terminateCliProcess,
   discoverLocalCliSpeakers,
   detectCallerSpeaker,
   // URL / domain helpers
@@ -1988,13 +1989,12 @@ server.tool(
 
         const timer = setTimeout(() => {
           appendRuntimeLog("WARN", `CLI_TURN_TIMEOUT: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | timeout: ${effectiveTimeout}s | prompt_len: ${turnPrompt.length} | prior_turns: ${speakerPriorTurns}`);
-          try {
-            child.kill("SIGTERM");
-          } catch { /* ignore */ }
+          // On a Windows shim the child is the interpreter, so the CLI
+          // underneath it has to be terminated too (see terminateCliProcess).
+          const viaInterpreter = invocation.viaInterpreter === true;
+          terminateCliProcess(child, { viaInterpreter });
           forceKillTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch { /* ignore */ }
+            terminateCliProcess(child, { viaInterpreter, force: true });
           }, 5000);
           if (typeof forceKillTimer.unref === "function") {
             forceKillTimer.unref();
