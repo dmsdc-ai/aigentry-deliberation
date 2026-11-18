@@ -578,9 +578,10 @@ describe('deliberation e2e flows', () => {
 // dispatched for real, so they must be CLIs the product can actually dispatch on
 // the running platform. On Windows an npm-style CLI is a `.cmd` shim, and the
 // product refuses to put prompt text on a command-interpreter line
-// (E_CLI_PROMPT_ARGV_REQUIRED), so there the executing pair is the two CLIs that
-// take their prompt on stdin and `gemini` — whose branch passes the prompt in
-// argv — is the never-spawned caller instead.
+// (E_CLI_PROMPT_ARGV_REQUIRED) — and since r2 does not even advertise such a
+// CLI as live — so there the executing pair is the two CLIs that take their
+// prompt on stdin and `gemini`, whose branch passes the prompt in argv, is the
+// never-spawned caller instead.
 const SELF_TURN_ROLES = process.platform === 'win32'
   ? { caller: 'gemini', executors: ['claude', 'codex'] }
   : { caller: 'claude', executors: ['codex', 'gemini'] };
@@ -600,6 +601,28 @@ function expectPromptChannels(archiveText, speakers) {
   }
 }
 
+// codex is dispatched with `-c approval_policy="never"` (and two more of the
+// same shape), one argument carrying quotes, `=` and the characters the
+// 2n+1-backslash rule is about. On Windows that argument is escaped twice —
+// once for cmd.exe's own parse and once for the `.cmd` shim's `%*` re-parse —
+// so what the stub received is the only independent oracle for the escaping in
+// this change. On POSIX it is passed through untouched and must be identical,
+// which is exactly what makes the assertion portable.
+function expectCodexArgvFidelity(archiveText) {
+  const prefix = '[STUB_ARGV] codex ';
+  const lines = archiveText.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith(prefix));
+  expect(lines.length).toBeGreaterThanOrEqual(2); // once per round
+  for (const line of lines) {
+    const argv = JSON.parse(line.slice(prefix.length));
+    expect(argv).toContain('approval_policy="never"');
+    expect(argv).toContain('sandbox_mode="read-only"');
+    expect(argv).toContain('exec');
+    expect(argv).toContain('-');
+  }
+}
+
 function writeStubCli(dir, name, needle) {
   // The stub reports which channel the prompt arrived on, so the self_turn cases
   // can assert that it arrived at all: a build that dropped it, or put it in
@@ -608,6 +631,12 @@ function writeStubCli(dir, name, needle) {
   // (gemini, and the generic branch) never writes or closes the child's stdin,
   // so waiting for EOF would hang until the CLI timeout; it reports what has
   // arrived after a short grace period instead.
+  //
+  // It also echoes its argv verbatim as JSON. Channel presence alone cannot see
+  // a mangled argument: the needle is alphanumeric, while codex's real flags
+  // carry quotes, `=` and the 2n+1 backslash rule through BOTH cmd.exe passes on
+  // the Windows legs. Echoing argv makes those legs prove the round-trip they
+  // are already performing (expectCodexArgvFidelity below).
   const scriptPath = path.join(dir, `${name}.stub.cjs`);
   fs.writeFileSync(scriptPath, [
     `const NAME = ${JSON.stringify(name)};`,
@@ -620,7 +649,8 @@ function writeStubCli(dir, name, needle) {
     `  if (done) return;`,
     `  done = true;`,
     `  process.stdout.write('[STUB] ' + NAME + ' response [AGREE]\\n'`,
-    `    + '[PROMPT_CHANNEL] ' + NAME + ' argv=' + has(argv) + ' stdin=' + has(stdin) + '\\n');`,
+    `    + '[PROMPT_CHANNEL] ' + NAME + ' argv=' + has(argv) + ' stdin=' + has(stdin) + '\\n'`,
+    `    + '[STUB_ARGV] ' + NAME + ' ' + JSON.stringify(process.argv.slice(2)) + '\\n');`,
     `  process.exit(0);`,
     `};`,
     `process.stdin.setEncoding('utf8');`,
@@ -919,6 +949,9 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     // promises for it, and not on the other one. The stub reports what it
     // actually got, so a dropped or misrouted prompt fails here.
     expectPromptChannels(archiveText, executors);
+    // …and the argv it got must be byte-identical to what the product meant to
+    // send, which on Windows means both cmd.exe passes round-tripped.
+    expectCodexArgvFidelity(archiveText);
 
     // Status must be completed (archive includes completed status header)
     expect(archiveText).toMatch(/\*\*Status:\*\*\s+completed/);
@@ -969,6 +1002,7 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     expect(realSpeakers).toEqual([...executors, ...executors].sort());
 
     expectPromptChannels(archiveText, executors);
+    expectCodexArgvFidelity(archiveText);
 
     expect(archiveText).toMatch(/\*\*Status:\*\*\s+completed/);
   }, 45000);

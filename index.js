@@ -114,6 +114,7 @@ import {
   // CLI discovery
   resolveCliCandidates,
   checkCliLiveness,
+  cliDispatchRefusal,
   buildCliInvocation,
   terminateCliProcess,
   discoverLocalCliSpeakers,
@@ -1195,15 +1196,19 @@ server.tool(
     const cliSpeakersInOrder = speakerOrder.filter(s => !s.startsWith("web-"));
     const nonLiveCli = [];
     for (const s of cliSpeakersInOrder) {
-      if (!checkCliLiveness(s)) {
-        nonLiveCli.push(s);
+      if (!(await checkCliLiveness(s))) {
+        // A pre-spawn refusal (E_CLI_*) is permanent on this platform, not a
+        // transient "not running right now", so say which it is and why.
+        nonLiveCli.push({ speaker: s, refusal: cliDispatchRefusal(s) });
       }
     }
     // Warn but proceed — user explicitly selected these speakers.
     // cli_auto_turn will handle runtime errors per-turn.
     let detectWarningLiveness = "";
     if (nonLiveCli.length > 0) {
-      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
+      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(({ speaker: s, refusal }) => refusal
+        ? `  - \`${s}\` ❌ ${refusal.code}: ${refusal.reason}`
+        : `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
     }
 
     const participantMode = hasManualSpeakers
@@ -1870,8 +1875,15 @@ server.tool(
       return { content: [{ type: "text", text: t(`No CLI invocation info for speaker "${speaker}". This speaker is not registered in CLI_INVOCATION_HINTS.`, `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.`, state?.lang) }] };
     }
 
-    // Check CLI liveness
-    if (!checkCliLiveness(hint.cmd)) {
+    // Check CLI liveness. A refusal this platform decided before spawning
+    // anything is reported with its code and reason instead of a generic
+    // "not installed" — retrying it would produce the identical refusal.
+    if (!(await checkCliLiveness(hint.cmd))) {
+      const refusal = cliDispatchRefusal(hint.cmd);
+      if (refusal) {
+        appendRuntimeLog("ERROR", `CLI_TURN_UNEXECUTABLE: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | ${refusal.code}: ${refusal.reason}`);
+        return { content: [{ type: "text", text: t(`❌ CLI "${hint.cmd}" cannot be executed on this platform: ${refusal.code}\n\n${refusal.reason}`, `❌ 이 플랫폼에서 CLI "${hint.cmd}"를 실행할 수 없습니다: ${refusal.code}\n\n${refusal.reason}`, state?.lang) }] };
+      }
       return { content: [{ type: "text", text: t(`❌ CLI "${hint.cmd}" is not installed or cannot be executed.`, `❌ CLI "${hint.cmd}"가 설치되어 있지 않거나 실행할 수 없습니다.`, state?.lang) }] };
     }
 
@@ -2853,7 +2865,9 @@ server.tool(
       const reviewerTimeout = Math.min(softBudgetPerReviewer, remaining);
 
       const prompt = buildReviewPrompt(context, question, completedReviews);
-      const result = invokeCliReviewer(reviewer, prompt, reviewerTimeout);
+      // Async since r2: the reviewer deadline has to be enforced by us so a
+      // Windows shim's whole process tree can be closed at it (R2-02).
+      const result = await invokeCliReviewer(reviewer, prompt, reviewerTimeout);
 
       if (result.ok) {
         const entry = { reviewer, response: result.response };
