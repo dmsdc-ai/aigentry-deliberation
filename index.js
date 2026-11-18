@@ -114,6 +114,7 @@ import {
   // CLI discovery
   resolveCliCandidates,
   checkCliLiveness,
+  buildCliInvocation,
   discoverLocalCliSpeakers,
   detectCallerSpeaker,
   // URL / domain helpers
@@ -1941,26 +1942,49 @@ server.tool(
           reject(error);
         };
 
-        // Different invocation patterns per CLI
+        // Different invocation patterns per CLI. buildCliInvocation resolves the
+        // bare command name (a Windows `.cmd` shim is unreachable otherwise) and
+        // reports when the prompt has to travel on stdin instead of argv.
+        let invocation;
+        let stdinPrompt = null;
         switch (speaker) {
           case "claude":
-            child = spawn("claude", getCliExecArgs("claude"), spawnOpts);
-            writeCliStdin(child, turnPrompt);
+            invocation = buildCliInvocation("claude", getCliExecArgs("claude"));
+            stdinPrompt = turnPrompt;
             break;
           case "codex":
-            child = spawn("codex", getCliExecArgs("codex"), spawnOpts);
-            writeCliStdin(child, turnPrompt);
+            invocation = buildCliInvocation("codex", getCliExecArgs("codex"));
+            stdinPrompt = turnPrompt;
             break;
           case "gemini":
-            child = spawn("gemini", ["-p", turnPrompt], spawnOpts);
+            invocation = buildCliInvocation("gemini", [], {
+              promptArgs: ["-p", turnPrompt],
+              promptText: turnPrompt,
+            });
+            stdinPrompt = invocation.stdinPrompt;
             break;
           default: {
             // Generic: try command with prompt as argument
             const flags = hint.flags ? hint.flags.split(/\s+/) : [];
-            child = spawn(hint.cmd, [...flags, turnPrompt], spawnOpts);
+            invocation = buildCliInvocation(hint.cmd, [], {
+              promptArgs: [...flags, turnPrompt],
+              promptText: turnPrompt,
+            });
+            stdinPrompt = invocation.stdinPrompt;
             break;
           }
         }
+
+        if (!invocation.ok) {
+          appendRuntimeLog("ERROR", `CLI_TURN_UNEXECUTABLE: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | ${invocation.code}: ${invocation.reason}`);
+          rejectOnce(new Error(`CLI "${hint.cmd}" cannot be executed: ${invocation.code} — ${invocation.reason}`));
+          return;
+        }
+        if (invocation.promptMovedToStdin) {
+          appendRuntimeLog("WARN", `CLI_WIN_SHIM_STDIN: ${resolved} | speaker: ${speaker} | ${invocation.shimPath} | prompt moved from argv to stdin (a command-interpreter line cannot carry it)`);
+        }
+        child = spawn(invocation.file, invocation.args, { ...spawnOpts, ...invocation.options });
+        if (stdinPrompt !== null) writeCliStdin(child, stdinPrompt);
 
         const timer = setTimeout(() => {
           appendRuntimeLog("WARN", `CLI_TURN_TIMEOUT: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | timeout: ${effectiveTimeout}s | prompt_len: ${turnPrompt.length} | prior_turns: ${speakerPriorTurns}`);

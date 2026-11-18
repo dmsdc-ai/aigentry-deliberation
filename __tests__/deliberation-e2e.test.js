@@ -44,6 +44,27 @@ function getInstallDir(homeDir) {
   return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
 }
 
+// The server resolves its install dir from os.homedir() + LOCALAPPDATA
+// (index.js:287-291). os.homedir() reads $HOME on POSIX but USERPROFILE on
+// Windows, and the Windows install dir is rooted at LOCALAPPDATA, so HOME alone
+// isolates nothing there. Pointing LOCALAPPDATA at <homeDir>/.local/lib makes
+// the child resolve exactly getInstallDir(homeDir) on every OS.
+function isolatedHomeEnv(homeDir) {
+  return {
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    LOCALAPPDATA: path.join(homeDir, '.local', 'lib'),
+  };
+}
+
+// The server process writes into homeDir, and Windows refuses to delete a file
+// another process still holds open. rmSync's documented maxRetries/retryDelay
+// cover the window between killing the child and its handles being released;
+// no assertion depends on this, it only keeps teardown from failing the suite.
+function removeHomeDir(homeDir) {
+  fs.rmSync(homeDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 function getProjectStateDir(homeDir, project) {
   return path.join(getInstallDir(homeDir), 'state', project);
 }
@@ -81,7 +102,7 @@ async function createHarness() {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      HOME: homeDir,
+      ...isolatedHomeEnv(homeDir),
       AIGENTRY_TIER: 'pro',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -154,7 +175,7 @@ async function createHarness() {
     },
     cleanup() {
       child.kill('SIGTERM');
-      fs.rmSync(homeDir, { recursive: true, force: true });
+      removeHomeDir(homeDir);
     },
   };
 }
@@ -550,6 +571,15 @@ function writeStubCli(dir, name) {
   // (spawn('gemini', ['-p', prompt])) never closes the child's stdin, so a stub
   // that blocks on `cat` would hang indefinitely. Claude/codex invocations close
   // stdin after writing, but we keep the stub uniform and stdin-agnostic.
+  if (process.platform === 'win32') {
+    // Windows has no shebang mechanism and no exec bit: CreateProcess starts PE
+    // images only, so an extension-less `#!/bin/sh` file can never run here. A
+    // .cmd shim is the Windows equivalent — and is exactly the shape an
+    // npm-installed CLI has on PATH, which is what the product must spawn.
+    const body = `@echo off\r\necho [STUB] ${name} response [AGREE]\r\nexit /b 0\r\n`;
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), body);
+    return;
+  }
   const body = `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
   fs.writeFileSync(path.join(dir, name), body, { mode: 0o755 });
 }
@@ -578,10 +608,13 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      HOME: homeDir,
+      ...isolatedHomeEnv(homeDir),
       AIGENTRY_TIER: 'pro',
       DELIBERATION_CALLER_SPEAKER: callerSpeaker,
-      PATH: `${stubDir}:${process.env.PATH || ''}`,
+      // path.delimiter, not ':' — on Windows it is ';', and a ':'-joined value
+      // glues stubDir onto the first real PATH entry, so neither `where` nor
+      // commandExistsInPath's PATH scan can find the stubs.
+      PATH: [stubDir, process.env.PATH || ''].filter(Boolean).join(path.delimiter),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -649,7 +682,7 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     },
     cleanup() {
       child.kill('SIGTERM');
-      fs.rmSync(homeDir, { recursive: true, force: true });
+      removeHomeDir(homeDir);
     },
   };
 }
