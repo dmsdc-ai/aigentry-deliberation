@@ -1045,6 +1045,58 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     expect(archiveText).toMatch(/\*\*Status:\*\*\s+completed/);
   }, 45000);
 
+  it('test_invalid_first_speaker_keeps_the_token: rejected before discovery and before the token is consumed', async () => {
+    // A call that only got `first_speaker` wrong used to be rejected AFTER the
+    // confirmation token had been read, validated and stamped consumed, so the
+    // corrected retry was answered with `token_already_consumed` (R5-07). The
+    // observable property is exactly that: the same token still works.
+    const { caller, executors } = SELF_TURN_ROLES;
+    const harness = await createSelfTurnHarness({
+      callerSpeaker: caller,
+      stubs: [...executors, caller],
+    });
+    harnesses.push(harness);
+
+    const confirmedToken = await confirmSpeakers(harness, executors);
+    const project = path.basename(REPO_ROOT);
+
+    // `caller` is a real, installed CLI stub — but it is not one of the two
+    // confirmed speakers, so it cannot be the first speaker.
+    const rejected = await harness.callTool('deliberation_start', {
+      topic: `Invalid first speaker ${harness.needle}`,
+      session_id: `firstspeaker-bad-${Date.now()}`,
+      rounds: 1,
+      first_speaker: caller,
+      speakers: executors,
+      selection_token: confirmedToken,
+      require_manual_speakers: true,
+      participant_types: Object.fromEntries(executors.map(s => [s, 'cli'])),
+      auto_synthesize: false,
+    });
+    const rejectedText = getText(rejected);
+    expect(rejectedText).toContain('first_speaker rejected');
+    expect(rejectedText).toContain(caller);
+    expect(rejectedText).not.toContain('Deliberation started');
+
+    // The SAME token must still be accepted: nothing was consumed.
+    const sessionId = `firstspeaker-good-${Date.now()}`;
+    const accepted = await harness.callTool('deliberation_start', {
+      topic: `Valid first speaker ${harness.needle}`,
+      session_id: sessionId,
+      rounds: 1,
+      first_speaker: executors[0],
+      speakers: executors,
+      selection_token: confirmedToken,
+      require_manual_speakers: true,
+      participant_types: Object.fromEntries(executors.map(s => [s, 'cli'])),
+      auto_synthesize: false,
+    });
+    const acceptedText = getText(accepted);
+    expect(acceptedText, acceptedText).toContain('Deliberation started');
+    expect(acceptedText).not.toContain('token_already_consumed');
+    expect(fs.existsSync(getSessionFile(harness.homeDir, project, sessionId))).toBe(true);
+  }, 30000);
+
   it('test_all_speakers_self_match: all speakers match caller — halt cleanly, no synthesis fabrication, status stays active', async () => {
     const harness = await createSelfTurnHarness({
       callerSpeaker: 'claude',

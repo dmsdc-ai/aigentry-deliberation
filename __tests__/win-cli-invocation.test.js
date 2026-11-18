@@ -13,6 +13,8 @@
 // in a CommandLineToArgvW escape is the literal character.
 
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
@@ -26,6 +28,7 @@ import {
   getCliExecArgs,
   getCliHint,
   isApprovedCliCommandName,
+  resolveCliProbeCommand,
   checkCliLiveness,
   terminateCliProcess,
   abandonCliProcess,
@@ -38,6 +41,71 @@ import {
 } from '../lib/speaker-discovery.js';
 import { invokeCliReviewer, isPermanentTurnFailure, boundReviewerStderr } from '../lib/transport.js';
 import { EventEmitter as NodeEventEmitter } from 'node:events';
+import { StringDecoder } from 'node:string_decoder';
+
+// Command resolution with a known answer on every OS.
+//
+// The entry-point cases below have to reach a DEADLINE or an OVERFLOW, which
+// means the builder must first resolve the command — and on Windows that reads
+// the real PATH, so the earlier version of these cases silently depended on
+// what the runner had installed: with no `claude` present the builder answered
+// `E_CLI_NOT_FOUND` before the injected spawn was ever called, and with an npm
+// shim present `viaInterpreter` would have been true where the case said false
+// (R5-09, and the Windows CI failure of r5).
+//
+// So PATH is replaced by a directory containing exactly one CLI for the
+// duration of the case. On Windows the fixture is a `.cmd` shim — the shape npm
+// installs, and the one the product must run through cmd.exe — so the
+// interpreter path is exercised for real and `viaInterpreter` is true by
+// construction. On POSIX the bare name is handed to `spawn` without consulting
+// PATH at all, so resolution cannot fail there and `viaInterpreter` is false by
+// construction; the file is written anyway to keep the two legs symmetric.
+// Nothing is ever executed: every case injects its own spawn.
+async function withCliFixture(name, run) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'win-cli-fixture-'));
+  const savedPath = process.env.PATH;
+  const savedPathExt = process.env.PATHEXT;
+  try {
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(dir, `${name}.cmd`), '@echo off\r\nexit /b 0\r\n');
+      // Pin PATHEXT too, so neither the host's PATH nor its PATHEXT takes part.
+      process.env.PATHEXT = '.COM;.EXE;.BAT;.CMD';
+    } else {
+      fs.writeFileSync(path.join(dir, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    }
+    process.env.PATH = dir;
+    return await run({
+      dir,
+      shimPath: path.join(dir, `${name}.cmd`),
+      // What the product will build for this fixture on this OS.
+      viaInterpreter: process.platform === 'win32',
+    });
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    if (savedPathExt === undefined) delete process.env.PATHEXT; else process.env.PATHEXT = savedPathExt;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A stdio stream that honours setEncoding the way a real one does: a consumer
+// that called it receives DECODED STRINGS, one that did not receives Buffers.
+// Without that, a test cannot tell raw-byte accounting from decoded-length
+// accounting, because every chunk it emits arrives unchanged either way
+// (R5-08).
+function fakeStdioStream() {
+  const stream = new NodeEventEmitter();
+  let decoder = null;
+  stream.setEncoding = (encoding) => { decoder = new StringDecoder(encoding || 'utf8'); };
+  const rawEmit = stream.emit.bind(stream);
+  stream.emit = (event, ...args) => {
+    if (event === 'data' && decoder) {
+      const [chunk] = args;
+      return rawEmit(event, decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')));
+    }
+    return rawEmit(event, ...args);
+  };
+  return stream;
+}
 
 // A child process that is alive and never answers: the only way to reach either
 // deadline without starting a real process.
@@ -48,10 +116,8 @@ function fakeLiveChild({ withStdio = false } = {}) {
   child.signalCode = null;
   child.kill = () => { child.killed = true; return true; };
   if (withStdio) {
-    child.stdout = new NodeEventEmitter();
-    child.stdout.setEncoding = () => {};
-    child.stderr = new NodeEventEmitter();
-    child.stderr.setEncoding = () => {};
+    child.stdout = fakeStdioStream();
+    child.stderr = fakeStdioStream();
     child.stdin = Object.assign(new NodeEventEmitter(), { write: () => true, end: () => {} });
   }
   return child;
@@ -1005,22 +1071,32 @@ describe('nothing but an approved CLI command name is ever spawned', () => {
     }
   });
 
-  it('still probes an ordinary bare command name', async () => {
-    const spawns = [];
-    const child = fakeLiveChild();
-    const live = await checkCliLiveness('codex', {
-      spawnFn: (file, args, options) => { spawns.push({ file, args, options }); setTimeout(() => child.emit('close', 0), 0); return child; },
-    });
-    if (process.platform === 'win32') {
-      // Nothing of that name is on PATH in CI, so the builder refuses first and
-      // the probe is never reached — which is itself the "no spawn" property.
-      expect(live).toBe(false);
-    } else {
+  it('still probes an ordinary bare command name, through the resolution this OS uses', async () => {
+    await withCliFixture('codex', async ({ shimPath, viaInterpreter }) => {
+      const spawns = [];
+      const child = fakeLiveChild();
+      const live = await checkCliLiveness('codex', {
+        spawnFn: (file, args, options) => { spawns.push({ file, args, options }); setTimeout(() => child.emit('close', 0), 0); return child; },
+      });
       expect(live).toBe(true);
       expect(spawns).toHaveLength(1);
-      expect(spawns[0].file).toBe('codex');
-      expect(spawns[0].args).toEqual(['--version']);
-    }
+      if (viaInterpreter) {
+        // Windows: the fixture is a .cmd shim, so the probe goes through the
+        // interpreter and the shim path is on the /c string.
+        expect(spawns[0].file).toBe(resolveCommandInterpreter());
+        expect(spawns[0].args.slice(0, 4)).toEqual(['/d', '/s', '/v:off', '/c']);
+        // Lower-cased: the resolved candidate carries PATHEXT's case (`.CMD`)
+        // while the fixture file is written in npm's (`.cmd`), and NTFS treats
+        // them as the same file.
+        expect(spawns[0].args[4].toLowerCase()).toContain(shimPath.toLowerCase());
+        expect(spawns[0].args[4]).toContain('--version');
+        expect(spawns[0].options).toMatchObject({ windowsVerbatimArguments: true });
+      } else {
+        // POSIX: the bare name goes to spawn, PATH is the OS's business.
+        expect(spawns[0].file).toBe('codex');
+        expect(spawns[0].args).toEqual(['--version']);
+      }
+    });
   });
 
   it('reads the hint table by own property only', () => {
@@ -1032,6 +1108,77 @@ describe('nothing but an approved CLI command name is ever spawned', () => {
     }
     expect(getCliHint('no-such-cli')).toBeUndefined();
     expect(getCliHint(undefined)).toBeUndefined();
+  });
+});
+
+describe('only a known CLI candidate can become a probe target', () => {
+  // `mapParticipantProfiles` turns a `participant_types` override into a CLI
+  // profile with no command, and the start tool used the SPEAKER ID as the probe
+  // target — so a confirmed telepty session called `true` became
+  // `spawn("true", ["--version"])`. A speaker with no candidate at all was also
+  // promoted to CLI by PATH membership (R5-01).
+  const cliCandidate = (speaker, command = speaker) => ({ speaker, type: 'cli', command, label: speaker });
+  const teleptyCandidate = (speaker) => ({ speaker, type: 'telepty', telepty_session_id: speaker, command: 'claude' });
+  const trustedCommands = ['claude', 'codex', 'gemini'];
+
+  it('returns the discovered candidate\'s own command for a known CLI', () => {
+    expect(resolveCliProbeCommand('codex', [cliCandidate('codex')], { trustedCommands })).toBe('codex');
+    // The command comes from the candidate, not from the speaker id.
+    expect(resolveCliProbeCommand('codex-alias', [{ speaker: 'codex-alias', type: 'cli', command: 'codex' }], { trustedCommands })).toBe('codex');
+  });
+
+  it('refuses a speaker whose candidate is not a CLI, whatever its type was overridden to', () => {
+    // The override lives in participant_types and never reaches this function:
+    // the candidate's own type is what decides.
+    expect(resolveCliProbeCommand('true', [teleptyCandidate('true')], { trustedCommands })).toBeNull();
+    expect(resolveCliProbeCommand('web-gemini', [{ speaker: 'web-gemini', type: 'browser' }], { trustedCommands })).toBeNull();
+  });
+
+  it('refuses a speaker that is not a candidate at all, however the name looks', () => {
+    for (const name of ['true', 'sh', 'node', 'codex']) {
+      expect(resolveCliProbeCommand(name, [], { trustedCommands }), name).toBeNull();
+      expect(resolveCliProbeCommand(name, [cliCandidate('other')], { trustedCommands }), name).toBeNull();
+    }
+  });
+
+  it('refuses a CLI candidate whose command is outside the trusted registry or not a bare name', () => {
+    expect(resolveCliProbeCommand('rogue', [cliCandidate('rogue')], { trustedCommands })).toBeNull();
+    expect(resolveCliProbeCommand('codex', [cliCandidate('codex', '/usr/bin/true')], { trustedCommands })).toBeNull();
+    expect(resolveCliProbeCommand('codex', [cliCandidate('codex', 'a b')], { trustedCommands })).toBeNull();
+    expect(resolveCliProbeCommand('', [cliCandidate('codex')], { trustedCommands })).toBeNull();
+    expect(resolveCliProbeCommand('codex', null, { trustedCommands })).toBeNull();
+  });
+
+  it('uses the built-in hint table as the registry when none is injected', () => {
+    // Production path: every default CLI candidate is in the hint table.
+    expect(resolveCliProbeCommand('codex', [cliCandidate('codex')])).toBe('codex');
+    expect(resolveCliProbeCommand('rogue-cli', [cliCandidate('rogue-cli')])).toBeNull();
+  });
+
+  it('nothing is spawned for an override-to-cli name or a disappeared candidate', async () => {
+    // The start tool's decision sequence, with the spawn seam watched: resolve
+    // the authorized command, and only then probe (index.js
+    // `participantProfiles` loop). `true` and `sh` are approved bare names, so
+    // without the authorization step they WOULD be spawned — which is the
+    // finding.
+    const spawns = [];
+    const startTooDecision = async (speaker, candidates) => {
+      const command = resolveCliProbeCommand(speaker, candidates, { trustedCommands });
+      if (!command) return { probed: false, live: false };
+      const live = await checkCliLiveness(command, {
+        spawnFn: (...args) => { spawns.push(args); throw new Error('must not spawn'); },
+      });
+      return { probed: true, live };
+    };
+
+    // A confirmed telepty session called `true`, its type overridden to cli.
+    expect(await startTooDecision('true', [teleptyCandidate('true')])).toEqual({ probed: false, live: false });
+    // A confirmed speaker that is no longer a candidate but is a name on PATH.
+    expect(await startTooDecision('sh', [])).toEqual({ probed: false, live: false });
+    // Both names would otherwise have passed the command-name gate.
+    expect(isApprovedCliCommandName('true')).toBe(true);
+    expect(isApprovedCliCommandName('sh')).toBe(true);
+    expect(spawns).toEqual([]);
   });
 });
 
@@ -1118,63 +1265,105 @@ describe('the deadline of each entry point closes the tree exactly once', () => 
   // each PUBLIC entry point calls it at its deadline (R4-07), and that a
   // reviewer cannot enter abandonment twice through queued output (R4-04).
   it('checkCliLiveness hands each timed-out probe child to the tree terminator', async () => {
-    const children = [];
-    const abandoned = [];
-    const live = await checkCliLiveness('codex', {
-      spawnFn: () => { const child = fakeLiveChild(); children.push(child); return child; },
-      probeTimeoutMs: 1,
-      abandon: (child, opts) => { abandoned.push({ index: children.indexOf(child), opts }); return { unref() {} }; },
+    await withCliFixture('codex', async ({ viaInterpreter }) => {
+      const children = [];
+      const abandoned = [];
+      const live = await checkCliLiveness('codex', {
+        spawnFn: () => { const child = fakeLiveChild(); children.push(child); return child; },
+        probeTimeoutMs: 1,
+        abandon: (child, opts) => { abandoned.push({ index: children.indexOf(child), opts }); return { unref() {} }; },
+      });
+      expect(live).toBe(false);
+      // Two probes run — `--version`, then `--help` — each with its own child,
+      // and each deadline closes ITS OWN tree. On Windows the fixture is a .cmd
+      // shim, so the child each deadline holds is the interpreter and
+      // `viaInterpreter` must say so. (That the second probe starts while the
+      // first tree is still being killed is a stated base difference.)
+      expect(children).toHaveLength(2);
+      expect(abandoned).toEqual([
+        { index: 0, opts: { viaInterpreter } },
+        { index: 1, opts: { viaInterpreter } },
+      ]);
     });
-    expect(live).toBe(false);
-    if (process.platform === 'win32') {
-      // On win32 the builder refuses before any probe (nothing of that name on
-      // PATH in CI), which the "no spawn" case above already asserts.
-      expect(children).toEqual([]);
-      return;
-    }
-    // Two probes run — `--version`, then `--help` — each with its own child, and
-    // each deadline closes ITS OWN tree. (That the second probe starts while the
-    // first tree is still being killed is a stated base difference, not a defect.)
-    expect(children).toHaveLength(2);
-    expect(abandoned).toEqual([
-      { index: 0, opts: { viaInterpreter: false } },
-      { index: 1, opts: { viaInterpreter: false } },
-    ]);
   });
 
   it('invokeCliReviewer hands its timed-out child to the tree terminator, once', async () => {
-    const child = fakeLiveChild({ withStdio: true });
-    const abandoned = [];
-    const pending = invokeCliReviewer('claude', 'review this', 1, {
-      spawnFn: () => child,
-      abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+    await withCliFixture('claude', async ({ viaInterpreter }) => {
+      const child = fakeLiveChild({ withStdio: true });
+      const abandoned = [];
+      const pending = invokeCliReviewer('claude', 'review this', 1, {
+        spawnFn: () => child,
+        abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+      });
+      const result = await pending;
+      expect(result).toEqual({ ok: false, error: 'timeout' });
+      expect(abandoned).toHaveLength(1);
+      // On Windows the reviewer runs through the .cmd shim, so what the deadline
+      // closes is the interpreter's tree — the metadata has to say so.
+      expect(abandoned[0]).toMatchObject({ viaInterpreter, graceMs: 5000 });
+      // Output queued behind the deadline must not start a second termination.
+      child.stdout.emit('data', Buffer.from('late chunk'));
+      child.stderr.emit('data', Buffer.from('late chunk'));
+      expect(abandoned).toHaveLength(1);
     });
-    const result = await pending;
-    expect(result).toEqual({ ok: false, error: 'timeout' });
-    expect(abandoned).toHaveLength(1);
-    expect(abandoned[0]).toMatchObject({ viaInterpreter: false });
-    // Output queued behind the deadline must not start a second termination.
-    child.stdout.emit('data', 'late chunk');
-    child.stderr.emit('data', 'late chunk');
-    expect(abandoned).toHaveLength(1);
   });
 
-  it('abandons a flooding reviewer once, counting BYTES like maxBuffer did', async () => {
-    const child = fakeLiveChild({ withStdio: true });
-    const abandoned = [];
-    const pending = invokeCliReviewer('claude', 'review this', 60000, {
-      spawnFn: () => child,
-      abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+  it('abandons a flooding reviewer once, counting the RAW bytes maxBuffer counted', async () => {
+    await withCliFixture('claude', async ({ viaInterpreter }) => {
+      const child = fakeLiveChild({ withStdio: true });
+      const abandoned = [];
+      const pending = invokeCliReviewer('claude', 'review this', 60000, {
+        spawnFn: () => child,
+        abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+      });
+      // 4 million U+D55C are 4 million UTF-16 units but 12 million UTF-8 bytes:
+      // over the 10 MiB cap the base enforced, under a code-unit counter (R4-05).
+      const chunk = Buffer.from('한'.repeat(4 * 1000 * 1000), 'utf8');
+      expect(chunk.length).toBe(12 * 1000 * 1000);
+      child.stderr.emit('data', chunk);
+      child.stderr.emit('data', chunk);
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe(`stderr exceeded ${10 * 1024 * 1024} bytes`);
+      expect(abandoned).toHaveLength(1);
+      expect(abandoned[0]).toMatchObject({ viaInterpreter });
     });
-    // 4 million U+D55C are 4 million UTF-16 units but 12 million UTF-8 bytes:
-    // over the 10 MiB cap the base enforced, under a code-unit counter (R4-05).
-    const chunk = '한'.repeat(4 * 1000 * 1000);
-    child.stderr.emit('data', chunk);
-    child.stderr.emit('data', chunk);
-    const result = await pending;
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe(`stderr exceeded ${10 * 1024 * 1024} bytes`);
-    expect(abandoned).toHaveLength(1);
+  });
+
+  it('charges a reviewer the bytes it wrote, not what decoding them would cost', async () => {
+    // 4 MiB of isolated 0xff is inside the 10 MiB budget the base enforced, but
+    // each byte decodes to U+FFFD and re-encodes to three — so measuring the
+    // decoded text charged 12 MiB and abandoned a successful review (R5-08).
+    await withCliFixture('claude', async () => {
+      const child = fakeLiveChild({ withStdio: true });
+      const abandoned = [];
+      const pending = invokeCliReviewer('claude', 'review this', 60000, {
+        spawnFn: () => child,
+        abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+      });
+      child.stderr.emit('data', Buffer.alloc(4 * 1024 * 1024, 0xff));
+      child.stdout.emit('data', Buffer.from('the review text'));
+      child.emit('close', 0);
+      const result = await pending;
+      expect(result).toEqual({ ok: true, response: 'the review text' });
+      expect(abandoned).toEqual([]);
+    });
+  });
+
+  it('decodes a multi-byte character split across two chunks exactly once', async () => {
+    await withCliFixture('claude', async () => {
+      const child = fakeLiveChild({ withStdio: true });
+      const pending = invokeCliReviewer('claude', 'review this', 60000, {
+        spawnFn: () => child,
+        abandonFn: () => ({ unref() {} }),
+      });
+      const text = Buffer.from('답변: 한글', 'utf8');
+      child.stdout.emit('data', text.subarray(0, 5));   // mid-character
+      child.stdout.emit('data', text.subarray(5));
+      child.emit('close', 0);
+      const result = await pending;
+      expect(result).toEqual({ ok: true, response: '답변: 한글' });
+    });
   });
 });
 

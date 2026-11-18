@@ -117,6 +117,7 @@ import {
   cliDispatchRefusal,
   cliDispatchArgs,
   getCliHint,
+  resolveCliProbeCommand,
   buildCliInvocation,
   terminateCliProcess,
   discoverLocalCliSpeakers,
@@ -1070,6 +1071,34 @@ server.tool(
       };
     }
 
+    // `first_speaker` only chooses who starts; it cannot add a participant
+    // (R4-01). When the caller supplied the participant list, that membership is
+    // knowable right here — so check it BEFORE discovery runs and before the
+    // confirmation token is read and consumed, otherwise a call that only got
+    // first_speaker wrong burns the token and the corrected retry is answered
+    // with `token_already_consumed` (R5-07). The same check runs again after
+    // the selected set is final, which is where the auto-discovery path is
+    // covered.
+    const firstSpeakerProvided = first_speaker !== undefined
+      && first_speaker !== null
+      && String(first_speaker).trim() !== "";
+    const requestedFirstSpeaker = firstSpeakerProvided ? normalizeSpeaker(first_speaker) : null;
+    if (firstSpeakerProvided && Array.isArray(speakers) && speakers.length > 0) {
+      const requestedSpeakers = dedupeSpeakers(speakers);
+      if (!requestedFirstSpeaker || !requestedSpeakers.includes(requestedFirstSpeaker)) {
+        appendRuntimeLog(
+          "WARN",
+          `FIRST_SPEAKER_REJECTED: ${sessionId} | pre-discovery | requested=${JSON.stringify(String(first_speaker).slice(0, 80))} | speakers=${requestedSpeakers.join(",") || "(none)"}`,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **first_speaker rejected**: \`${String(first_speaker).slice(0, 80)}\` is not one of the speakers you passed.\n\nSpeakers: ${requestedSpeakers.map(s => `\`${s}\``).join(", ") || "(none)"}\n\nfirst_speaker only chooses who starts; it cannot add a participant. Nothing was consumed — the same \`selection_token\` still works, so re-run with a first_speaker from that list (or add it to \`speakers\` and re-confirm).`,
+          }],
+        };
+      }
+    }
+
     const candidateSnapshot = await collectSpeakerCandidates({
       include_cli: true,
       include_browser: includeBrowserSpeakers,
@@ -1173,9 +1202,12 @@ server.tool(
     // non-web participant used to be handed to checkCliLiveness, which on POSIX
     // spawns the name as given. `first_speaker: "/usr/bin/true"` therefore
     // started an unrelated local executable with `--version` (R4-01). Refuse
-    // before the value is used for anything.
-    if (first_speaker !== undefined && first_speaker !== null && String(first_speaker).trim() !== "") {
-      const requestedFirst = normalizeSpeaker(first_speaker);
+    // before the value is used for anything. (The manual-selection case is
+    // already refused before discovery and before the token is consumed — see
+    // the pre-discovery check above, R5-07; this is where the auto-discovery
+    // path is covered, and it is the last word for both.)
+    if (firstSpeakerProvided) {
+      const requestedFirst = requestedFirstSpeaker;
       if (!requestedFirst || !selectedSpeakers.includes(requestedFirst)) {
         appendRuntimeLog(
           "WARN",
@@ -1233,7 +1265,19 @@ server.tool(
     const nonLiveCli = [];
     for (const profile of participantProfiles) {
       if (profile.type !== "cli") continue;
-      const command = profile.command || profile.speaker;
+      // The probe target comes from the DISCOVERED candidate of a known CLI —
+      // never from the speaker id and never from a `participant_types`
+      // override, which only chooses a transport (R5-01). A speaker without
+      // such a candidate is reported as unverifiable and is never spawned.
+      const command = resolveCliProbeCommand(profile.speaker, candidateSnapshot.candidates);
+      if (!command) {
+        appendRuntimeLog(
+          "INFO",
+          `CLI_PROBE_NOT_AUTHORIZED: ${sessionId} | speaker=${JSON.stringify(String(profile.speaker).slice(0, 80))} | not a discovered CLI candidate; no probe was run`,
+        );
+        nonLiveCli.push({ speaker: profile.speaker, refusal: null, unverifiable: true });
+        continue;
+      }
       if (!(await checkCliLiveness(command))) {
         nonLiveCli.push({ speaker: profile.speaker, refusal: cliDispatchRefusal(command) });
       }
@@ -1242,9 +1286,13 @@ server.tool(
     // cli_auto_turn will handle runtime errors per-turn.
     let detectWarningLiveness = "";
     if (nonLiveCli.length > 0) {
-      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(({ speaker: s, refusal }) => refusal
-        ? `  - \`${s}\` ❌ ${refusal.code}: ${refusal.reason}`
-        : `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
+      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(({ speaker: s, refusal, unverifiable }) => {
+        if (refusal) return `  - \`${s}\` ❌ ${refusal.code}: ${refusal.reason}`;
+        // Not a discovered CLI candidate, so nothing was probed: say that
+        // rather than implying a failed execution check (R5-01).
+        if (unverifiable) return `  - \`${s}\` ❌ not a known CLI candidate — no executability check was run (a participant_types override chooses a transport, not a program)`;
+        return `  - \`${s}\` ❌`;
+      }).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
     }
 
     const participantMode = hasManualSpeakers
