@@ -115,6 +115,8 @@ import {
   resolveCliCandidates,
   checkCliLiveness,
   cliDispatchRefusal,
+  cliDispatchArgs,
+  getCliHint,
   buildCliInvocation,
   terminateCliProcess,
   discoverLocalCliSpeakers,
@@ -1164,6 +1166,30 @@ server.tool(
       || normalizeSpeaker(hasManualSpeakers ? selectedSpeakers?.[0] : callerSpeaker)
       || normalizeSpeaker(selectedSpeakers?.[0])
       || DEFAULT_SPEAKERS[0];
+
+    // `first_speaker` is an independent argument: the selection token validates
+    // `speakers` only, and buildSpeakerOrder PREPENDS this value, so without
+    // this check a name that was never confirmed joins the session — and every
+    // non-web participant used to be handed to checkCliLiveness, which on POSIX
+    // spawns the name as given. `first_speaker: "/usr/bin/true"` therefore
+    // started an unrelated local executable with `--version` (R4-01). Refuse
+    // before the value is used for anything.
+    if (first_speaker !== undefined && first_speaker !== null && String(first_speaker).trim() !== "") {
+      const requestedFirst = normalizeSpeaker(first_speaker);
+      if (!requestedFirst || !selectedSpeakers.includes(requestedFirst)) {
+        appendRuntimeLog(
+          "WARN",
+          `FIRST_SPEAKER_REJECTED: ${sessionId} | requested=${JSON.stringify(String(first_speaker).slice(0, 80))} | selected=${selectedSpeakers.join(",") || "(none)"}`,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **first_speaker rejected**: \`${String(first_speaker).slice(0, 80)}\` is not one of the ${hasManualSpeakers ? "confirmed" : "discovered"} speakers.\n\nSelected speakers: ${selectedSpeakers.map(s => `\`${s}\``).join(", ") || "(none)"}\n\nfirst_speaker only chooses who starts; it cannot add a participant. Pass it inside \`speakers\` (and re-confirm the selection) if it should take part.`,
+          }],
+        };
+      }
+    }
+
     let speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
 
     // ADR-264 §2.1 — selection token has already been stamped `consumed_at`
@@ -1192,20 +1218,24 @@ server.tool(
       };
     }
 
-    // Liveness check: verify CLI speakers are actually executable
-    const cliSpeakersInOrder = speakerOrder.filter(s => !s.startsWith("web-"));
+    // Liveness check: verify CLI speakers are actually executable.
+    //
+    // Classify the participants FIRST and probe only the ones classified `cli`,
+    // by the command that classification approved. The old filter was
+    // `speakerOrder` minus `web-*`, which also held telepty session ids, manual
+    // participant names and — before the check above — an unconfirmed
+    // `first_speaker`, every one of them handed to a process spawn (R4-01).
+    // Participant type is also the right test for whether a refusal code is
+    // meaningful: hint-table membership missed CLIs that are not in the table
+    // (an installed `qwen`) and accepted names inherited from Object.prototype
+    // (R4-06).
+    const participantProfiles = mapParticipantProfiles(speakerOrder, candidateSnapshot.candidates, participant_types);
     const nonLiveCli = [];
-    for (const s of cliSpeakersInOrder) {
-      if (!(await checkCliLiveness(s))) {
-        // A pre-spawn refusal (E_CLI_*) is permanent on this platform, not a
-        // transient "not running right now", so say which it is and why.
-        //
-        // Only for speakers that are actually CLIs: this list is
-        // `speakerOrder` minus `web-*`, so it also holds telepty session ids
-        // and manual speaker names, for which a CLI refusal code would be a
-        // misleading answer to a question that was never asked (R3-11).
-        const isCli = Boolean(CLI_INVOCATION_HINTS[s]);
-        nonLiveCli.push({ speaker: s, refusal: isCli ? cliDispatchRefusal(s) : null });
+    for (const profile of participantProfiles) {
+      if (profile.type !== "cli") continue;
+      const command = profile.command || profile.speaker;
+      if (!(await checkCliLiveness(command))) {
+        nonLiveCli.push({ speaker: profile.speaker, refusal: cliDispatchRefusal(command) });
       }
     }
     // Warn but proceed — user explicitly selected these speakers.
@@ -1233,7 +1263,7 @@ server.tool(
       current_round: 1,
       current_speaker: normalizedFirstSpeaker,
       speakers: speakerOrder,
-      participant_profiles: mapParticipantProfiles(speakerOrder, candidateSnapshot.candidates, participant_types),
+      participant_profiles: participantProfiles,
       log: [],
       synthesis: null,
       pending_turn_id: generateTurnId(),
@@ -1876,7 +1906,8 @@ server.tool(
     }
 
     const speakerPriorTurns = state.log.filter(e => e.speaker === speaker).length;
-    const hint = CLI_INVOCATION_HINTS[speaker];
+    // Own-property lookup (R4-06): `speaker` is caller-supplied.
+    const hint = getCliHint(speaker);
     if (!hint) {
       return { content: [{ type: "text", text: t(`No CLI invocation info for speaker "${speaker}". This speaker is not registered in CLI_INVOCATION_HINTS.`, `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.`, state?.lang) }] };
     }
@@ -1967,12 +1998,17 @@ server.tool(
         let invocation;
         let stdinPrompt = null;
         switch (speaker) {
+          // Same single definition the liveness probe models and the
+          // auto-handoff path uses, so this tool can no longer be refused by a
+          // check it would have passed, or pass one it would have failed
+          // (R4-02). For codex that adds the hint table's defaultModel, which
+          // runCliAutoTurnCore has always passed.
           case "claude":
-            invocation = buildCliInvocation("claude", getCliExecArgs("claude"));
+            invocation = buildCliInvocation("claude", cliDispatchArgs("claude"));
             stdinPrompt = turnPrompt;
             break;
           case "codex":
-            invocation = buildCliInvocation("codex", getCliExecArgs("codex"));
+            invocation = buildCliInvocation("codex", cliDispatchArgs("codex"));
             stdinPrompt = turnPrompt;
             break;
           case "gemini":

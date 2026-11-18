@@ -24,6 +24,8 @@ import {
   cliDispatchRefusal,
   cliDispatchArgs,
   getCliExecArgs,
+  getCliHint,
+  isApprovedCliCommandName,
   checkCliLiveness,
   terminateCliProcess,
   abandonCliProcess,
@@ -35,6 +37,25 @@ import {
   CLI_INVOCATION_HINTS,
 } from '../lib/speaker-discovery.js';
 import { invokeCliReviewer, isPermanentTurnFailure, boundReviewerStderr } from '../lib/transport.js';
+import { EventEmitter as NodeEventEmitter } from 'node:events';
+
+// A child process that is alive and never answers: the only way to reach either
+// deadline without starting a real process.
+function fakeLiveChild({ withStdio = false } = {}) {
+  const child = new NodeEventEmitter();
+  child.pid = 4242;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => { child.killed = true; return true; };
+  if (withStdio) {
+    child.stdout = new NodeEventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr = new NodeEventEmitter();
+    child.stderr.setEncoding = () => {};
+    child.stdin = Object.assign(new NodeEventEmitter(), { write: () => true, end: () => {} });
+  }
+  return child;
+}
 
 const INTERP = String.raw`C:\Windows\System32\cmd.exe`;
 const CODEX_SHIM = String.raw`C:\tools\codex.cmd`;
@@ -622,6 +643,8 @@ describe('isPermanentCliFailure — a pre-spawn refusal must not be retried', ()
       buildWindowsCliInvocation('claude', [], { resolvedPath: String.raw`t\claude.cmd`, interpreter: INTERP }),
       buildWindowsCliInvocation('codex', ['exec'], { resolvedPath: CODEX_SHIM, interpreter: 'cmd.exe' }),
       buildWindowsCliInvocation('gemini', [], { promptArgs: ['-p', 'hi'], promptText: 'hi', resolvedPath: GEMINI_SHIM, interpreter: INTERP }),
+      // r5: the trailing promptArgs entry must BE the prompt text (R4-03).
+      buildWindowsCliInvocation('codex', [], { promptArgs: ['--prompt', 'hi', '--tail'], promptText: 'hi', resolvedPath: CODEX_SHIM, interpreter: INTERP }),
       buildWindowsCliInvocation('codex', ['a\nb'], { resolvedPath: CODEX_SHIM, interpreter: INTERP }),
       buildWindowsCliInvocation('codex', ['a%b'], { resolvedPath: CODEX_SHIM, interpreter: INTERP }),
       buildWindowsCliInvocation('codex', ['a'.repeat(9000)], { resolvedPath: CODEX_SHIM, interpreter: INTERP }),
@@ -956,6 +979,205 @@ describe('abandonCliProcess — what both async deadlines do', () => {
 // holding the inherited pipes and the provider session. Being abandonable
 // means being asynchronous, which is what these two cases pin; the termination
 // itself is terminateCliProcess, pinned above.
+describe('nothing but an approved CLI command name is ever spawned', () => {
+  // `deliberation_start`'s `first_speaker`, a telepty session id and a manual
+  // participant name all reach checkCliLiveness, and on POSIX buildCliInvocation
+  // passes the name straight to spawn — so `first_speaker: "/usr/bin/true"`
+  // started an unrelated local executable with `--version` (R4-01).
+  it('classifies what an approved command name is', () => {
+    for (const good of ['codex', 'claude', 'gpt-4.1', 'a_b', 'q']) {
+      expect(isApprovedCliCommandName(good), good).toBe(true);
+    }
+    for (const bad of [
+      '/usr/bin/true', './true', '../true', String.raw`C:\tools\x.exe`,
+      'a b', 'a;b', 'a&b', 'a|b', 'a$(b)', 'a\nb', '', null, undefined, 42, {},
+    ]) {
+      expect(isApprovedCliCommandName(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('refuses a path-like or token-like speaker name without spawning anything', async () => {
+    for (const name of ['/usr/bin/true', './true', '../../bin/sh', String.raw`C:\Windows\System32\cmd.exe`, 'a b', 'rm -rf /', '']) {
+      const spawns = [];
+      const live = await checkCliLiveness(name, { spawnFn: (...args) => { spawns.push(args); throw new Error('must not spawn'); } });
+      expect(live, name).toBe(false);
+      expect(spawns, name).toEqual([]);
+    }
+  });
+
+  it('still probes an ordinary bare command name', async () => {
+    const spawns = [];
+    const child = fakeLiveChild();
+    const live = await checkCliLiveness('codex', {
+      spawnFn: (file, args, options) => { spawns.push({ file, args, options }); setTimeout(() => child.emit('close', 0), 0); return child; },
+    });
+    if (process.platform === 'win32') {
+      // Nothing of that name is on PATH in CI, so the builder refuses first and
+      // the probe is never reached — which is itself the "no spawn" property.
+      expect(live).toBe(false);
+    } else {
+      expect(live).toBe(true);
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0].file).toBe('codex');
+      expect(spawns[0].args).toEqual(['--version']);
+    }
+  });
+
+  it('reads the hint table by own property only', () => {
+    expect(getCliHint('codex')).toBe(CLI_INVOCATION_HINTS.codex);
+    // A plain-object read returns Object.prototype members for these names.
+    for (const inherited of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(CLI_INVOCATION_HINTS[inherited], inherited).toBeTruthy();
+      expect(getCliHint(inherited), inherited).toBeUndefined();
+    }
+    expect(getCliHint('no-such-cli')).toBeUndefined();
+    expect(getCliHint(undefined)).toBeUndefined();
+  });
+});
+
+describe('the probe models the dispatch it gates, per CLI', () => {
+  // A stdinMode CLI is dispatched with `args` only and its prompt on stdin, so
+  // a synthetic prompt flag in the probe is 11 escaped units the real line never
+  // carries — enough to refuse an installation the dispatch would have run
+  // (R4-02).
+  const shimFor = (n) => `C:\\${'a'.repeat(n)}\\codex.cmd`;
+
+  it('asks a stdin CLI the question with no prompt argv at all', () => {
+    // A path chosen so the REAL vector lands on exactly 8191 and one extra
+    // escaped flag would not (8202): on the previous round the probe refused
+    // this installation while the dispatch ran it.
+    const longShim = shimFor(7888);
+    const realLine = buildWindowsCliInvocation('codex', cliDispatchArgs('codex'), {
+      resolvedPath: longShim,
+      interpreter: INTERP,
+    });
+    expect(realLine.ok).toBe(true);
+    expect(cliDispatchRefusal('codex', { platform: 'win32', resolvedPath: longShim, interpreter: INTERP })).toBeNull();
+  });
+
+  it('still asks an argv-prompt CLI whether prompt text in argv is refused', () => {
+    const refusal = cliDispatchRefusal('gemini', { platform: 'win32', resolvedPath: GEMINI_SHIM, interpreter: INTERP });
+    expect(refusal?.code).toBe('E_CLI_PROMPT_ARGV_REQUIRED');
+  });
+
+  it('refuses a stdin CLI whose own arguments do not fit, as the dispatch would', () => {
+    const tooLong = shimFor(7889);
+    expect(buildWindowsCliInvocation('codex', cliDispatchArgs('codex'), {
+      resolvedPath: tooLong, interpreter: INTERP,
+    }).code).toBe('E_CLI_ARG_TOO_LONG');
+    expect(cliDispatchRefusal('codex', { platform: 'win32', resolvedPath: tooLong, interpreter: INTERP })?.code)
+      .toBe('E_CLI_ARG_TOO_LONG');
+  });
+});
+
+describe('promptArgs: the prompt is the trailing entry, by position', () => {
+  it('keeps a flag that happens to equal the prompt text', () => {
+    // Value-based filtering removed every matching entry, so `["-p", "-p"]`
+    // with promptText "-p" lost the flag as well (R4-03).
+    const inv = buildWindowsCliInvocation('codex', [], {
+      promptArgs: ['-p', '-p'],
+      promptText: '-p',
+      resolvedPath: CODEX_SHIM,
+      interpreter: INTERP,
+    });
+    expect(inv.ok).toBe(true);
+    expect(inv.args[4]).toBe(String.raw`"^"C:\tools\codex.cmd^" ^^^"-p^^^""`);
+    expect(inv.stdinPrompt).toBe('-p');
+  });
+
+  it('fails closed when the trailing entry is not the prompt text', () => {
+    // Otherwise the mismatched entries are treated as flags — which is prompt
+    // text on the interpreter line, the one thing the builder exists to prevent.
+    const inv = buildWindowsCliInvocation('codex', [], {
+      promptArgs: ['--prompt', 'the real prompt', '--extra'],
+      promptText: 'the real prompt',
+      resolvedPath: CODEX_SHIM,
+      interpreter: INTERP,
+    });
+    expect(inv.ok).toBe(false);
+    expect(inv.code).toBe('E_CLI_PROMPT_ARGV_SHAPE');
+    expect(CLI_INVOCATION_FAILURE_CODES).toContain('E_CLI_PROMPT_ARGV_SHAPE');
+    expect(isPermanentCliFailure(`CLI "codex" cannot be executed: ${inv.code} — ${inv.reason}`)).toBe(true);
+  });
+
+  it('is unaffected when the prompt text is the only prompt entry', () => {
+    const inv = buildWindowsCliInvocation('codex', ['exec'], {
+      promptArgs: ['just the prompt'],
+      promptText: 'just the prompt',
+      resolvedPath: CODEX_SHIM,
+      interpreter: INTERP,
+    });
+    expect(inv.ok).toBe(true);
+    expect(inv.args[4]).toBe(String.raw`"^"C:\tools\codex.cmd^" ^^^"exec^^^""`);
+    expect(inv.stdinPrompt).toBe('just the prompt');
+  });
+});
+
+describe('the deadline of each entry point closes the tree exactly once', () => {
+  // The helper cases below prove what abandonCliProcess does; these prove that
+  // each PUBLIC entry point calls it at its deadline (R4-07), and that a
+  // reviewer cannot enter abandonment twice through queued output (R4-04).
+  it('checkCliLiveness hands each timed-out probe child to the tree terminator', async () => {
+    const children = [];
+    const abandoned = [];
+    const live = await checkCliLiveness('codex', {
+      spawnFn: () => { const child = fakeLiveChild(); children.push(child); return child; },
+      probeTimeoutMs: 1,
+      abandon: (child, opts) => { abandoned.push({ index: children.indexOf(child), opts }); return { unref() {} }; },
+    });
+    expect(live).toBe(false);
+    if (process.platform === 'win32') {
+      // On win32 the builder refuses before any probe (nothing of that name on
+      // PATH in CI), which the "no spawn" case above already asserts.
+      expect(children).toEqual([]);
+      return;
+    }
+    // Two probes run — `--version`, then `--help` — each with its own child, and
+    // each deadline closes ITS OWN tree. (That the second probe starts while the
+    // first tree is still being killed is a stated base difference, not a defect.)
+    expect(children).toHaveLength(2);
+    expect(abandoned).toEqual([
+      { index: 0, opts: { viaInterpreter: false } },
+      { index: 1, opts: { viaInterpreter: false } },
+    ]);
+  });
+
+  it('invokeCliReviewer hands its timed-out child to the tree terminator, once', async () => {
+    const child = fakeLiveChild({ withStdio: true });
+    const abandoned = [];
+    const pending = invokeCliReviewer('claude', 'review this', 1, {
+      spawnFn: () => child,
+      abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+    });
+    const result = await pending;
+    expect(result).toEqual({ ok: false, error: 'timeout' });
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]).toMatchObject({ viaInterpreter: false });
+    // Output queued behind the deadline must not start a second termination.
+    child.stdout.emit('data', 'late chunk');
+    child.stderr.emit('data', 'late chunk');
+    expect(abandoned).toHaveLength(1);
+  });
+
+  it('abandons a flooding reviewer once, counting BYTES like maxBuffer did', async () => {
+    const child = fakeLiveChild({ withStdio: true });
+    const abandoned = [];
+    const pending = invokeCliReviewer('claude', 'review this', 60000, {
+      spawnFn: () => child,
+      abandonFn: (c, opts) => { abandoned.push(opts); return { unref() {} }; },
+    });
+    // 4 million U+D55C are 4 million UTF-16 units but 12 million UTF-8 bytes:
+    // over the 10 MiB cap the base enforced, under a code-unit counter (R4-05).
+    const chunk = '한'.repeat(4 * 1000 * 1000);
+    child.stderr.emit('data', chunk);
+    child.stderr.emit('data', chunk);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(`stderr exceeded ${10 * 1024 * 1024} bytes`);
+    expect(abandoned).toHaveLength(1);
+  });
+});
+
 describe('the CLI deadlines are ours, so the whole tree can be closed at them', () => {
   const ABSENT = 'no-such-cli-xyz-r2';
 

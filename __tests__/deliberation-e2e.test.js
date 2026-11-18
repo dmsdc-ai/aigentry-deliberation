@@ -646,6 +646,17 @@ function expectCodexArgvFidelity(archiveText) {
   expect(expected).toContain('sandbox_mode="read-only"');
   for (const line of lines) {
     const argv = JSON.parse(line.slice(prefix.length));
+    // Two independent literal requirements on what the child RECEIVED, kept
+    // alongside the exact comparison: `expected` comes from the same product
+    // function the dispatcher uses, so if that function ever stopped emitting
+    // these, the equality alone would still pass (R4-08). These do not depend
+    // on it.
+    expect(argv).toContain('approval_policy="never"');
+    expect(argv).toContain('sandbox_mode="read-only"');
+    expect(argv[0]).toBe('exec');
+    expect(argv.at(-1)).toBe('-');
+    // …and exactly what the product meant to send, element for element,
+    // including order and count (R3-07).
     expect(argv).toEqual(expected);
   }
 }
