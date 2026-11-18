@@ -4,6 +4,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTeleptySynthesisEnvelope } from '../index.js';
+// The vector the product means to send to codex, from the product itself, so
+// the argv oracle below compares against one definition instead of a copy.
+import { cliDispatchArgs } from '../lib/speaker-discovery.js';
 
 const REPO_ROOT = process.cwd();
 const SERVER_ENTRY = path.join(REPO_ROOT, 'index.js');
@@ -44,6 +47,34 @@ function getInstallDir(homeDir) {
   return path.join(homeDir, '.local', 'lib', 'mcp-deliberation');
 }
 
+// The server resolves its install dir from os.homedir() + LOCALAPPDATA
+// (index.js:287-291). os.homedir() reads $HOME on POSIX but USERPROFILE on
+// Windows, and the Windows install dir is rooted at LOCALAPPDATA, so HOME alone
+// isolates nothing there. Pointing LOCALAPPDATA at <homeDir>/.local/lib makes
+// the child resolve exactly getInstallDir(homeDir) on every OS.
+//
+// Scope note: the redirect is process-wide, so every win32 LOCALAPPDATA reader
+// in the child moves with it — install.js:28, lib/transport.js:79,
+// doctor.js:426 (all state roots, which is the point) and the Chrome
+// user-data-dir probe at lib/speaker-discovery.js:838. The browser probe is
+// inert in these tests (include_browser_speakers/include_browser are false), but
+// a future Windows browser test must not inherit that as a surprise.
+function isolatedHomeEnv(homeDir) {
+  return {
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    LOCALAPPDATA: path.join(homeDir, '.local', 'lib'),
+  };
+}
+
+// The server process writes into homeDir, and Windows refuses to delete a file
+// another process still holds open. rmSync's documented maxRetries/retryDelay
+// cover the window between killing the child and its handles being released;
+// no assertion depends on this, it only keeps teardown from failing the suite.
+function removeHomeDir(homeDir) {
+  fs.rmSync(homeDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 function getProjectStateDir(homeDir, project) {
   return path.join(getInstallDir(homeDir), 'state', project);
 }
@@ -81,7 +112,7 @@ async function createHarness() {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      HOME: homeDir,
+      ...isolatedHomeEnv(homeDir),
       AIGENTRY_TIER: 'pro',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -154,7 +185,7 @@ async function createHarness() {
     },
     cleanup() {
       child.kill('SIGTERM');
-      fs.rmSync(homeDir, { recursive: true, force: true });
+      removeHomeDir(homeDir);
     },
   };
 }
@@ -545,13 +576,147 @@ describe('deliberation e2e flows', () => {
 // and advances to the next speaker. When ALL speakers match the caller, a pre-flight
 // check halts auto-handoff cleanly without fabricating synthesis.
 
-function writeStubCli(dir, name) {
-  // Stub must exit immediately without reading stdin. The gemini invocation path
-  // (spawn('gemini', ['-p', prompt])) never closes the child's stdin, so a stub
-  // that blocks on `cat` would hang indefinitely. Claude/codex invocations close
-  // stdin after writing, but we keep the stub uniform and stdin-agnostic.
-  const body = `#!/bin/sh\necho '[STUB] ${name} response [AGREE]'\nexit 0\n`;
-  fs.writeFileSync(path.join(dir, name), body, { mode: 0o755 });
+// Which CLI plays which role in the self_turn cases. The caller-identity speaker
+// is never spawned — that is the property under test — while the other two are
+// dispatched for real, so they must be CLIs the product can actually dispatch on
+// the running platform. On Windows an npm-style CLI is a `.cmd` shim, and the
+// product refuses to put prompt text on a command-interpreter line
+// (E_CLI_PROMPT_ARGV_REQUIRED) — and since r2 does not even advertise such a
+// CLI as live — so there the executing pair is the two CLIs that take their
+// prompt on stdin and `gemini`, whose branch passes the prompt in argv, is the
+// never-spawned caller instead.
+const SELF_TURN_ROLES = process.platform === 'win32'
+  ? { caller: 'gemini', executors: ['claude', 'codex'] }
+  : { caller: 'claude', executors: ['codex', 'gemini'] };
+
+// The channel each CLI's prompt must arrive on: claude and codex are fed on
+// stdin at every call site, the gemini branch passes it in argv.
+const PROMPT_CHANNEL = { claude: 'stdin', codex: 'stdin', gemini: 'argv' };
+
+function expectPromptChannels(archiveText, speakers) {
+  for (const speaker of speakers) {
+    const channel = PROMPT_CHANNEL[speaker];
+    const line = `[PROMPT_CHANNEL] ${speaker} argv=${channel === 'argv' ? 'yes' : 'no'} stdin=${channel === 'stdin' ? 'yes' : 'no'}`;
+    // Once per round. Requiring both rounds also means a single line written by
+    // the synthesis pass (which runs through the same channel contract) cannot
+    // satisfy this on its own.
+    expect(archiveText.split(line).length - 1).toBeGreaterThanOrEqual(2);
+  }
+}
+
+// codex is dispatched with `-c approval_policy="never"` (and two more of the
+// same shape), one argument carrying quotes, `=` and the characters the
+// 2n+1-backslash rule is about. On Windows that argument is escaped twice —
+// once for cmd.exe's own parse and once for the `.cmd` shim's `%*` re-parse —
+// so what the stub received is the only independent oracle for the escaping in
+// this change. On POSIX it is passed through untouched and must be identical,
+// which is exactly what makes the assertion portable.
+function expectCodexArgvFidelity(archiveText) {
+  // Read the Debate Log section ONLY. `## Synthesis` can be the documented
+  // fallback (lib/transport.js runAutoHandoff), which renders every turn as
+  // `**<speaker>**: <content.substring(0, 200)>...` — and the codex turn's
+  // content is 235 characters, so that copy of this very line is cut mid-JSON
+  // and carries a literal `...`. Scanning the whole archive therefore hits a
+  // truncated copy first (Synthesis is written before the Debate Log) and
+  // `JSON.parse` dies on it. The Debate Log is the one place `lib/session.js`
+  // stateToMarkdown writes `${entry.content}` verbatim, so it is the only
+  // honest source for a byte-level assertion. `lastIndexOf` because the marker
+  // must be the archive's own heading, not a line of CLI output.
+  const marker = '## Debate Log';
+  const at = archiveText.lastIndexOf(marker);
+  expect(at, `archive has no "${marker}" section`).toBeGreaterThanOrEqual(0);
+  const debateLog = archiveText.slice(at + marker.length);
+
+  const prefix = '[STUB_ARGV] codex ';
+  const lines = debateLog.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith(prefix));
+  expect(lines.length, debateLog).toBeGreaterThanOrEqual(2); // once per round
+  // Element-for-element, order and count included — not set membership of a few
+  // elements, which would let a dropped, duplicated, reordered or mangled
+  // argument through (R3-07). `cliDispatchArgs('codex')` is what
+  // runCliAutoTurnCore builds (getCliExecArgs + the hint's defaultModel), so
+  // this also checks on every leg that the vector liveness models is the vector
+  // the dispatcher really sent.
+  const expected = cliDispatchArgs('codex');
+  // …and that the vector still contains the arguments that make this a
+  // round-trip proof at all: quotes, `=` and the 2n+1-backslash rule, escaped
+  // twice on Windows and passed through untouched on POSIX.
+  expect(expected).toContain('approval_policy="never"');
+  expect(expected).toContain('sandbox_mode="read-only"');
+  for (const line of lines) {
+    const argv = JSON.parse(line.slice(prefix.length));
+    // Two independent literal requirements on what the child RECEIVED, kept
+    // alongside the exact comparison: `expected` comes from the same product
+    // function the dispatcher uses, so if that function ever stopped emitting
+    // these, the equality alone would still pass (R4-08). These do not depend
+    // on it.
+    expect(argv).toContain('approval_policy="never"');
+    expect(argv).toContain('sandbox_mode="read-only"');
+    expect(argv[0]).toBe('exec');
+    expect(argv.at(-1)).toBe('-');
+    // …and exactly what the product meant to send, element for element,
+    // including order and count (R3-07).
+    expect(argv).toEqual(expected);
+  }
+}
+
+function writeStubCli(dir, name, needle) {
+  // The stub reports which channel the prompt arrived on, so the self_turn cases
+  // can assert that it arrived at all: a build that dropped it, or put it in
+  // argv where the product promises stdin, fails on that line instead of passing
+  // silently. The stub must also never block the turn — the argv-prompt branch
+  // (gemini, and the generic branch) never writes or closes the child's stdin,
+  // so waiting for EOF would hang until the CLI timeout; it reports what has
+  // arrived after a short grace period instead.
+  //
+  // It also echoes its argv verbatim as JSON. Channel presence alone cannot see
+  // a mangled argument: the needle is alphanumeric, while codex's real flags
+  // carry quotes, `=` and the 2n+1 backslash rule through BOTH cmd.exe passes on
+  // the Windows legs. Echoing argv makes those legs prove the round-trip they
+  // are already performing (expectCodexArgvFidelity below).
+  const scriptPath = path.join(dir, `${name}.stub.cjs`);
+  fs.writeFileSync(scriptPath, [
+    `const NAME = ${JSON.stringify(name)};`,
+    `const NEEDLE = ${JSON.stringify(needle)};`,
+    `const argv = process.argv.slice(2).join(' ');`,
+    `const has = (text) => (text.includes(NEEDLE) ? 'yes' : 'no');`,
+    `let stdin = '';`,
+    `let done = false;`,
+    `const finish = () => {`,
+    `  if (done) return;`,
+    `  done = true;`,
+    `  process.stdout.write('[STUB] ' + NAME + ' response [AGREE]\\n'`,
+    `    + '[PROMPT_CHANNEL] ' + NAME + ' argv=' + has(argv) + ' stdin=' + has(stdin) + '\\n'`,
+    `    + '[STUB_ARGV] ' + NAME + ' ' + JSON.stringify(process.argv.slice(2)) + '\\n');`,
+    `  process.exit(0);`,
+    `};`,
+    `process.stdin.setEncoding('utf8');`,
+    `process.stdin.on('data', (chunk) => { stdin += chunk; });`,
+    `process.stdin.on('end', finish);`,
+    `process.stdin.on('error', finish);`,
+    `const grace = setTimeout(finish, 400);`,
+    `if (typeof grace.unref === 'function') grace.unref();`,
+    ``,
+  ].join('\n'));
+
+  if (process.platform === 'win32') {
+    // Windows has no shebang mechanism and no exec bit: CreateProcess starts PE
+    // images only, so an extension-less `#!/bin/sh` file can never run here. A
+    // .cmd shim that forwards `%*` is the Windows equivalent — and is exactly
+    // the shape an npm-installed CLI has on PATH, which is what the product must
+    // spawn, including the second argument parse that forwarding implies.
+    fs.writeFileSync(
+      path.join(dir, `${name}.cmd`),
+      `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\n`,
+    );
+    return;
+  }
+  fs.writeFileSync(
+    path.join(dir, name),
+    `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`,
+    { mode: 0o755 },
+  );
 }
 
 function extractToken(text, label) {
@@ -570,18 +735,27 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     include_browser_speakers: false,
   }, null, 2));
 
-  const stubDir = path.join(homeDir, 'stubs');
+  // The space in the directory name is deliberate: it proves the product keeps
+  // the resolved shim path a single token on a Windows command line, and that a
+  // PATH entry containing a space still resolves on POSIX.
+  const stubDir = path.join(homeDir, 'stub dir');
   fs.mkdirSync(stubDir, { recursive: true });
-  for (const name of stubs) writeStubCli(stubDir, name);
+  // The needle travels in the topic, so it reaches every speaker's turn prompt
+  // (buildClipboardTurnPrompt emits `topic: …`) whichever channel carries it.
+  const needle = `PROMPT-NEEDLE-${Math.random().toString(36).slice(2, 10)}`;
+  for (const name of stubs) writeStubCli(stubDir, name, needle);
 
   const child = spawn(process.execPath, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      HOME: homeDir,
+      ...isolatedHomeEnv(homeDir),
       AIGENTRY_TIER: 'pro',
       DELIBERATION_CALLER_SPEAKER: callerSpeaker,
-      PATH: `${stubDir}:${process.env.PATH || ''}`,
+      // path.delimiter, not ':' — on Windows it is ';', and a ':'-joined value
+      // glues stubDir onto the first real PATH entry, so neither `where` nor
+      // commandExistsInPath's PATH scan can find the stubs.
+      PATH: [stubDir, process.env.PATH || ''].filter(Boolean).join(path.delimiter),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -637,6 +811,7 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
 
   return {
     homeDir,
+    needle,
     child,
     stderr: () => stderrBuffer,
     serverExit: () => serverExit,
@@ -649,7 +824,7 @@ async function createSelfTurnHarness({ callerSpeaker, stubs }) {
     },
     cleanup() {
       child.kill('SIGTERM');
-      fs.rmSync(homeDir, { recursive: true, force: true });
+      removeHomeDir(homeDir);
     },
   };
 }
@@ -765,25 +940,27 @@ function parseArchiveLog(markdown) {
 
 describe('runAutoHandoff self_turn skip (batch path)', () => {
   it('test_self_turn_skip_first_speaker: caller matches first speaker — advances via placeholder, non-matching speakers execute', async () => {
+    const { caller, executors } = SELF_TURN_ROLES;
+    const speakers = [caller, ...executors];
     const harness = await createSelfTurnHarness({
-      callerSpeaker: 'claude',
-      stubs: ['claude', 'codex', 'gemini'],
+      callerSpeaker: caller,
+      stubs: speakers,
     });
     harnesses.push(harness);
 
-    const confirmedToken = await confirmSpeakers(harness, ['claude', 'codex', 'gemini']);
+    const confirmedToken = await confirmSpeakers(harness, speakers);
     const sessionId = `selfturn-first-${Date.now()}`;
     const project = path.basename(REPO_ROOT);
 
     const startResult = await harness.callTool('deliberation_start', {
-      topic: 'Self-turn first speaker skip test',
+      topic: `Self-turn first speaker skip test ${harness.needle}`,
       session_id: sessionId,
       rounds: 2,
-      first_speaker: 'claude',
-      speakers: ['claude', 'codex', 'gemini'],
+      first_speaker: caller,
+      speakers,
       selection_token: confirmedToken,
       require_manual_speakers: true,
-      participant_types: { claude: 'cli', codex: 'cli', gemini: 'cli' },
+      participant_types: Object.fromEntries(speakers.map(s => [s, 'cli'])),
       ordering_strategy: 'cyclic',
       auto_synthesize: true,
     });
@@ -793,18 +970,26 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
     const archiveText = fs.readFileSync(archivePath, 'utf-8');
     const entries = parseArchiveLog(archiveText);
     // Round bookkeeping: 3 speakers × 2 rounds = 6 log entries total
-    // Of those, 2 are [SELF_TURN_SKIP] placeholders for claude (first speaker, skipped each round),
-    // and 4 are real stub responses from codex and gemini.
+    // Of those, 2 are [SELF_TURN_SKIP] placeholders for the caller (first speaker,
+    // skipped each round), and 4 are real stub responses from the other two.
     const selfTurnEntries = entries.filter(e => e.channel_used === 'self_turn_skip');
     expect(selfTurnEntries).toHaveLength(2);
-    expect(selfTurnEntries.every(e => e.speaker === 'claude')).toBe(true);
+    expect(selfTurnEntries.every(e => e.speaker === caller)).toBe(true);
     expect(selfTurnEntries.every(e => e.fallback_reason === 'caller_identity_match')).toBe(true);
-    expect(archiveText).toContain('[SELF_TURN_SKIP] Speaker claude');
+    expect(archiveText).toContain(`[SELF_TURN_SKIP] Speaker ${caller}`);
 
     const realEntries = entries.filter(e => e.channel_used !== 'self_turn_skip');
     expect(realEntries).toHaveLength(4);
     const realSpeakers = realEntries.map(e => e.speaker).sort();
-    expect(realSpeakers).toEqual(['codex', 'codex', 'gemini', 'gemini']);
+    expect(realSpeakers).toEqual([...executors, ...executors].sort());
+
+    // Each executed CLI must have received the prompt on the channel the product
+    // promises for it, and not on the other one. The stub reports what it
+    // actually got, so a dropped or misrouted prompt fails here.
+    expectPromptChannels(archiveText, executors);
+    // …and the argv it got must be byte-identical to what the product meant to
+    // send, which on Windows means both cmd.exe passes round-tripped.
+    expectCodexArgvFidelity(archiveText);
 
     // Status must be completed (archive includes completed status header)
     expect(archiveText).toMatch(/\*\*Status:\*\*\s+completed/);
@@ -813,25 +998,28 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
   }, 45000);
 
   it('test_self_turn_skip_middle_speaker: caller matches middle speaker — middle skipped, outer speakers execute both rounds', async () => {
+    const { caller, executors } = SELF_TURN_ROLES;
+    // Caller in the middle, an executing speaker on each side of it.
+    const speakers = [executors[0], caller, executors[1]];
     const harness = await createSelfTurnHarness({
-      callerSpeaker: 'claude',
-      stubs: ['claude', 'codex', 'gemini'],
+      callerSpeaker: caller,
+      stubs: speakers,
     });
     harnesses.push(harness);
 
-    const confirmedToken = await confirmSpeakers(harness, ['codex', 'claude', 'gemini']);
+    const confirmedToken = await confirmSpeakers(harness, speakers);
     const sessionId = `selfturn-mid-${Date.now()}`;
     const project = path.basename(REPO_ROOT);
 
     const startResult = await harness.callTool('deliberation_start', {
-      topic: 'Self-turn middle speaker skip test',
+      topic: `Self-turn middle speaker skip test ${harness.needle}`,
       session_id: sessionId,
       rounds: 2,
-      first_speaker: 'codex',
-      speakers: ['codex', 'claude', 'gemini'],
+      first_speaker: executors[0],
+      speakers,
       selection_token: confirmedToken,
       require_manual_speakers: true,
-      participant_types: { codex: 'cli', claude: 'cli', gemini: 'cli' },
+      participant_types: Object.fromEntries(speakers.map(s => [s, 'cli'])),
       ordering_strategy: 'cyclic',
       auto_synthesize: true,
     });
@@ -843,16 +1031,71 @@ describe('runAutoHandoff self_turn skip (batch path)', () => {
 
     const selfTurnEntries = entries.filter(e => e.channel_used === 'self_turn_skip');
     expect(selfTurnEntries).toHaveLength(2);
-    expect(selfTurnEntries.every(e => e.speaker === 'claude')).toBe(true);
-    expect(archiveText).toContain('[SELF_TURN_SKIP] Speaker claude');
+    expect(selfTurnEntries.every(e => e.speaker === caller)).toBe(true);
+    expect(archiveText).toContain(`[SELF_TURN_SKIP] Speaker ${caller}`);
 
     const realEntries = entries.filter(e => e.channel_used !== 'self_turn_skip');
     expect(realEntries).toHaveLength(4);
     const realSpeakers = realEntries.map(e => e.speaker).sort();
-    expect(realSpeakers).toEqual(['codex', 'codex', 'gemini', 'gemini']);
+    expect(realSpeakers).toEqual([...executors, ...executors].sort());
+
+    expectPromptChannels(archiveText, executors);
+    expectCodexArgvFidelity(archiveText);
 
     expect(archiveText).toMatch(/\*\*Status:\*\*\s+completed/);
   }, 45000);
+
+  it('test_invalid_first_speaker_keeps_the_token: rejected before discovery and before the token is consumed', async () => {
+    // A call that only got `first_speaker` wrong used to be rejected AFTER the
+    // confirmation token had been read, validated and stamped consumed, so the
+    // corrected retry was answered with `token_already_consumed` (R5-07). The
+    // observable property is exactly that: the same token still works.
+    const { caller, executors } = SELF_TURN_ROLES;
+    const harness = await createSelfTurnHarness({
+      callerSpeaker: caller,
+      stubs: [...executors, caller],
+    });
+    harnesses.push(harness);
+
+    const confirmedToken = await confirmSpeakers(harness, executors);
+    const project = path.basename(REPO_ROOT);
+
+    // `caller` is a real, installed CLI stub — but it is not one of the two
+    // confirmed speakers, so it cannot be the first speaker.
+    const rejected = await harness.callTool('deliberation_start', {
+      topic: `Invalid first speaker ${harness.needle}`,
+      session_id: `firstspeaker-bad-${Date.now()}`,
+      rounds: 1,
+      first_speaker: caller,
+      speakers: executors,
+      selection_token: confirmedToken,
+      require_manual_speakers: true,
+      participant_types: Object.fromEntries(executors.map(s => [s, 'cli'])),
+      auto_synthesize: false,
+    });
+    const rejectedText = getText(rejected);
+    expect(rejectedText).toContain('first_speaker rejected');
+    expect(rejectedText).toContain(caller);
+    expect(rejectedText).not.toContain('Deliberation started');
+
+    // The SAME token must still be accepted: nothing was consumed.
+    const sessionId = `firstspeaker-good-${Date.now()}`;
+    const accepted = await harness.callTool('deliberation_start', {
+      topic: `Valid first speaker ${harness.needle}`,
+      session_id: sessionId,
+      rounds: 1,
+      first_speaker: executors[0],
+      speakers: executors,
+      selection_token: confirmedToken,
+      require_manual_speakers: true,
+      participant_types: Object.fromEntries(executors.map(s => [s, 'cli'])),
+      auto_synthesize: false,
+    });
+    const acceptedText = getText(accepted);
+    expect(acceptedText, acceptedText).toContain('Deliberation started');
+    expect(acceptedText).not.toContain('token_already_consumed');
+    expect(fs.existsSync(getSessionFile(harness.homeDir, project, sessionId))).toBe(true);
+  }, 30000);
 
   it('test_all_speakers_self_match: all speakers match caller — halt cleanly, no synthesis fabrication, status stays active', async () => {
     const harness = await createSelfTurnHarness({

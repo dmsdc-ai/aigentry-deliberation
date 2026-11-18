@@ -114,6 +114,12 @@ import {
   // CLI discovery
   resolveCliCandidates,
   checkCliLiveness,
+  cliDispatchRefusal,
+  cliDispatchArgs,
+  getCliHint,
+  resolveCliProbeCommand,
+  buildCliInvocation,
+  terminateCliProcess,
   discoverLocalCliSpeakers,
   detectCallerSpeaker,
   // URL / domain helpers
@@ -1065,6 +1071,34 @@ server.tool(
       };
     }
 
+    // `first_speaker` only chooses who starts; it cannot add a participant
+    // (R4-01). When the caller supplied the participant list, that membership is
+    // knowable right here — so check it BEFORE discovery runs and before the
+    // confirmation token is read and consumed, otherwise a call that only got
+    // first_speaker wrong burns the token and the corrected retry is answered
+    // with `token_already_consumed` (R5-07). The same check runs again after
+    // the selected set is final, which is where the auto-discovery path is
+    // covered.
+    const firstSpeakerProvided = first_speaker !== undefined
+      && first_speaker !== null
+      && String(first_speaker).trim() !== "";
+    const requestedFirstSpeaker = firstSpeakerProvided ? normalizeSpeaker(first_speaker) : null;
+    if (firstSpeakerProvided && Array.isArray(speakers) && speakers.length > 0) {
+      const requestedSpeakers = dedupeSpeakers(speakers);
+      if (!requestedFirstSpeaker || !requestedSpeakers.includes(requestedFirstSpeaker)) {
+        appendRuntimeLog(
+          "WARN",
+          `FIRST_SPEAKER_REJECTED: ${sessionId} | pre-discovery | requested=${JSON.stringify(String(first_speaker).slice(0, 80))} | speakers=${requestedSpeakers.join(",") || "(none)"}`,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **first_speaker rejected**: \`${String(first_speaker).slice(0, 80)}\` is not one of the speakers you passed.\n\nSpeakers: ${requestedSpeakers.map(s => `\`${s}\``).join(", ") || "(none)"}\n\nfirst_speaker only chooses who starts; it cannot add a participant. Nothing was consumed — the same \`selection_token\` still works, so re-run with a first_speaker from that list (or add it to \`speakers\` and re-confirm).`,
+          }],
+        };
+      }
+    }
+
     const candidateSnapshot = await collectSpeakerCandidates({
       include_cli: true,
       include_browser: includeBrowserSpeakers,
@@ -1161,6 +1195,33 @@ server.tool(
       || normalizeSpeaker(hasManualSpeakers ? selectedSpeakers?.[0] : callerSpeaker)
       || normalizeSpeaker(selectedSpeakers?.[0])
       || DEFAULT_SPEAKERS[0];
+
+    // `first_speaker` is an independent argument: the selection token validates
+    // `speakers` only, and buildSpeakerOrder PREPENDS this value, so without
+    // this check a name that was never confirmed joins the session — and every
+    // non-web participant used to be handed to checkCliLiveness, which on POSIX
+    // spawns the name as given. `first_speaker: "/usr/bin/true"` therefore
+    // started an unrelated local executable with `--version` (R4-01). Refuse
+    // before the value is used for anything. (The manual-selection case is
+    // already refused before discovery and before the token is consumed — see
+    // the pre-discovery check above, R5-07; this is where the auto-discovery
+    // path is covered, and it is the last word for both.)
+    if (firstSpeakerProvided) {
+      const requestedFirst = requestedFirstSpeaker;
+      if (!requestedFirst || !selectedSpeakers.includes(requestedFirst)) {
+        appendRuntimeLog(
+          "WARN",
+          `FIRST_SPEAKER_REJECTED: ${sessionId} | requested=${JSON.stringify(String(first_speaker).slice(0, 80))} | selected=${selectedSpeakers.join(",") || "(none)"}`,
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `❌ **first_speaker rejected**: \`${String(first_speaker).slice(0, 80)}\` is not one of the ${hasManualSpeakers ? "confirmed" : "discovered"} speakers.\n\nSelected speakers: ${selectedSpeakers.map(s => `\`${s}\``).join(", ") || "(none)"}\n\nfirst_speaker only chooses who starts; it cannot add a participant. Pass it inside \`speakers\` (and re-confirm the selection) if it should take part.`,
+          }],
+        };
+      }
+    }
+
     let speakerOrder = buildSpeakerOrder(selectedSpeakers, normalizedFirstSpeaker, "front");
 
     // ADR-264 §2.1 — selection token has already been stamped `consumed_at`
@@ -1189,19 +1250,49 @@ server.tool(
       };
     }
 
-    // Liveness check: verify CLI speakers are actually executable
-    const cliSpeakersInOrder = speakerOrder.filter(s => !s.startsWith("web-"));
+    // Liveness check: verify CLI speakers are actually executable.
+    //
+    // Classify the participants FIRST and probe only the ones classified `cli`,
+    // by the command that classification approved. The old filter was
+    // `speakerOrder` minus `web-*`, which also held telepty session ids, manual
+    // participant names and — before the check above — an unconfirmed
+    // `first_speaker`, every one of them handed to a process spawn (R4-01).
+    // Participant type is also the right test for whether a refusal code is
+    // meaningful: hint-table membership missed CLIs that are not in the table
+    // (an installed `qwen`) and accepted names inherited from Object.prototype
+    // (R4-06).
+    const participantProfiles = mapParticipantProfiles(speakerOrder, candidateSnapshot.candidates, participant_types);
     const nonLiveCli = [];
-    for (const s of cliSpeakersInOrder) {
-      if (!checkCliLiveness(s)) {
-        nonLiveCli.push(s);
+    for (const profile of participantProfiles) {
+      if (profile.type !== "cli") continue;
+      // The probe target comes from the DISCOVERED candidate of a known CLI —
+      // never from the speaker id and never from a `participant_types`
+      // override, which only chooses a transport (R5-01). A speaker without
+      // such a candidate is reported as unverifiable and is never spawned.
+      const command = resolveCliProbeCommand(profile.speaker, candidateSnapshot.candidates);
+      if (!command) {
+        appendRuntimeLog(
+          "INFO",
+          `CLI_PROBE_NOT_AUTHORIZED: ${sessionId} | speaker=${JSON.stringify(String(profile.speaker).slice(0, 80))} | not a discovered CLI candidate; no probe was run`,
+        );
+        nonLiveCli.push({ speaker: profile.speaker, refusal: null, unverifiable: true });
+        continue;
+      }
+      if (!(await checkCliLiveness(command))) {
+        nonLiveCli.push({ speaker: profile.speaker, refusal: cliDispatchRefusal(command) });
       }
     }
     // Warn but proceed — user explicitly selected these speakers.
     // cli_auto_turn will handle runtime errors per-turn.
     let detectWarningLiveness = "";
     if (nonLiveCli.length > 0) {
-      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(s => `  - \`${s}\` ❌`).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
+      detectWarningLiveness = `\n\n⚠️ Some CLIs are currently not executable but proceeding per user selection:\n${nonLiveCli.map(({ speaker: s, refusal, unverifiable }) => {
+        if (refusal) return `  - \`${s}\` ❌ ${refusal.code}: ${refusal.reason}`;
+        // Not a discovered CLI candidate, so nothing was probed: say that
+        // rather than implying a failed execution check (R5-01).
+        if (unverifiable) return `  - \`${s}\` ❌ not a known CLI candidate — no executability check was run (a participant_types override chooses a transport, not a program)`;
+        return `  - \`${s}\` ❌`;
+      }).join("\n")}\nCLI execution will be retried during turns. Errors will be reported on failure.`;
     }
 
     const participantMode = hasManualSpeakers
@@ -1220,7 +1311,7 @@ server.tool(
       current_round: 1,
       current_speaker: normalizedFirstSpeaker,
       speakers: speakerOrder,
-      participant_profiles: mapParticipantProfiles(speakerOrder, candidateSnapshot.candidates, participant_types),
+      participant_profiles: participantProfiles,
       log: [],
       synthesis: null,
       pending_turn_id: generateTurnId(),
@@ -1863,13 +1954,21 @@ server.tool(
     }
 
     const speakerPriorTurns = state.log.filter(e => e.speaker === speaker).length;
-    const hint = CLI_INVOCATION_HINTS[speaker];
+    // Own-property lookup (R4-06): `speaker` is caller-supplied.
+    const hint = getCliHint(speaker);
     if (!hint) {
       return { content: [{ type: "text", text: t(`No CLI invocation info for speaker "${speaker}". This speaker is not registered in CLI_INVOCATION_HINTS.`, `speaker "${speaker}"에 대한 CLI 호출 정보가 없습니다. CLI_INVOCATION_HINTS에 등록되지 않은 speaker입니다.`, state?.lang) }] };
     }
 
-    // Check CLI liveness
-    if (!checkCliLiveness(hint.cmd)) {
+    // Check CLI liveness. A refusal this platform decided before spawning
+    // anything is reported with its code and reason instead of a generic
+    // "not installed" — retrying it would produce the identical refusal.
+    if (!(await checkCliLiveness(hint.cmd))) {
+      const refusal = cliDispatchRefusal(hint.cmd);
+      if (refusal) {
+        appendRuntimeLog("ERROR", `CLI_TURN_UNEXECUTABLE: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | ${refusal.code}: ${refusal.reason}`);
+        return { content: [{ type: "text", text: t(`❌ CLI "${hint.cmd}" cannot be executed on this platform: ${refusal.code}\n\n${refusal.reason}`, `❌ 이 플랫폼에서 CLI "${hint.cmd}"를 실행할 수 없습니다: ${refusal.code}\n\n${refusal.reason}`, state?.lang) }] };
+      }
       return { content: [{ type: "text", text: t(`❌ CLI "${hint.cmd}" is not installed or cannot be executed.`, `❌ CLI "${hint.cmd}"가 설치되어 있지 않거나 실행할 수 없습니다.`, state?.lang) }] };
     }
 
@@ -1941,36 +2040,63 @@ server.tool(
           reject(error);
         };
 
-        // Different invocation patterns per CLI
+        // Different invocation patterns per CLI. buildCliInvocation resolves the
+        // bare command name (a Windows `.cmd` shim is unreachable otherwise) and
+        // reports when the prompt has to travel on stdin instead of argv.
+        let invocation;
+        let stdinPrompt = null;
         switch (speaker) {
+          // Same single definition the liveness probe models and the
+          // auto-handoff path uses, so this tool can no longer be refused by a
+          // check it would have passed, or pass one it would have failed
+          // (R4-02). For codex that adds the hint table's defaultModel, which
+          // runCliAutoTurnCore has always passed.
           case "claude":
-            child = spawn("claude", getCliExecArgs("claude"), spawnOpts);
-            writeCliStdin(child, turnPrompt);
+            invocation = buildCliInvocation("claude", cliDispatchArgs("claude"));
+            stdinPrompt = turnPrompt;
             break;
           case "codex":
-            child = spawn("codex", getCliExecArgs("codex"), spawnOpts);
-            writeCliStdin(child, turnPrompt);
+            invocation = buildCliInvocation("codex", cliDispatchArgs("codex"));
+            stdinPrompt = turnPrompt;
             break;
           case "gemini":
-            child = spawn("gemini", ["-p", turnPrompt], spawnOpts);
+            invocation = buildCliInvocation("gemini", [], {
+              promptArgs: ["-p", turnPrompt],
+              promptText: turnPrompt,
+            });
+            stdinPrompt = invocation.stdinPrompt;
             break;
           default: {
             // Generic: try command with prompt as argument
             const flags = hint.flags ? hint.flags.split(/\s+/) : [];
-            child = spawn(hint.cmd, [...flags, turnPrompt], spawnOpts);
+            invocation = buildCliInvocation(hint.cmd, [], {
+              promptArgs: [...flags, turnPrompt],
+              promptText: turnPrompt,
+            });
+            stdinPrompt = invocation.stdinPrompt;
             break;
           }
         }
 
+        if (!invocation.ok) {
+          appendRuntimeLog("ERROR", `CLI_TURN_UNEXECUTABLE: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | ${invocation.code}: ${invocation.reason}`);
+          rejectOnce(new Error(`CLI "${hint.cmd}" cannot be executed: ${invocation.code} — ${invocation.reason}`));
+          return;
+        }
+        if (invocation.promptMovedToStdin) {
+          appendRuntimeLog("WARN", `CLI_WIN_SHIM_STDIN: ${resolved} | speaker: ${speaker} | ${invocation.shimPath} | prompt moved from argv to stdin (a command-interpreter line cannot carry it)`);
+        }
+        child = spawn(invocation.file, invocation.args, { ...spawnOpts, ...invocation.options });
+        if (stdinPrompt !== null) writeCliStdin(child, stdinPrompt);
+
         const timer = setTimeout(() => {
           appendRuntimeLog("WARN", `CLI_TURN_TIMEOUT: ${resolved} | speaker: ${speaker} | cli: ${hint.cmd} | timeout: ${effectiveTimeout}s | prompt_len: ${turnPrompt.length} | prior_turns: ${speakerPriorTurns}`);
-          try {
-            child.kill("SIGTERM");
-          } catch { /* ignore */ }
+          // On a Windows shim the child is the interpreter, so the CLI
+          // underneath it has to be terminated too (see terminateCliProcess).
+          const viaInterpreter = invocation.viaInterpreter === true;
+          terminateCliProcess(child, { viaInterpreter });
           forceKillTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch { /* ignore */ }
+            terminateCliProcess(child, { viaInterpreter, force: true });
           }, 5000);
           if (typeof forceKillTimer.unref === "function") {
             forceKillTimer.unref();
@@ -2829,7 +2955,9 @@ server.tool(
       const reviewerTimeout = Math.min(softBudgetPerReviewer, remaining);
 
       const prompt = buildReviewPrompt(context, question, completedReviews);
-      const result = invokeCliReviewer(reviewer, prompt, reviewerTimeout);
+      // Async since r2: the reviewer deadline has to be enforced by us so a
+      // Windows shim's whole process tree can be closed at it (R2-02).
+      const result = await invokeCliReviewer(reviewer, prompt, reviewerTimeout);
 
       if (result.ok) {
         const entry = { reviewer, response: result.response };

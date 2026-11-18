@@ -41,6 +41,14 @@ function runDoctor(homeDir, env = {}) {
       env: {
         ...process.env,
         HOME: homeDir,
+        // doctor.js resolves the install dir it measures from LOCALAPPDATA on
+        // Windows (doctor.js:424-429) and reads HOME || USERPROFILE for the
+        // config paths (doctor.js:25). HOME alone therefore leaves the
+        // footprint check pointed at the real %LOCALAPPDATA%\mcp-deliberation.
+        // Pointing LOCALAPPDATA at <homeDir>/.local/lib makes doctor resolve
+        // exactly getInstallDir(homeDir) on every OS.
+        USERPROFILE: homeDir,
+        LOCALAPPDATA: path.join(homeDir, '.local', 'lib'),
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

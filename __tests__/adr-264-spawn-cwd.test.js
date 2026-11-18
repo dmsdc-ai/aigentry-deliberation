@@ -8,6 +8,14 @@ import os from 'os';
 import path from 'path';
 import { validateSpawnCwd, sanitizeSessionDirName, ensureSessionSubdir } from '../index.js';
 
+// A directory that exists on the running platform and is outside any temp
+// prefix. "/etc" is absolute on Windows too (drive-relative), but it does not
+// exist there, so validateSpawnCwd would stop at the realpath step with
+// E_CWD_NOT_FOUND before reaching the prefix check this case is about.
+const EXISTING_DIR_OUTSIDE_PREFIXES = process.platform === 'win32'
+  ? (process.env.SystemRoot || 'C:\\Windows')
+  : '/etc';
+
 describe('ADR-264 §2.3 — validateSpawnCwd (M6 security matrix)', () => {
   let tmpRoot;
   let symlinkOutside;
@@ -37,8 +45,9 @@ describe('ADR-264 §2.3 — validateSpawnCwd (M6 security matrix)', () => {
   });
 
   it('rejects path outside allowedPrefixes with E_CWD_NOT_ALLOWED', () => {
-    // "/etc" exists on Darwin/Linux but is outside the configured prefixes.
-    const result = validateSpawnCwd('/etc', { allowedPrefixes: [tmpRoot] });
+    // "/etc" on Darwin/Linux, %SystemRoot% on Windows: a directory that exists
+    // but is outside the configured prefixes.
+    const result = validateSpawnCwd(EXISTING_DIR_OUTSIDE_PREFIXES, { allowedPrefixes: [tmpRoot] });
     expect(result.ok).toBe(false);
     expect(result.code).toBe('E_CWD_NOT_ALLOWED');
   });
