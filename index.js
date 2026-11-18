@@ -204,6 +204,7 @@ import {
   // Browser port singleton
   getBrowserPort,
   // CLI auto-turn helpers
+  writeCliStdin,
   getCliAutoTurnTimeoutSec,
   getCliExecArgs,
   buildCliAutoTurnFailureText,
@@ -1944,13 +1945,11 @@ server.tool(
         switch (speaker) {
           case "claude":
             child = spawn("claude", getCliExecArgs("claude"), spawnOpts);
-            child.stdin.write(turnPrompt);
-            child.stdin.end();
+            writeCliStdin(child, turnPrompt);
             break;
           case "codex":
             child = spawn("codex", getCliExecArgs("codex"), spawnOpts);
-            child.stdin.write(turnPrompt);
-            child.stdin.end();
+            writeCliStdin(child, turnPrompt);
             break;
           case "gemini":
             child = spawn("gemini", ["-p", turnPrompt], spawnOpts);
